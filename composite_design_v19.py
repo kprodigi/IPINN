@@ -476,8 +476,8 @@ def refresh_device() -> None:
 
 
 def _data_loader_kwargs() -> Dict[str, Any]:
-    """DataLoader options: faster host→GPU copies when CUDA is active."""
-    return {"pin_memory": DEVICE.type == "cuda"}
+    """DataLoader options: pin_memory disabled because to_tensor() places data on DEVICE directly."""
+    return {"pin_memory": False}
 
 
 @dataclass
@@ -838,7 +838,7 @@ def build_targets(df: pd.DataFrame, scaler_out: StandardScaler) -> np.ndarray:
 
 
 def to_tensor(x: np.ndarray) -> torch.Tensor:
-    """Convert numpy array to torch tensor (zero-copy when already float32 C-contiguous)."""
+    """Convert numpy array to torch tensor on the global DEVICE."""
     if x.dtype == np.float32 and x.flags["C_CONTIGUOUS"]:
         return torch.from_numpy(x).to(device=DEVICE, dtype=torch.float32)
     return torch.tensor(x, dtype=torch.float32, device=DEVICE)
