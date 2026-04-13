@@ -625,13 +625,25 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
         cfg_ddns["w_bc"] = 0.0
         cfg_ddns["colloc_ratio"] = 0.0
         
+        # Random-protocol Hard-PINN: stabilised training required for
+        # boundary enforcement layer E = g(d)*NN(x).  Uses same architecture
+        # family as the unseen config but without angle-extrapolation flags.
         cfg_hard = {
-            "optimizer": "adamw", "lr": 1.5e-4, "weight_decay": 1e-5,
-            "batch_size": 64, "hidden_layers": [32, 32], "dropout": 0.0,
-            "softplus_beta": 8.0, "smoothl1_beta": 0.05,
-            "w_load": 3.0, "w_energy": 3.0, "epochs": 2000, "eval_every": 20,
-            "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
-            "sched_patience": 40, "sched_factor": 0.7,
+            "optimizer": "adam", "lr": 1e-4, "weight_decay": 3e-3,
+            "batch_size": 16, "hidden_layers": [128, 64], "dropout": 0.005,
+            "softplus_beta": 11.0, "smoothl1_beta": 0.1,
+            "w_load": 5.0, "w_energy": 5.0,
+            "grad_clip": 1.0,
+            "w_monotonicity": 5.0,
+            "w_angle_smooth": 0.01,
+            "smooth_delta_deg": 1.5,
+            "colloc_ratio": 2.0,
+            "extrapolate_angles": False,
+            "epochs": 800, "eval_every": 20,
+            "earlystop_patience_evals": 20, "earlystop_min_delta": 1e-5,
+            "warmup_epochs": 60,
+            "swa_pct": 0.20,
+            "eta_min": 1e-6,
         }
     
     cfg = {"ddns": cfg_ddns, "soft": cfg_soft, "hard": cfg_hard}[approach]
