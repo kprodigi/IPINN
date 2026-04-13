@@ -599,6 +599,7 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
             "grad_clip": 0.9834,
             "w_monotonicity": 7.719974,
             "w_angle_smooth": 0.016094,
+            "w_curvature": 0.001285,
             "smooth_delta_deg": 1.9329,
             "colloc_ratio": 3.5795,
             "extrapolate_angles": True,
@@ -937,15 +938,16 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
     # Collocation-based regularizer setup (mirrors train_hard)
     w_mono = cfg.get("w_monotonicity", 0.0)
     w_smooth = cfg.get("w_angle_smooth", 0.0)
+    w_curv = cfg.get("w_curvature", 0.0)
     smooth_delta = cfg.get("smooth_delta_deg", 1.5)
     colloc_ratio = cfg.get("colloc_ratio", 0.0)
     extrapolate = cfg.get("extrapolate_angles", True)
 
     colloc_sampler = None
-    if w_mono > 0 or w_smooth > 0:
+    if w_mono > 0 or w_smooth > 0 or w_curv > 0:
         colloc_sampler = create_collocation_sampler(df_all, scaler_disp, enc, extrapolate_angles=extrapolate)
         logger.info(f"    Collocation regularizers active: w_mono={w_mono}, w_smooth={w_smooth}, "
-                    f"colloc_ratio={colloc_ratio}, extrapolate={extrapolate}")
+                    f"w_curv={w_curv}, colloc_ratio={colloc_ratio}, extrapolate={extrapolate}")
     
     models = []
     train_r2_scores = []
@@ -1019,6 +1021,10 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
                         n_smooth = max(1, n_colloc // 2)
                         loss_smooth = angle_smoothness_loss_hard(model, colloc_sampler, n_smooth, rng, params, smooth_delta)
                         loss = loss + w_smooth * loss_smooth
+
+                    if w_curv > 0:
+                        loss_curv = curvature_regularization_hard(Xc, model, params)
+                        loss = loss + w_curv * loss_curv
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.get("grad_clip", 1.0))
@@ -1459,6 +1465,22 @@ def monotonicity_loss_hard(Xin: torch.Tensor, model: nn.Module,
     return torch.mean(F.relu(-F_phys) ** 2)
 
 
+def curvature_regularization_hard(Xin: torch.Tensor, model: nn.Module,
+                                   params: ScalingParams) -> torch.Tensor:
+    """Second-order curvature regularization for Hard-PINN: penalize |d²E/dd²|.
+
+    Smooths the force curve F = dE/dd by penalizing its derivative dF/dd = d²E/dd².
+    This helps Hard-PINN avoid oscillatory force predictions in data-sparse regions
+    (like the unseen 60° angle), encouraging physically plausible smooth curves.
+    """
+    Xin_g = Xin.requires_grad_(True) if not Xin.requires_grad else Xin
+    E_n = model(Xin_g)
+    dE = torch.autograd.grad(E_n.sum(), Xin_g, create_graph=True)[0]
+    F_col = dE[:, U_COL:U_COL + 1]
+    d2E = torch.autograd.grad(F_col.sum(), Xin_g, create_graph=True)[0]
+    d2E_dd = d2E[:, U_COL:U_COL + 1]
+    return torch.mean(d2E_dd ** 2)
+
 
 def _val_checkpoint_score(r2_load: float, r2_energy: float) -> float:
     """Mean validation load/energy R² for checkpointing, LR schedule, and early stopping."""
@@ -1788,12 +1810,13 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     # Physics regularization setup
     w_mono = cfg.get("w_monotonicity", 0.0)
     w_smooth = cfg.get("w_angle_smooth", 0.0)
+    w_curv = cfg.get("w_curvature", 0.0)
     smooth_delta = cfg.get("smooth_delta_deg", 1.5)
     colloc_ratio = cfg.get("colloc_ratio", 0.0)
 
     # Create collocation sampler if any physics regularization is active
     colloc_sampler = None
-    if w_mono > 0 or w_smooth > 0:
+    if w_mono > 0 or w_smooth > 0 or w_curv > 0:
         extrapolate = cfg.get("extrapolate_angles", False)
         colloc_sampler = create_collocation_sampler(train_df, scaler_disp, enc, extrapolate_angles=extrapolate)
 
@@ -1840,6 +1863,10 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
                     n_smooth = max(1, n_colloc // 2)
                     loss_smooth = angle_smoothness_loss_hard(model, colloc_sampler, n_smooth, rng, params, smooth_delta)
                     loss = loss + w_smooth * loss_smooth
+
+                if w_curv > 0:
+                    loss_curv = curvature_regularization_hard(Xc, model, params)
+                    loss = loss + w_curv * loss_curv
 
             opt.zero_grad()
             loss.backward()

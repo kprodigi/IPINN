@@ -248,15 +248,24 @@ class TestHardEnergyNet:
 
 
 # =====================================================================
-# Curvature Regularization Removed
+# Hard-PINN curvature regularization (d²E/dd²)
 # =====================================================================
-class TestCurvatureRemoval:
-    def test_curvature_reg_removed(self, m):
-        assert not hasattr(m, 'curvature_regularization_hard')
+class TestCurvatureRegularizationHard:
+    def test_curvature_fn_exists(self, m):
+        assert hasattr(m, "curvature_regularization_hard")
 
-    def test_hard_config_no_curvature(self, m):
+    def test_hard_unseen_config_has_w_curvature(self, m):
         cfg = m.get_model_config("hard", "unseen")
-        assert "w_curvature" not in cfg
+        assert "w_curvature" in cfg
+        assert cfg["w_curvature"] == pytest.approx(0.001285)
+
+    def test_curvature_loss_scalar(self, m):
+        net = m.HardEnergyNet(in_d=5, hidden_layers=[16], dropout=0.0, softplus_beta=1.0)
+        x = torch.randn(8, 5, requires_grad=True)
+        params = m.ScalingParams(0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0)
+        loss = m.curvature_regularization_hard(x, net, params)
+        assert loss.ndim == 0
+        assert torch.isfinite(loss)
 
 
 # =====================================================================
