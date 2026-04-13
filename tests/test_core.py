@@ -229,32 +229,18 @@ class TestSoftPINNNet:
 
 class TestHardEnergyNet:
     def test_forward_shape(self, m):
-        net = m.HardEnergyNet(in_d=5, hidden_layers=[32, 16], dropout=0.0,
-                              softplus_beta=1.0, d_zero_scaled=-1.6)
+        net = m.HardEnergyNet(in_d=5, hidden_layers=[32, 16], dropout=0.0, softplus_beta=1.0)
         x = torch.randn(10, 5)
         out = net(x)
         assert out.shape == (10, 1)
 
-    def test_boundary_enforcement(self, m):
-        """E must be zero when x[:,0] == d_zero_scaled (physical displacement = 0)."""
-        d_zero = -1.6
-        net = m.HardEnergyNet(in_d=5, hidden_layers=[32, 16], dropout=0.0,
-                              softplus_beta=1.0, d_zero_scaled=d_zero)
-        net.eval()
-        x = torch.randn(10, 5)
-        x[:, 0] = d_zero
-        out = net(x)
-        assert torch.allclose(out, torch.zeros_like(out), atol=1e-6)
-
     def test_count_parameters(self, m):
-        net = m.HardEnergyNet(in_d=5, hidden_layers=[32, 16], dropout=0.0,
-                              softplus_beta=1.0, d_zero_scaled=-1.6)
+        net = m.HardEnergyNet(in_d=5, hidden_layers=[32, 16], dropout=0.0, softplus_beta=1.0)
         assert net.count_parameters() > 0
 
     def test_gradient_for_force(self, m):
         """F = dE/dd via autodiff must produce non-zero gradients."""
-        net = m.HardEnergyNet(in_d=5, hidden_layers=[16], dropout=0.0,
-                              softplus_beta=1.0, d_zero_scaled=-1.0)
+        net = m.HardEnergyNet(in_d=5, hidden_layers=[16], dropout=0.0, softplus_beta=1.0)
         x = torch.randn(5, 5, requires_grad=True)
         E = net(x)
         dE = torch.autograd.grad(E.sum(), x, create_graph=True)[0]
