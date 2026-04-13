@@ -128,7 +128,7 @@ All outputs are written to `--output_dir`. `MANIFEST_outputs.csv` auto-inventori
 The `submit_pipeline.sh` script splits the monolithic pipeline into 12 SLURM jobs:
 
 ```
-                         prep (CPU, <1 min)
+                             prep
                               |
         +-------+-------+----+----+-------+-------+-------+--------+
         |       |       |         |       |       |       |        |
