@@ -229,53 +229,18 @@ class TestSoftPINNNet:
 
 class TestHardEnergyNet:
     def test_forward_shape(self, m):
-        net = m.HardEnergyNet(in_d=5, hidden_layers=[32, 16], dropout=0.0,
-                              softplus_beta=1.0, d_zero_scaled=-1.6, d_range=3.7)
+        net = m.HardEnergyNet(in_d=5, hidden_layers=[32, 16], dropout=0.0, softplus_beta=1.0)
         x = torch.randn(10, 5)
         out = net(x)
         assert out.shape == (10, 1)
 
-    def test_boundary_enforcement(self, m):
-        """E must be zero when x[:,0] == d_zero_scaled (physical displacement = 0)."""
-        d_zero = -1.6
-        net = m.HardEnergyNet(in_d=5, hidden_layers=[32, 16], dropout=0.0,
-                              softplus_beta=1.0, d_zero_scaled=d_zero, d_range=3.7)
-        net.eval()
-        x = torch.randn(10, 5)
-        x[:, 0] = d_zero  # set displacement to boundary value
-        out = net(x)
-        assert torch.allclose(out, torch.zeros_like(out), atol=1e-6)
-
-    def test_backward_compatible_default(self, m):
-        """d_zero_scaled defaults to 0.0, d_range to 1.0 for backward compatibility."""
-        net = m.HardEnergyNet(in_d=5, hidden_layers=[32, 16], dropout=0.0, softplus_beta=1.0)
-        assert hasattr(net, 'd_zero_scaled')
-        assert hasattr(net, 'd_range')
-        assert float(net.d_zero_scaled) == 0.0
-        assert float(net.d_range) == 1.0
-
-    def test_g_normalized_range(self, m):
-        """The gate g should be in [0, ~1] for typical inputs, not [0, 5+]."""
-        d_zero = -1.6
-        d_range = 3.7  # max_scaled - d_zero
-        net = m.HardEnergyNet(in_d=5, hidden_layers=[16], dropout=0.0,
-                              softplus_beta=1.0, d_zero_scaled=d_zero, d_range=d_range)
-        x = torch.zeros(1, 5)
-        x[0, 0] = d_zero + d_range  # max displacement
-        out = net(x)
-        # g should be ~1.0 at max displacement, so output ≈ 1.0 * NN(x)
-        # just verify it's finite and not huge
-        assert torch.isfinite(out).all()
-
     def test_count_parameters(self, m):
-        net = m.HardEnergyNet(in_d=5, hidden_layers=[32, 16], dropout=0.0,
-                              softplus_beta=1.0, d_zero_scaled=-1.6, d_range=3.7)
+        net = m.HardEnergyNet(in_d=5, hidden_layers=[32, 16], dropout=0.0, softplus_beta=1.0)
         assert net.count_parameters() > 0
 
-    def test_gradient_flows_through_boundary_layer(self, m):
-        """Verify autodiff works through g*NN(x) for force computation."""
-        net = m.HardEnergyNet(in_d=5, hidden_layers=[16], dropout=0.0,
-                              softplus_beta=1.0, d_zero_scaled=-1.0, d_range=3.0)
+    def test_gradient_for_force(self, m):
+        """F = dE/dd via autodiff must produce non-zero gradients."""
+        net = m.HardEnergyNet(in_d=5, hidden_layers=[16], dropout=0.0, softplus_beta=1.0)
         x = torch.randn(5, 5, requires_grad=True)
         E = net(x)
         dE = torch.autograd.grad(E.sum(), x, create_graph=True)[0]

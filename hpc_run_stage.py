@@ -77,13 +77,6 @@ def _serialize_model(model, approach: str, protocol: str, scaler_disp) -> Dict:
             "softplus_beta": cfg["softplus_beta"],
         },
     }
-    if info["class"] == "HardEnergyNet":
-        info["init_args"]["d_zero_scaled"] = float(
-            -scaler_disp.mean_[0] / scaler_disp.scale_[0]
-        )
-        # d_range stored on the model buffer; extract it directly
-        if hasattr(model, 'd_range'):
-            info["init_args"]["d_range"] = float(model.d_range.item())
     return info
 
 

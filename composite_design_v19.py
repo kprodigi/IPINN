@@ -625,15 +625,11 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
         cfg_ddns["w_bc"] = 0.0
         cfg_ddns["colloc_ratio"] = 0.0
         
-        # Random-protocol Hard-PINN: boundary enforcement layer g is normalised
-        # to [0, 1] so the original config hyperparameters remain valid.
         cfg_hard = {
             "optimizer": "adamw", "lr": 1.5e-4, "weight_decay": 1e-5,
-            "batch_size": 64, "hidden_layers": [64, 64], "dropout": 0.0,
+            "batch_size": 64, "hidden_layers": [32, 32], "dropout": 0.0,
             "softplus_beta": 8.0, "smoothl1_beta": 0.05,
-            "w_load": 3.0, "w_energy": 3.0,
-            "grad_clip": 1.0,
-            "epochs": 2000, "eval_every": 20,
+            "w_load": 3.0, "w_energy": 3.0, "epochs": 2000, "eval_every": 20,
             "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
             "sched_patience": 40, "sched_factor": 0.7,
         }
@@ -971,11 +967,7 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
             Y_train = Y_tensor
         
         # Create and train model
-        d_zero_scaled = float(-scaler_disp.mean_[0] / scaler_disp.scale_[0])
-        d_max_scaled = float((df_all["disp_mm"].max() - scaler_disp.mean_[0]) / scaler_disp.scale_[0])
-        d_range = d_max_scaled - d_zero_scaled
-        model = HardEnergyNet(X_full.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"],
-                              d_zero_scaled=d_zero_scaled, d_range=d_range).to(DEVICE)
+        model = HardEnergyNet(X_full.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
 
         if cfg["optimizer"] == "adamw":
             optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
@@ -1225,14 +1217,12 @@ class SoftPINNNet(nn.Module):
 class HardEnergyNet(nn.Module):
     """MLP for Hard-PINN (outputs only E; F derived by differentiation).
 
-    Boundary enforcement: E = g(d) * NN(x) where g(d) = (d_scaled - d_zero_scaled) / d_range.
-    g is normalised to [0, 1] to avoid amplifying gradients through autodiff.
-    At d_phys=0, d_scaled == d_zero_scaled so g=0 and E=0 exactly by construction.
-    This matches the structural enforcement of F = dE/dd.
+    Physics is enforced structurally: only E is predicted, and F = dE/dd via autodiff.
+    Boundary condition E(0)=0 is enforced softly via training data near d=0.
     """
 
     def __init__(self, in_d: int, hidden_layers: List[int], dropout: float,
-                 softplus_beta: float, d_zero_scaled: float = 0.0, d_range: float = 1.0):
+                 softplus_beta: float):
         super().__init__()
         layers = []
         d = in_d
@@ -1244,8 +1234,6 @@ class HardEnergyNet(nn.Module):
             d = h
         layers.append(nn.Linear(d, 1))
         self.net = nn.Sequential(*layers)
-        self.register_buffer("d_zero_scaled", torch.tensor(d_zero_scaled, dtype=torch.float32))
-        self.register_buffer("d_range", torch.tensor(max(abs(d_range), 1e-6), dtype=torch.float32))
         self._init_weights()
 
     def _init_weights(self):
@@ -1256,8 +1244,7 @@ class HardEnergyNet(nn.Module):
                     nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        g = (x[:, 0:1] - self.d_zero_scaled) / self.d_range  # [0, ~1], zero at d_phys=0
-        return g * self.net(x)
+        return self.net(x)
     
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -1784,11 +1771,7 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     Xv = to_tensor(build_features(val_df, scaler_disp, enc))
     y_val = val_df[["load_kN", "energy_J"]].values
     
-    d_zero_scaled = float(-scaler_disp.mean_[0] / scaler_disp.scale_[0])
-    d_max_scaled = float((train_df["disp_mm"].max() - scaler_disp.mean_[0]) / scaler_disp.scale_[0])
-    d_range = d_max_scaled - d_zero_scaled  # normalise g to [0, ~1]
-    model = HardEnergyNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"],
-                          d_zero_scaled=d_zero_scaled, d_range=d_range).to(DEVICE)
+    model = HardEnergyNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
     opt = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"]) if cfg.get("optimizer", "adamw").lower() == "adam" else optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     
     # [V8] Scheduler selection: stabilized (unseen) vs reactive (random)
