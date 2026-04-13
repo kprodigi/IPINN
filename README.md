@@ -9,7 +9,6 @@ Forward prediction and inverse design of hexagonal composite ring structures und
 ## Key Features
 
 - **Three-tier PINN hierarchy**: Data-driven (DDNS), soft physics constraint (Soft-PINN), and structurally enforced physics (Hard-PINN with E=g(d)*NN and F=dE/dd by construction)
-- **Explicit boundary enforcement**: E(d=0)=0 guaranteed by network architecture, not soft penalty
 - **Residual-based adaptive refinement (RAR)**: Collocation points concentrate where physics residuals are largest
 - **Regularised inverse design**: Tikhonov regularisation + multi-start GP-BO + LC plausibility classifier
 - **Ill-posedness analysis**: Solution landscape mapping, multiplicity index, forward-map Jacobian with bifurcation detection, approximate inverse posterior with credible intervals
