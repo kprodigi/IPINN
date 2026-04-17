@@ -101,14 +101,14 @@ JOB_UD=$(submit "train_unseen_ddns"  "48:00:00" "gpu:1" "32G" "$D")
 JOB_US=$(submit "train_unseen_soft"  "48:00:00" "gpu:1" "32G" "$D")
 JOB_UH=$(submit "train_unseen_hard"  "48:00:00" "gpu:1" "32G" "$D")
 JOB_IV=$(submit "train_inverse"      "48:00:00" "gpu:1" "32G" "$D")
-JOB_LC=$(submit "loao_cv"            "24:00:00" "gpu:1" "32G" "$D")
+JOB_LC=$(submit "loao_cv"            "96:00:00" "gpu:1" "32G" "$D")
 
 echo "  train (x8)      : $JOB_RD $JOB_RS $JOB_RH $JOB_UD $JOB_US $JOB_UH $JOB_IV $JOB_LC"
 
 # ====================================================================
 # Stage 2: forward_analysis (needs all 6 training + LOAO complete)
 # ====================================================================
-D_FWD="afterok:${JOB_RD}:${JOB_RS}:${JOB_RH}:${JOB_UD}:${JOB_US}:${JOB_UH}:${JOB_LC}"
+D_FWD="afterok:${JOB_RD}:${JOB_RS}:${JOB_RH}:${JOB_UD}:${JOB_US}:${JOB_UH}:afterany:${JOB_LC}"
 JOB_FWD=$(submit "forward_analysis" "24:00:00" "gpu:1" "48G" "$D_FWD")
 echo "  forward_analysis: $JOB_FWD"
 
