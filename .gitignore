@@ -34,6 +34,13 @@ results/
 results_paper/
 results_ci_dry/
 results_hpc_test/
+results_audit_dry/
+results_smoke/
+
+# Local-only artefacts (extracted manuscript, etc.)
+manuscript.md
+manuscript.docx
+*.docx
 
 # HPC staging
 .staging/

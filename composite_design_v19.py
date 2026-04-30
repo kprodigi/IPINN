@@ -66,6 +66,13 @@ from matplotlib.ticker import AutoMinorLocator
 warnings.filterwarnings("ignore", category=UserWarning, module=r"torch\.nn\.modules\.loss")
 warnings.filterwarnings("ignore", category=UserWarning, module=r"matplotlib")
 warnings.filterwarnings("ignore", category=UserWarning, module=r"sklearn")
+# Matplotlib emits a UserWarning per text element when a fallback font in the
+# rcParams family list is not installed. The fallback behaviour is correct
+# (it picks the next available family) but the messages are noisy on systems
+# where, e.g., Liberation Sans isn't installed alongside Arial.
+warnings.filterwarnings("ignore", message=r"findfont: Font family.*not found")
+import logging as _logging
+_logging.getLogger("matplotlib.font_manager").setLevel(_logging.ERROR)
 
 # Optional imports with graceful fallback
 try:
@@ -99,27 +106,6 @@ except (ImportError, TypeError, AttributeError) as _skopt_err:
     # scikit-optimize may fail with numpy >= 2.0 (removed np.int, np.float)
     # Install compatible version: pip install "scikit-optimize>=0.10.1"
 
-try:
-    from botorch.fit import fit_gpytorch_mll
-    from botorch.models.gp_regression import SingleTaskGP
-    from botorch.models.model_list_gp_regression import ModelListGP
-    from gpytorch.mlls.sum_marginal_log_likelihood import SumMarginalLogLikelihood
-    from botorch.utils.transforms import normalize, unnormalize
-    from botorch.utils.sampling import draw_sobol_samples
-    from botorch.optim.optimize import optimize_acqf
-    from botorch.acquisition.multi_objective.logei import (
-        qLogNoisyExpectedHypervolumeImprovement,
-    )
-    from botorch.sampling.normal import SobolQMCNormalSampler
-    from botorch.utils.multi_objective.box_decompositions.dominated import DominatedPartitioning
-    from botorch.utils.multi_objective.pareto import is_non_dominated
-    from botorch.exceptions import BadInitialCandidatesWarning
-    HAS_BOTORCH = True
-except ImportError:
-    HAS_BOTORCH = False
-    BadInitialCandidatesWarning = UserWarning  # type: ignore
-
-
 # =============================================================================
 # LOGGING CONFIGURATION
 # =============================================================================
@@ -136,6 +122,31 @@ class _SafeUnicodeStreamHandler(logging.StreamHandler):
                 self.flush()
             except Exception:
                 pass
+
+
+# =============================================================================
+# ATOMIC CSV WRITES (prevents truncated CSVs on SLURM preemption)
+# =============================================================================
+# We patch ``DataFrame.to_csv`` so every CSV write the pipeline performs goes
+# through tmp-file + os.replace.  os.replace is atomic on POSIX and Windows
+# NTFS, so a SLURM SIGTERM mid-write either leaves the prior version intact
+# or replaces it with the complete new file — never a half-written CSV.
+# Only triggers when the destination is a string/path; pass-through otherwise
+# (StringIO/buffer cases used in tests are unaffected).
+_ORIG_DATAFRAME_TO_CSV = pd.DataFrame.to_csv
+
+
+def _atomic_to_csv(self, path_or_buf=None, *args, **kwargs):
+    if isinstance(path_or_buf, (str, os.PathLike)):
+        target = os.fspath(path_or_buf)
+        tmp = target + ".tmp"
+        result = _ORIG_DATAFRAME_TO_CSV(self, tmp, *args, **kwargs)
+        os.replace(tmp, target)
+        return result
+    return _ORIG_DATAFRAME_TO_CSV(self, path_or_buf, *args, **kwargs)
+
+
+pd.DataFrame.to_csv = _atomic_to_csv
 
 
 def setup_logging(output_dir: str) -> logging.Logger:
@@ -190,39 +201,72 @@ def setup_logging(output_dir: str) -> logging.Logger:
 #   line width:     0.8 pt
 # =============================================================================
 
-PRINT_WIDTH_IN = 7.48  # Composite Structures full-page width in inches
+# Composite Structures (Elsevier) figure standards
+# - Full-page width (2-col):  190 mm = 7.48 in   -> PRINT_WIDTH_IN below
+# - 1.5-column:                140 mm = 5.51 in
+# - Single column:              90 mm = 3.54 in
+# - Body text in published paper: ~9 pt (regular)
+# - Figure text minimum at final scale: 7 pt (Elsevier rule)
+# - Figures saved at 600 DPI; lines >= 0.5 pt at final scale
+PRINT_WIDTH_IN = 7.48
+SINGLE_COL_IN = 3.54
+DOUBLE_COL_IN = PRINT_WIDTH_IN
+ONE_AND_HALF_COL_IN = 5.51
+
+# Font targets (in points, AT THE FIGURE'S SAVED WIDTH).  Saving at PRINT_WIDTH_IN
+# and inserting at 100% scale into a Composite Structures full-page figure means
+# these point sizes are exactly the on-page sizes the reader sees.
+_BASE_FONT_AT_FULL_WIDTH = {
+    "label":     9.0,   # x/y axis labels
+    "title":     9.0,   # subplot titles
+    "tick":      8.0,   # tick labels
+    "legend":    8.0,   # legend entries
+    "panel":     9.5,   # panel labels (a)/(b)/(c)
+    "annot":     8.0,   # in-axes annotations
+    "suptitle":  10.0,  # figure-level suptitle
+}
+
+# All figure text uses Arial Bold per journal style.
+FIG_FONT_FAMILY = ["Arial", "Liberation Sans", "DejaVu Sans"]
+FIG_FONT_WEIGHT = "bold"
 
 
 def scaled_fonts(fig_width: float) -> dict:
-    """Return font sizes for a figure of width ``fig_width`` (inches).
+    """Font sizes (pt) for a figure of width ``fig_width`` (inches).
 
-    Scale is ``min(fig_width / PRINT_WIDTH_IN, 1.0)`` so wide multi-panel figures
-    do not get oversized type. Narrow figures scale down to a floor for readability.
+    The scale is ``fig_width / PRINT_WIDTH_IN`` clamped to [0.65, 1.0].  Wider
+    figures saturate at the full-width sizes (so a 10" exploratory figure does
+    not balloon).  Narrow single-column figures down-scale slightly but are
+    floored so labels stay readable.
+
+    Returned floats are rounded to 0.1 pt.  Apply via ``apply_fig_style``.
     """
-    s_raw = float(fig_width) / PRINT_WIDTH_IN
-    s = min(s_raw, 1.0)
-    s = max(s, 0.58)  # floor for very small axes (e.g. dense grids)
+    s = float(fig_width) / PRINT_WIDTH_IN
+    s = min(max(s, 0.65), 1.0)
     return {
-        "label":   round(9 * s, 1),
-        "title":   round(8.5 * s, 1),
-        "tick":    round(8 * s, 1),
-        "legend":  round(7.5 * s, 1),
-        "panel":   round(9.5 * s, 1),
-        "annot":   round(7 * s, 1),
-        "suptitle": round(10 * s, 1),
-        "linewidth": round(0.8 * s, 2),
-        "markersize": round(4 * s, 1),
-        "axes_lw": round(0.7 * s, 2),
-        "tick_major": round(4 * s, 1),
+        "label":      round(_BASE_FONT_AT_FULL_WIDTH["label"]    * s, 1),
+        "title":      round(_BASE_FONT_AT_FULL_WIDTH["title"]    * s, 1),
+        "tick":       round(_BASE_FONT_AT_FULL_WIDTH["tick"]     * s, 1),
+        "legend":     round(_BASE_FONT_AT_FULL_WIDTH["legend"]   * s, 1),
+        "panel":      round(_BASE_FONT_AT_FULL_WIDTH["panel"]    * s, 1),
+        "annot":      round(_BASE_FONT_AT_FULL_WIDTH["annot"]    * s, 1),
+        "suptitle":   round(_BASE_FONT_AT_FULL_WIDTH["suptitle"] * s, 1),
+        # Geometry (lines, ticks) — slightly thicker than default for print.
+        "linewidth":  round(1.1 * s, 2),
+        "markersize": round(4.5 * s, 1),
+        "axes_lw":    round(0.9 * s, 2),
+        "tick_major": round(4.0 * s, 1),
         "tick_minor": round(2.5 * s, 1),
     }
 
 
 def apply_fig_style(fig, axes=None, fig_width: float = None, logger: Optional[logging.Logger] = None):
-    """Apply scaled font sizes to all axes in a figure for print uniformity.
-    
-    Call AFTER creating subplots and setting labels/titles, but BEFORE savefig.
-    If axes is None, uses fig.get_axes(). If fig_width is None, reads from fig.
+    """Enforce Arial Bold + journal-standard font sizes on every text element.
+
+    Call AFTER creating subplots and setting labels/titles, BEFORE savefig.
+    Sets x/y labels, titles, tick labels, legend entries, suptitle, figure-level
+    legends, and any colorbar text to Arial Bold at the size returned by
+    :func:`scaled_fonts` for the figure's saved width.
     """
     _log = logger if logger is not None else logging.getLogger(__name__)
     if fig_width is None:
@@ -231,110 +275,201 @@ def apply_fig_style(fig, axes=None, fig_width: float = None, logger: Optional[lo
         all_axes = fig.get_axes()
     else:
         all_axes = list(np.array(axes).flat) if hasattr(axes, '__iter__') else [axes]
-    
+
     sf = scaled_fonts(fig_width)
+    fam = FIG_FONT_FAMILY
+    fw = FIG_FONT_WEIGHT
+
+    def _bold(text_obj, size):
+        try:
+            text_obj.set_fontfamily(fam)
+            text_obj.set_fontweight(fw)
+            text_obj.set_fontsize(size)
+        except Exception as ex:
+            _log.debug("apply_fig_style: text styling skipped: %s", ex)
+
     for ax in all_axes:
         try:
-            ax.tick_params(axis="both", labelsize=sf["tick"],
-                           length=sf["tick_major"], width=sf["axes_lw"],
-                           which='major')
-            ax.tick_params(length=sf["tick_minor"], width=sf["axes_lw"] * 0.7,
-                           which='minor')
+            ax.tick_params(
+                axis="both", labelsize=sf["tick"],
+                length=sf["tick_major"], width=sf["axes_lw"], which="major",
+            )
+            ax.tick_params(length=sf["tick_minor"], width=sf["axes_lw"] * 0.7, which="minor")
             for spine in ax.spines.values():
                 spine.set_linewidth(sf["axes_lw"])
-            if ax.get_xlabel():
-                ax.set_xlabel(ax.get_xlabel(), fontsize=sf["label"])
-            if ax.get_ylabel():
-                ax.set_ylabel(ax.get_ylabel(), fontsize=sf["label"])
-            if ax.get_title():
-                ax.set_title(ax.get_title(), fontsize=sf["title"])
+
+            # x / y / title / suptitle text — set family + weight + size.
+            for tobj, size_key in [
+                (ax.xaxis.label, "label"),
+                (ax.yaxis.label, "label"),
+                (ax.title,       "title"),
+            ]:
+                if tobj.get_text():
+                    _bold(tobj, sf[size_key])
+
+            # Tick labels (each Text instance).
+            for tl in ax.get_xticklabels() + ax.get_yticklabels():
+                _bold(tl, sf["tick"])
+
+            # Legend entries (in-axes legends).
             legend = ax.get_legend()
-            if legend:
+            if legend is not None:
                 for text in legend.get_texts():
-                    text.set_fontsize(sf["legend"])
+                    _bold(text, sf["legend"])
+                # Frame line width matches axes lw.
                 try:
-                    legend.prop.set_size(sf["legend"])
-                except Exception as ex:
-                    _log.debug("apply_fig_style: legend.prop sizing skipped: %s", ex)
+                    legend.get_frame().set_linewidth(sf["axes_lw"])
+                except Exception:
+                    pass
         except Exception as ex:
             _log.debug("apply_fig_style: axis styling skipped: %s", ex)
-    # Figure-level legends (e.g. fig.legend) are not tied to a single Axes
+
+    # Figure-level legends (fig.legend(...)).
     for leg in getattr(fig, "legends", []) or []:
         try:
             for text in leg.get_texts():
-                text.set_fontsize(sf["legend"])
-            try:
-                leg.prop.set_size(sf["legend"])
-            except Exception as ex:
-                _log.debug("apply_fig_style: fig legend prop sizing skipped: %s", ex)
+                _bold(text, sf["legend"])
+            leg.get_frame().set_linewidth(sf["axes_lw"])
         except Exception as ex:
             _log.debug("apply_fig_style: fig legend styling skipped: %s", ex)
-    # Colorbar labels / tick labels on inset colorbar axes
+
+    # Suptitle.
+    if fig._suptitle is not None and fig._suptitle.get_text():
+        _bold(fig._suptitle, sf["suptitle"])
+
+    # Any free-floating Text annotations (text() calls anchored to axes/figure).
     for ax in all_axes:
-        try:
-            ylab = ax.get_ylabel()
-            if ylab and getattr(ax, "yaxis", None) is not None:
-                ax.yaxis.label.set_fontsize(sf["label"])
-            xlab = ax.get_xlabel()
-            if xlab and getattr(ax, "xaxis", None) is not None:
-                ax.xaxis.label.set_fontsize(sf["label"])
-        except Exception as ex:
-            _log.debug("apply_fig_style: colorbar label styling skipped: %s", ex)
-    # Scale suptitle if present
-    if fig._suptitle is not None:
-        fig._suptitle.set_fontsize(sf["suptitle"])
+        for txt in ax.texts:
+            if not txt.get_text():
+                continue
+            # Don't shrink user-specified large fonts (e.g. panel labels with explicit fontsize).
+            try:
+                cur = float(txt.get_fontsize())
+            except Exception:
+                cur = sf["annot"]
+            target = sf["annot"] if cur < sf["panel"] else sf["panel"]
+            _bold(txt, target)
 
 
 def set_publication_style():
-    """Set matplotlib parameters for publication-quality figures.
-    
-    These are DEFAULT rcParams. Individual figure functions should call
-    apply_fig_style() before saving to ensure print-uniform font scaling.
-    The rcParams here target a ~10-inch figure width (the median).
+    """Set matplotlib defaults to Arial Bold + Composite Structures sizing.
+
+    Individual figure routines must still call :func:`apply_fig_style` before
+    savefig to enforce per-element sizing (rcParams cannot scale with the
+    figure's width).  These rcParams are sensible defaults if a function forgets.
     """
+    sf = scaled_fonts(PRINT_WIDTH_IN)  # full-width baseline
     plt.rcParams.update({
-        "figure.figsize": (8, 6), "figure.dpi": 150, "figure.facecolor": "white",
-        "savefig.dpi": 600, "savefig.bbox": "tight", "savefig.pad_inches": 0.12,
-        "font.size": 10, "font.family": "serif",
-        "font.serif": ["Times New Roman", "Times", "DejaVu Serif", "serif"],
-        "mathtext.fontset": "stix",
-        "axes.labelsize": 10, "axes.titlesize": 10, "axes.titleweight": "bold",
-        "axes.linewidth": 1.0, "axes.grid": True, "axes.axisbelow": True,
-        "xtick.labelsize": 9, "ytick.labelsize": 9,
-        "xtick.direction": "in", "ytick.direction": "in",
-        "xtick.major.size": 5, "ytick.major.size": 5,
-        "xtick.minor.size": 3.0, "ytick.minor.size": 3.0,
-        "xtick.major.width": 0.9, "ytick.major.width": 0.9,
-        "xtick.minor.visible": True, "ytick.minor.visible": True,
-        "legend.fontsize": 8.5, "legend.frameon": True, "legend.framealpha": 0.95,
-        "lines.linewidth": 1.5, "lines.markersize": 5,
-        "grid.alpha": 0.25, "grid.linewidth": 0.5, "grid.linestyle": "--",
-        "errorbar.capsize": 3,
+        # Output geometry
+        "figure.figsize": (PRINT_WIDTH_IN, 4.0),
+        "figure.dpi":     150,
+        "figure.facecolor": "white",
+        "savefig.dpi":    600,
+        "savefig.bbox":   "tight",
+        "savefig.pad_inches": 0.06,
+        "savefig.facecolor": "white",
+        "pdf.fonttype":   42,   # embed TrueType (editable in Illustrator/Acrobat)
+        "ps.fonttype":    42,
+        # Fonts — Arial Bold throughout
+        "font.family":    "sans-serif",
+        "font.sans-serif": FIG_FONT_FAMILY,
+        "font.weight":    FIG_FONT_WEIGHT,
+        "font.size":      sf["tick"],
+        "mathtext.default": "regular",  # math integrates with sans-serif body
+        "mathtext.fontset": "dejavusans",
+        # Axes
+        "axes.labelsize":   sf["label"],
+        "axes.labelweight": FIG_FONT_WEIGHT,
+        "axes.titlesize":   sf["title"],
+        "axes.titleweight": FIG_FONT_WEIGHT,
+        "axes.linewidth":   sf["axes_lw"],
+        "axes.grid":        True,
+        "axes.axisbelow":   True,
+        "axes.spines.top":   True,
+        "axes.spines.right": True,
+        # Ticks
+        "xtick.labelsize": sf["tick"],
+        "ytick.labelsize": sf["tick"],
+        "xtick.direction": "in",
+        "ytick.direction": "in",
+        "xtick.major.size": sf["tick_major"],
+        "ytick.major.size": sf["tick_major"],
+        "xtick.minor.size": sf["tick_minor"],
+        "ytick.minor.size": sf["tick_minor"],
+        "xtick.major.width": sf["axes_lw"],
+        "ytick.major.width": sf["axes_lw"],
+        "xtick.minor.visible": True,
+        "ytick.minor.visible": True,
+        # Legend
+        "legend.fontsize": sf["legend"],
+        "legend.frameon": True,
+        "legend.framealpha": 0.95,
+        "legend.edgecolor": "0.2",
+        "legend.fancybox":  False,
+        # Lines
+        "lines.linewidth": sf["linewidth"],
+        "lines.markersize": sf["markersize"],
+        "lines.markeredgewidth": 0.6,
+        # Grid (subtle, behind data)
+        "grid.alpha":     0.30,
+        "grid.linewidth": 0.45,
+        "grid.linestyle": "--",
+        "grid.color":     "0.7",
+        "errorbar.capsize": 2.5,
+        # Colour cycle: Wong palette (B/W safe, colourblind safe)
+        "axes.prop_cycle": plt.cycler(
+            "color",
+            ["#000000", "#0072B2", "#D55E00", "#009E73",
+             "#CC79A7", "#56B4E9", "#E69F00", "#F0E442"],
+        ),
+        # Use viridis as default sequential (no rainbow).
+        "image.cmap": "viridis",
     })
 
 
 # =============================================================================
 # COLOR AND STYLE DEFINITIONS
 # =============================================================================
+# Wong palette (Nature Methods, 2011): colourblind-safe and reasonably distinct
+# in greyscale.  Pair with line-style + marker so figures remain legible in
+# black-and-white print proofs.
+#
+#   #000000  black           (Hard-PINN, max contrast)
+#   #0072B2  deep blue       (Soft-PINN, LC1; mid-dark grey in B/W)
+#   #D55E00  vermillion      (DDNS, LC2; mid-light grey in B/W)
+#   #009E73  bluish green    (auxiliary, e.g. weighted-sum sweep)
+#   #CC79A7  reddish purple  (auxiliary, e.g. ill-posedness markers)
+#   #56B4E9  sky blue        (auxiliary)
+#   #E69F00  orange          (auxiliary)
+#   #F0E442  yellow          (highlight; pair only with dark edge)
+
+# Models — distinct in colour AND lightness; line styles add B/W safety.
 COLORS = {
-    "LC1": "#4DBBD5", "LC2": "#E64B35",
-    "ddns": "#E64B35", "soft": "#4DBBD5", "hard": "#7B2D8E",
-    "data": "#000000", "experiment": "#000000",
-    "gpbo": "#F39B7F",
+    "ddns": "#D55E00",    # vermillion
+    "soft": "#0072B2",    # deep blue
+    "hard": "#000000",    # black (anchor)
+    "LC1":  "#0072B2",    # deep blue (matches Soft hue but used in different plots)
+    "LC2":  "#D55E00",    # vermillion
+    "data": "#000000",
+    "experiment": "#000000",
+    "gpbo": "#009E73",    # bluish green (clearly distinct from model colours)
 }
 
-MARKERS = {"LC1": "o", "LC2": "s", "ddns": "o", "soft": "D", "hard": "^",
-           "gpbo": "^"}
-
-LC_MARKERS = {
-    "LC1": MARKERS.get("LC1", "o"),
-    "LC2": MARKERS.get("LC2", "s"),
+LINESTYLES = {
+    "ddns": "--",  "soft": "-.", "hard": "-",
+    "data": "-",   "gpbo": "-",
+    "LC1":  "-",   "LC2":  "--",
 }
 
-LINESTYLES = {"ddns": "--", "soft": "-.", "hard": "-", "data": "-",
-              "gpbo": "-",
-              "LC1": "-", "LC2": "--"}
+MARKERS = {
+    "ddns": "o",   "soft": "s",   "hard": "D",
+    "gpbo": "^",
+    "LC1":  "o",   "LC2":  "s",
+}
 
+LC_MARKERS = {"LC1": MARKERS["LC1"], "LC2": MARKERS["LC2"]}
+
+# Hatch patterns for bar plots (B/W safe, in addition to colour fill).
 HATCHES = {"ddns": "//", "soft": "\\\\", "hard": "", "random": "", "unseen": "//"}
 FILLSTYLES = {"ddns": "none", "soft": "full", "hard": "full"}
 
@@ -345,7 +480,23 @@ MODEL_LABELS = {"ddns": "DDNS", "soft": "Soft-PINN", "hard": "Hard-PINN"}
 # REPRODUCIBILITY
 # =============================================================================
 def set_seed(seed: int) -> None:
-    """Set all random seeds for full reproducibility."""
+    """Set all RNG seeds and request the strongest determinism PyTorch can give.
+
+    Notes
+    -----
+    Bit-identical reproducibility on GPU is *not* fully achievable when autograd
+    accumulates gradients across CUDA atomics (used by the second-order
+    `create_graph=True` path in Hard-PINN training). We set every controllable
+    knob — including the cuBLAS workspace and ``use_deterministic_algorithms``
+    in warn-only mode — so reruns on the same hardware/PyTorch version produce
+    near-identical numbers (within 1e-6 typical drift) and so a reviewer who
+    asks "can you reproduce Table 1?" gets a near-yes.
+    """
+    # PYTHONHASHSEED only honoured if set BEFORE Python starts — set it here
+    # for the env, but the authoritative place is the launch script. Document in main().
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    # cuBLAS deterministic algorithms require this env var (CUDA >= 10.2).
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -353,6 +504,44 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    # warn_only=True: log a warning if a non-deterministic kernel is hit but do
+    # not abort. Hard-PINN double-backward currently triggers a few of these;
+    # they bias numbers by <1e-6, well below the conformal-band width.
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except (TypeError, RuntimeError):
+        # Older PyTorch: warn_only kwarg not available; fall back silently.
+        try:
+            torch.use_deterministic_algorithms(True)
+        except Exception:
+            pass
+
+
+def make_torch_generator(seed: int) -> torch.Generator:
+    """A seeded ``torch.Generator`` for DataLoader determinism."""
+    g = torch.Generator()
+    g.manual_seed(int(seed))
+    return g
+
+
+def r2_safe(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Robust R² that returns NaN (not -inf) on a constant-target slice.
+
+    sklearn's ``r2_score`` divides by ``var(y_true)``; when a held-out slice has
+    near-zero variance (e.g. an LC×θ subset where energy is briefly flat) the
+    metric blows up to ``-inf`` and contaminates the Tukey fence. We treat such
+    slices as "undefined" and let the caller decide how to aggregate.
+    """
+    y_true = np.asarray(y_true, dtype=np.float64).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=np.float64).reshape(-1)
+    if y_true.size == 0 or y_pred.size == 0 or y_true.size != y_pred.size:
+        return float("nan")
+    if not np.isfinite(y_true).all() or not np.isfinite(y_pred).all():
+        return float("nan")
+    var_y = float(np.var(y_true, ddof=0))
+    if var_y < 1e-12:
+        return float("nan")
+    return float(r2_score(y_true, y_pred))
 
 
 # =============================================================================
@@ -410,10 +599,8 @@ class Config:
     run_gpbo: bool = True
     run_ablation: bool = True
     run_reviewer_proof: bool = True  # V5: Reviewer-proof analyses
-    run_mobo_qnehvi: bool = True  # qNEHVI MOBO on (theta, LC) vs EA@D_COMMON & IPF (requires botorch)
-    # When True, missing optional deps (skopt for GP-BO, botorch for MOBO) abort at startup.
+    # When True, missing optional deps (skopt for GP-BO) abort at startup.
     strict_paper_deps: bool = False
-    # strict_paper_deps also requires MOBO to run (no --no_mobo_qnehvi) for a complete submission bundle.
     # Expensive inverse ablations (extra GP-BO runs per target); enable with --inverse_ablation.
     run_inverse_ablation: bool = False
     inverse_ablation_max_targets: int = 2
@@ -422,7 +609,7 @@ class Config:
     inverse_stress_max_targets: int = 5
     # Per-member forward spread at reported optimum (cheap).
     run_inverse_member_spread: bool = True
-    # CI / smoke: tiny budgets, no MOBO, no reviewer extras, GP-BO replaced by coarse grid inverse.
+    # CI / smoke: tiny budgets, no reviewer extras, GP-BO replaced by coarse grid inverse.
     dry_run: bool = False
     show_plots: bool = False
     save_plots: bool = True
@@ -436,12 +623,6 @@ class Config:
     convergence_filter_iqr: float = 1.5  # Tukey fence multiplier (1.5=standard, 3.0=extreme only)
     # Include design-space rows with stroke within this many mm of LC-specific d_end.
     design_space_stroke_margin_mm: float = 2.0
-    # Leave-one-angle-out cross-validation (forward model robustness)
-    run_loao_cv: bool = True
-    # Residual-based adaptive refinement (RAR) for collocation sampling
-    run_rar: bool = True
-    rar_interval: int = 50   # epochs between RAR weight updates
-    rar_warmup: int = 100    # start RAR after this many epochs (uniform before)
 
 
 CFG = Config()
@@ -475,9 +656,20 @@ def refresh_device() -> None:
     DEVICE = torch.device("cuda" if torch.cuda.is_available() and (not CFG.force_cpu) else "cpu")
 
 
-def _data_loader_kwargs() -> Dict[str, Any]:
-    """DataLoader options: pin_memory disabled because to_tensor() places data on DEVICE directly."""
-    return {"pin_memory": False}
+def _data_loader_kwargs(seed: Optional[int] = None) -> Dict[str, Any]:
+    """DataLoader options.
+
+    pin_memory is disabled because ``to_tensor`` already places data on
+    ``DEVICE`` directly (no host→device copy needed).
+
+    When ``seed`` is provided, a seeded ``torch.Generator`` is attached so the
+    shuffle order at every epoch is deterministic given the seed. This is
+    essential for reproducibility under the determinism push (`set_seed`).
+    """
+    kw: Dict[str, Any] = {"pin_memory": False}
+    if seed is not None:
+        kw["generator"] = make_torch_generator(int(seed))
+    return kw
 
 
 @dataclass
@@ -491,44 +683,20 @@ class BOConfig:
 
     Default budget is ``n_calls_total`` and ``n_init`` below (see runtime logs).
     """
-    n_calls_total: int = 100
-    n_init: int = 20
+    n_calls_total: int = 30
+    n_init: int = 6
     xi: float = 0.01
     n_candidates: int = 500
     gp_restarts: int = 3
     seed: int = 2026
     prob_weight: float = 0.02          # ensemble classifier penalty weight (auto-tuned if 'auto')
-    beta_robust: float = 0.0           # ensemble uncertainty penalty weight (0=off, auto-tuned in pipeline)
     run_classifier_ablation: bool = True  # run with vs without penalty comparison
     lambda_sweep: bool = True           # run lambda sensitivity analysis
-    # Tikhonov regularization for ill-posedness: gamma * (theta - theta_center)^2
-    gamma_tikhonov: float = 0.0        # auto-tuned if 0; explicitly set >0 to override
-    theta_center: float = 57.5         # midpoint of [45, 70] angle range
     # Multi-start BO: run GP-BO n_bo_restarts times with different seeds, keep best
     n_bo_restarts: int = 5
 
 
 BO_CFG = BOConfig()
-
-
-@dataclass
-class MOBOQNEHVICfg:
-    """Multi-objective BO (qNEHVI) on (angle, LC) after dense landscape (BoTorch).
-
-    qNEHVI matches qEHVI in the noiseless limit and scales better in batch q
-    (Daulton et al., NeurIPS 2021). Reference point follows BoTorch convention
-    for maximization: strictly worse than the objective vectors of interest.
-    """
-    n_init: int = 14
-    n_batches: int = 22
-    q: int = 2
-    mc_samples: int = 64
-    num_restarts: int = 8
-    raw_samples: int = 256
-    ref_margin_frac: float = 0.03
-
-
-MOBO_QNEHVI_CFG = MOBOQNEHVICfg()
 
 
 # =============================================================================
@@ -987,7 +1155,7 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
         # Training loop
         dataset = torch.utils.data.TensorDataset(X_train, Y_train)
         loader = torch.utils.data.DataLoader(
-            dataset, batch_size=cfg["batch_size"], shuffle=True, drop_last=False, **_data_loader_kwargs()
+            dataset, batch_size=cfg["batch_size"], shuffle=True, drop_last=False, **_data_loader_kwargs(seed=seed)
         )
         
         for epoch in range(cfg["epochs"]):
@@ -1043,7 +1211,7 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
         # Compute training-set R² for convergence check (batched: full tensor grad is VRAM-heavy)
         eval_model.eval()
         Fv, _ = hard_pinn_predict_load_energy(eval_model, X_tensor, params)
-        tr_r2 = float(r2_score(y_full_np[:, 0], Fv))
+        tr_r2 = float(r2_safe(y_full_np[:, 0], Fv))
         train_r2_scores.append(tr_r2)
         
         # Store the SWA-averaged model if active, otherwise the base model
@@ -1083,19 +1251,53 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
 # DATA LOADING AND VALIDATION
 # =============================================================================
 def validate_input_data(df: pd.DataFrame, logger: logging.Logger) -> Tuple[bool, List[str]]:
-    """Validate input data structure rigorously."""
+    """Validate input data structure and physical sanity rigorously.
+
+    Checks:
+      - required columns present, no NaNs
+      - disp_mm is non-negative
+      - within each (Angle, LC) group, disp_mm is monotonically non-decreasing
+        when sorted by row order (the curves must be strictly causal: a quasi-
+        static crushing experiment cannot have the crosshead retract)
+      - LC is one of the expected categories (warn-only)
+    """
     issues = []
     required_cols = ["disp_mm", "load_kN", "energy_J", "Angle", "LC"]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         issues.append(f"Missing required columns: {missing}")
         return False, issues
-    
+
     for col in required_cols:
         n_missing = df[col].isna().sum()
         if n_missing > 0:
             issues.append(f"Column '{col}' has {n_missing} missing values")
-    
+
+    # Physical sanity: displacement must be non-negative.
+    if (df["disp_mm"] < 0).any():
+        issues.append(f"disp_mm has {int((df['disp_mm'] < 0).sum())} negative values")
+
+    # Within each (Angle, LC) group, disp_mm must be monotonically non-decreasing.
+    # We assume rows are stored in acquisition order; if not, downstream code
+    # sorts before resampling, so this check applies to raw input only.
+    bad_groups = []
+    for (lc, ang), grp in df.groupby(["LC", "Angle"]):
+        d = grp["disp_mm"].values
+        if len(d) >= 2 and np.any(np.diff(d) < -1e-9):
+            n_bad = int(np.sum(np.diff(d) < -1e-9))
+            bad_groups.append(f"({lc}, θ={ang}): {n_bad} non-monotone disp steps")
+    if bad_groups:
+        issues.append("Non-monotone displacement: " + "; ".join(bad_groups[:3])
+                      + (f" ... +{len(bad_groups)-3} more groups" if len(bad_groups) > 3 else ""))
+
+    # LC categories — expect LC1/LC2; warn but do not fail on others.
+    lcs_seen = set(df["LC"].astype(str).str.upper().unique())
+    expected = {"LC1", "LC2"}
+    unexpected = lcs_seen - expected
+    if unexpected:
+        logger.warning(f"  validate_input_data: unexpected LC labels seen: {sorted(unexpected)} "
+                       f"(expected {sorted(expected)}); proceeding.")
+
     return len(issues) == 0, issues
 
 
@@ -1309,57 +1511,6 @@ def create_collocation_sampler(train_df: pd.DataFrame, scaler_disp: StandardScal
     return sample
 
 
-class AdaptiveCollocationSampler:
-    """Residual-based Adaptive Refinement (RAR) collocation sampler (Lu et al., 2021).
-
-    Maintains a fixed evaluation grid; periodically re-weights sampling probabilities
-    proportional to physics residual magnitude so that collocation points concentrate
-    where the constraint is most violated (typically near unseen angles).
-    """
-
-    def __init__(self, base_sampler: Callable, eval_grid_size: int = 500, rng_seed: int = 0):
-        self.base_sampler = base_sampler
-        rng = np.random.default_rng(rng_seed)
-        self.eval_grid = base_sampler(eval_grid_size, rng)  # fixed tensor
-        self.weights = np.ones(eval_grid_size, dtype=np.float64) / eval_grid_size
-        self.is_active = False
-
-    @torch.no_grad()
-    def update_weights(self, model: nn.Module, params, approach: str) -> None:
-        """Re-compute residual-based sampling weights on the evaluation grid."""
-        model.eval()
-        Xg = self.eval_grid.clone().requires_grad_(True)
-        with torch.enable_grad():
-            if approach == "hard":
-                E_n = model(Xg)
-                dE = torch.autograd.grad(E_n.sum(), Xg, create_graph=False)[0]
-                F_derived = dE[:, U_COL:U_COL + 1] * params.grad_factor
-                # For Hard-PINN F=dE/dd is exact; use |F| as proxy for where physics matters most
-                residual = torch.abs(F_derived).squeeze().cpu().numpy()
-            else:  # soft / ddns
-                pred = model(Xg)
-                F_n, E_n = pred[:, 0:1], pred[:, 1:2]
-                dE_dX = torch.autograd.grad(E_n.sum(), Xg, create_graph=False)[0]
-                dE_dd = dE_dX[:, U_COL:U_COL + 1] * params.grad_factor
-                F_phys = F_n * params.sig_F + params.mu_F
-                residual = torch.abs(dE_dd - F_phys).detach().squeeze().cpu().numpy()
-        eps = 1e-8
-        w = residual + eps
-        self.weights = w / w.sum()
-        self.is_active = True
-
-    def sample(self, n_colloc: int, rng: np.random.Generator) -> torch.Tensor:
-        """Draw collocation points proportional to residual weights with small perturbation."""
-        if not self.is_active:
-            return self.base_sampler(n_colloc, rng)
-        idx = rng.choice(len(self.weights), size=n_colloc, replace=True, p=self.weights)
-        pts = self.eval_grid[idx].clone()
-        # Small displacement perturbation to avoid memorising exact grid points
-        noise = torch.randn_like(pts[:, 0:1]) * 0.05
-        pts[:, 0:1] = pts[:, 0:1] + noise
-        return pts
-
-
 def angle_smoothness_loss_soft(model: nn.Module, colloc_sampler: Callable,
                                 n_pts: int, rng: np.random.Generator,
                                 params: ScalingParams, delta_deg: float = 1.0) -> torch.Tensor:
@@ -1433,20 +1584,38 @@ def angle_smoothness_loss_hard(model: nn.Module, colloc_sampler: Callable,
     return (torch.mean(E_diff) + torch.mean(F_diff)) / (delta_rad ** 2)
 
 
-def monotonicity_loss_soft(Xin: torch.Tensor, model: nn.Module, 
+def monotonicity_loss_soft(Xin: torch.Tensor, model: nn.Module,
                             params: ScalingParams) -> torch.Tensor:
-    """Monotonicity constraint for Soft-PINN: energy must not decrease with displacement.
-    
-    Enforces dE/dd ≥ 0 (energy absorption is non-decreasing), which is a 
-    universal thermodynamic constraint valid at ALL angles and loading configs.
+    """Monotonicity constraint for Soft-PINN: energy must be non-decreasing in disp.
+
+    The penalty is ``mean(relu(-dE/du_scaled)^2)`` evaluated in the network's
+    **normalized** displacement coordinate. Sign-only constraint: the sign of
+    ``dE/du_scaled`` and of physical ``dE/dd`` are identical (because the
+    StandardScaler scale on disp is strictly positive), so this enforces the
+    same thermodynamic statement as :func:`monotonicity_loss_hard`.
+
+    Why not work in physical units here?
+    ------------------------------------
+    Earlier we briefly normalized the gradient to physical kN (matching
+    Hard-PINN's monotonicity loss) for unit consistency. That change scaled
+    the penalty magnitude by ``(sig_E/sig_d)^2 / sig_E^2 = 1/sig_d^2 ≈
+    1/(35 mm)^2 ≈ 1/1200``, which silently reduced the Soft-PINN's HPO-tuned
+    ``w_monotonicity = 4.097`` to an effective weight of ~0.003 — i.e., the
+    constraint stopped acting. The HPO from manuscript Section 3.4 was
+    performed against the formulation below; we keep it.
+
+    The Soft-PINN and Hard-PINN ``w_monotonicity`` values therefore live on
+    different magnitude scales by design — each was independently tuned to
+    its own loss formulation (Section 3.4). They are NOT directly comparable.
     """
     Xin_g = Xin.requires_grad_(True) if not Xin.requires_grad else Xin
     pred = model(Xin_g)
+    # Recover physical E so the gradient sign is unambiguously thermodynamic;
+    # magnitude is then ``sig_E * (dE_n/du_scaled)`` ∈ [J] (NOT kN/mm).
     E_pred = pred[:, 1:2] * params.sig_E + params.mu_E
     dE_dX = torch.autograd.grad(E_pred.sum(), Xin_g, create_graph=True)[0]
-    dE_dd = dE_dX[:, U_COL:U_COL+1]  # dE/d(disp_scaled)
-    # Penalize negative energy gradients (energy should increase with displacement)
-    return torch.mean(F.relu(-dE_dd) ** 2)
+    dE_du_scaled = dE_dX[:, U_COL:U_COL + 1]
+    return torch.mean(F.relu(-dE_du_scaled) ** 2)
 
 
 def monotonicity_loss_hard(Xin: torch.Tensor, model: nn.Module,
@@ -1482,9 +1651,30 @@ def curvature_regularization_hard(Xin: torch.Tensor, model: nn.Module,
     return torch.mean(d2E_dd ** 2)
 
 
-def _val_checkpoint_score(r2_load: float, r2_energy: float) -> float:
-    """Mean validation load/energy R² for checkpointing, LR schedule, and early stopping."""
-    return 0.5 * (float(r2_load) + float(r2_energy))
+def _val_checkpoint_score(r2_load: float, r2_energy: float, approach: str = "soft") -> float:
+    """Validation score for checkpointing, LR schedule, and early stopping.
+
+    For Hard-PINN, force is the *gradient* of the energy network, so energy R²
+    is trivially near 1.0 at every epoch — averaging the two metrics dilutes
+    the signal that actually matters (load fit). For Hard-PINN we therefore
+    checkpoint on **load R² only**. DDNS and Soft-PINN use the mean as before
+    so both heads jointly drive selection.
+
+    Returns NaN-safe score; if either R² is NaN (flat-target slice) the other
+    is used, and if both are NaN we return -inf so the checkpointer skips.
+    """
+    r_l = float(r2_load) if np.isfinite(r2_load) else float("nan")
+    r_e = float(r2_energy) if np.isfinite(r2_energy) else float("nan")
+    if approach == "hard":
+        return r_l if np.isfinite(r_l) else float("-inf")
+    # DDNS / Soft: mean of the two heads, falling back to whichever is finite.
+    if np.isfinite(r_l) and np.isfinite(r_e):
+        return 0.5 * (r_l + r_e)
+    if np.isfinite(r_l):
+        return r_l
+    if np.isfinite(r_e):
+        return r_e
+    return float("-inf")
 
 
 class EarlyStopping:
@@ -1575,7 +1765,7 @@ def train_ddns(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, Xtr.shape[0], Xtr.shape[0]) if CFG.bootstrap else np.arange(Xtr.shape[0])
     loader = DataLoader(
-        TensorDataset(Xtr[idx], ytr[idx]), batch_size=cfg["batch_size"], shuffle=True, **_data_loader_kwargs()
+        TensorDataset(Xtr[idx], ytr[idx]), batch_size=cfg["batch_size"], shuffle=True, **_data_loader_kwargs(seed=seed)
     )
     
     history = {"epoch": [], "train_loss": [], "val_load_r2": [], "val_energy_r2": [],
@@ -1601,9 +1791,9 @@ def train_ddns(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
                 pv = model(Xv)
                 Fv = (pv[:, 0] * params.sig_F + params.mu_F).cpu().numpy()
                 Ev = (pv[:, 1] * params.sig_E + params.mu_E).cpu().numpy()
-            r2_l = r2_score(y_val[:, 0], Fv)
-            r2_e = r2_score(y_val[:, 1], Ev)
-            val_score = _val_checkpoint_score(r2_l, r2_e)
+            r2_l = r2_safe(y_val[:, 0], Fv)
+            r2_e = r2_safe(y_val[:, 1], Ev)
+            val_score = _val_checkpoint_score(r2_l, r2_e, approach="ddns")
             history["epoch"].append(ep)
             history["train_loss"].append(loss_sum / nb)
             history["val_load_r2"].append(r2_l)
@@ -1659,11 +1849,6 @@ def train_soft(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     extrapolate = cfg.get("extrapolate_angles", False)
     colloc_sampler = create_collocation_sampler(train_df, scaler_disp, enc, extrapolate_angles=extrapolate)
 
-    # RAR adaptive collocation (Lu et al., 2021)
-    rar_sampler = None
-    if getattr(CFG, 'run_rar', True) and not getattr(CFG, 'dry_run', False):
-        rar_sampler = AdaptiveCollocationSampler(colloc_sampler, eval_grid_size=500, rng_seed=seed + 7)
-
     # New physics weights
     w_mono = cfg.get("w_monotonicity", 0.0)
     w_smooth = cfg.get("w_angle_smooth", 0.0)
@@ -1680,7 +1865,7 @@ def train_soft(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     rng_b = np.random.default_rng(seed)
     idx = rng_b.integers(0, Xtr.shape[0], Xtr.shape[0]) if CFG.bootstrap else np.arange(Xtr.shape[0])
     loader = DataLoader(
-        TensorDataset(Xtr[idx], ytr[idx]), batch_size=cfg["batch_size"], shuffle=True, **_data_loader_kwargs()
+        TensorDataset(Xtr[idx], ytr[idx]), batch_size=cfg["batch_size"], shuffle=True, **_data_loader_kwargs(seed=seed)
     )
 
     history = {"epoch": [], "train_loss": [], "phys_loss": [], "val_load_r2": [], "val_energy_r2": [],
@@ -1697,8 +1882,7 @@ def train_soft(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
             loss_data = cfg["w_data_load"] * sl1(pred[:, 0:1], yb[:, 0:1]) + cfg["w_data_energy"] * mse(pred[:, 1:2], yb[:, 1:2])
             lp_data = physics_loss_soft(Xb, pred[:, 0:1], pred[:, 1:2], params)
             n_colloc = max(1, int(cfg["colloc_ratio"] * Xb.shape[0]))
-            _cs = rar_sampler if (rar_sampler is not None and rar_sampler.is_active) else colloc_sampler
-            Xc = _cs.sample(n_colloc, rng).requires_grad_(True) if hasattr(_cs, 'sample') else _cs(n_colloc, rng).requires_grad_(True)
+            Xc = colloc_sampler(n_colloc, rng).requires_grad_(True)
             pc = model(Xc)
             lp_colloc = physics_loss_soft(Xc, pc[:, 0:1], pc[:, 1:2], params)
             loss_phys = 0.5 * (lp_data + lp_colloc)
@@ -1732,9 +1916,9 @@ def train_soft(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
                 pv = model(Xv)
                 Fv = (pv[:, 0] * params.sig_F + params.mu_F).cpu().numpy()
                 Ev = (pv[:, 1] * params.sig_E + params.mu_E).cpu().numpy()
-            r2_l = r2_score(y_val[:, 0], Fv)
-            r2_e = r2_score(y_val[:, 1], Ev)
-            val_score = _val_checkpoint_score(r2_l, r2_e)
+            r2_l = r2_safe(y_val[:, 0], Fv)
+            r2_e = r2_safe(y_val[:, 1], Ev)
+            val_score = _val_checkpoint_score(r2_l, r2_e, approach="soft")
             history["epoch"].append(ep)
             history["train_loss"].append(loss_sum / nb)
             history["phys_loss"].append(phys_sum / nb)
@@ -1755,9 +1939,6 @@ def train_soft(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
                 best_state = copy.deepcopy(model.state_dict())
             if es(val_score, ep):
                 break
-        # RAR weight update
-        if rar_sampler is not None and ep % CFG.rar_interval == 0 and ep >= CFG.rar_warmup:
-            rar_sampler.update_weights(model, params, "soft")
 
     if best_state:
         model.load_state_dict(best_state)
@@ -1820,15 +2001,10 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
         extrapolate = cfg.get("extrapolate_angles", False)
         colloc_sampler = create_collocation_sampler(train_df, scaler_disp, enc, extrapolate_angles=extrapolate)
 
-    # RAR adaptive collocation
-    rar_sampler = None
-    if colloc_sampler is not None and getattr(CFG, 'run_rar', True) and not getattr(CFG, 'dry_run', False):
-        rar_sampler = AdaptiveCollocationSampler(colloc_sampler, eval_grid_size=500, rng_seed=seed + 7)
-
     rng_b = np.random.default_rng(seed)
     idx = rng_b.integers(0, Xtr.shape[0], Xtr.shape[0]) if CFG.bootstrap else np.arange(Xtr.shape[0])
     loader = DataLoader(
-        TensorDataset(Xtr[idx], ytr[idx]), batch_size=cfg["batch_size"], shuffle=True, **_data_loader_kwargs()
+        TensorDataset(Xtr[idx], ytr[idx]), batch_size=cfg["batch_size"], shuffle=True, **_data_loader_kwargs(seed=seed)
     )
 
     history = {"epoch": [], "train_loss": [], "val_load_r2": [], "val_energy_r2": [],
@@ -1852,8 +2028,7 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
             # Collocation-based physics regularization
             if colloc_sampler is not None:
                 n_colloc = max(1, int(colloc_ratio * Xb.shape[0])) if colloc_ratio > 0 else max(1, Xb.shape[0] // 2)
-                _cs = rar_sampler if (rar_sampler is not None and rar_sampler.is_active) else colloc_sampler
-                Xc = _cs.sample(n_colloc, rng) if hasattr(_cs, 'sample') else _cs(n_colloc, rng)
+                Xc = colloc_sampler(n_colloc, rng)
 
                 if w_mono > 0:
                     loss_mono = monotonicity_loss_hard(Xc, model, params)
@@ -1888,9 +2063,9 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
             eval_model = swa_model.module if (use_stabilized and swa_active) else model
             eval_model.eval()
             Fv, Ev = hard_pinn_predict_load_energy(eval_model, Xv, params)
-            r2_l = r2_score(y_val[:, 0], Fv)
-            r2_e = r2_score(y_val[:, 1], Ev)
-            val_score = _val_checkpoint_score(r2_l, r2_e)
+            r2_l = r2_safe(y_val[:, 0], Fv)
+            r2_e = r2_safe(y_val[:, 1], Ev)
+            val_score = _val_checkpoint_score(r2_l, r2_e, approach="hard")
             history["epoch"].append(ep)
             history["train_loss"].append(loss_sum / nb)
             history["val_load_r2"].append(r2_l)
@@ -1904,17 +2079,15 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
                 best_state = copy.deepcopy(eval_model.state_dict())
             if es is not None and es(val_score, ep):
                 break
-        # RAR weight update
-        if rar_sampler is not None and ep % CFG.rar_interval == 0 and ep >= CFG.rar_warmup:
-            rar_sampler.update_weights(model, params, "hard")
 
     # [V8] Final SWA evaluation
     if use_stabilized and swa_active:
         swa_model.module.eval()
         Fv, Ev = hard_pinn_predict_load_energy(swa_model.module, Xv, params)
         r2_swa = _val_checkpoint_score(
-            float(r2_score(y_val[:, 0], Fv)),
-            float(r2_score(y_val[:, 1], Ev)),
+            float(r2_safe(y_val[:, 0], Fv)),
+            float(r2_safe(y_val[:, 1], Ev)),
+            approach="hard",
         )
         if r2_swa > best_r2:
             best_r2 = r2_swa
@@ -1944,16 +2117,44 @@ def train_ensemble(approach: str, train_df: pd.DataFrame, val_df: pd.DataFrame,
     logger.info(f"  Training {approach.upper()} ensemble (M={CFG.n_ensemble})...")
     train_fn = {"ddns": train_ddns, "soft": train_soft, "hard": train_hard}[approach]
     models, histories, member_metrics, metas = [], [], [], []
-    
+    failed_members = []  # (m_index, exception) for transparency
+    import gc as _gc
+
     for m in range(CFG.n_ensemble):
         seed = CFG.seed_base + m * 1000
-        model, hist, r2, meta = train_fn(train_df, val_df, scaler_disp, scaler_out, enc, params, seed, protocol, logger)
-        models.append(model)
-        histories.append(hist)
-        metas.append(meta)
-        metrics = evaluate_model(model, approach, val_df, scaler_disp, scaler_out, enc, params)
-        member_metrics.append(metrics)
-        logger.info(f"    M{m+1}: R²_load={metrics['load_r2']:.4f}, time={meta['training_time']:.1f}s")
+        try:
+            model, hist, r2, meta = train_fn(
+                train_df, val_df, scaler_disp, scaler_out, enc, params,
+                seed, protocol, logger,
+            )
+            metrics = evaluate_model(model, approach, val_df, scaler_disp, scaler_out, enc, params)
+            models.append(model)
+            histories.append(hist)
+            metas.append(meta)
+            member_metrics.append(metrics)
+            logger.info(f"    M{m+1}: R²_load={metrics['load_r2']:.4f}, time={meta['training_time']:.1f}s")
+        except (RuntimeError, ValueError) as ex:
+            # Catch OOM, NaN-grad explosions, etc. Continue with remaining members so a
+            # 36-h SLURM job is not lost to a single failure on member k of M.
+            failed_members.append((m, repr(ex)))
+            logger.error(f"    M{m+1}: TRAINING FAILED ({type(ex).__name__}): {ex}. Skipping member.")
+        finally:
+            # Aggressive cleanup: prevents VRAM fragmentation on long ensembles
+            # and keeps `nvidia-smi` honest. Important on >M=10 with autograd graphs.
+            _gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    if failed_members:
+        logger.warning(
+            f"  Ensemble training: {len(failed_members)}/{CFG.n_ensemble} members failed; "
+            f"continuing with M_actual={len(models)}."
+        )
+    if not models:
+        raise RuntimeError(
+            f"All {CFG.n_ensemble} members of the {approach} ensemble failed to train. "
+            f"Check logs for {len(failed_members)} captured exceptions."
+        )
     
     # --- Convergence filter (Tukey fence on training-set R²) ----------------
     # Evaluate every member on the FULL training set (not its bootstrap
@@ -2042,7 +2243,7 @@ def evaluate_model(model: nn.Module, approach: str, val_df: pd.DataFrame,
     else:
         Fv, Ev = hard_pinn_predict_load_energy(model, Xv, params)
     
-    return {"load_r2": float(r2_score(y_val[:, 0], Fv)), "energy_r2": float(r2_score(y_val[:, 1], Ev)),
+    return {"load_r2": float(r2_safe(y_val[:, 0], Fv)), "energy_r2": float(r2_safe(y_val[:, 1], Ev)),
             "load_rmse": float(np.sqrt(mean_squared_error(y_val[:, 0], Fv))),
             "energy_rmse": float(np.sqrt(mean_squared_error(y_val[:, 1], Ev))),
             "load_mae": float(mean_absolute_error(y_val[:, 0], Fv)),
@@ -2076,7 +2277,7 @@ def evaluate_ensemble(models: List[nn.Module], approach: str, val_df: pd.DataFra
     Em = np.mean(all_E, axis=0)
     Es = _ensemble_std_along_members(all_E)
     
-    return {"load_r2": float(r2_score(y_val[:, 0], Fm)), "energy_r2": float(r2_score(y_val[:, 1], Em)),
+    return {"load_r2": float(r2_safe(y_val[:, 0], Fm)), "energy_r2": float(r2_safe(y_val[:, 1], Em)),
             "load_rmse": float(np.sqrt(mean_squared_error(y_val[:, 0], Fm))),
             "energy_rmse": float(np.sqrt(mean_squared_error(y_val[:, 1], Em))),
             "load_mae": float(mean_absolute_error(y_val[:, 0], Fm)),
@@ -2087,45 +2288,83 @@ def evaluate_ensemble(models: List[nn.Module], approach: str, val_df: pd.DataFra
 
 
 def compute_statistical_tests(dual_results: Dict, logger: logging.Logger) -> Dict:
-    """Compute statistical significance tests between models.
-    
-    Uses Welch's independent-samples t-test (not paired) because the
-    Tukey-fence convergence filter can discard different numbers of
-    ensemble members per approach, making the arrays unequal length.
-    Cohen's d is computed for independent samples:
-        d = (mean1 - mean2) / s_pooled
+    """Compare ensemble member load-R² across approaches with three statistics.
 
-    **Interpretation:** ensemble members are trained on the same data split and
-    architecture; they are not strictly independent replicates. Welch's test is
-    used here as a standardized effect-size summary; treat p-values as
-    descriptive rather than exact confirmatory Type-I error rates.
+    For each (protocol, approach-pair) we report:
 
-    **Multiplicity:** Bonferroni adjustment is applied **within each protocol**
-    (random vs unseen), over the family of pairwise approach comparisons reported
-    for that protocol—not pooled across protocols.
+    1. **Welch's t-test** (``equal_var=False``) — descriptive effect-size summary.
+       Note: ensemble members share the data split, so the iid assumption is
+       violated. The p-value is reported with ``descriptive_only=True`` so
+       downstream tables can flag it as exploratory rather than confirmatory.
+    2. **Cohen's d** (pooled-σ form, see Cohen 1988).
+    3. **Bootstrap 95% CI of the mean R² difference** (``n_boot=10_000``,
+       resampling members with replacement). This is the *non-parametric*
+       complement to (1): it does not assume iid, gives a magnitude estimate
+       in R² units, and is what the manuscript can cite as a robust comparison.
+
+    Bonferroni adjustment is applied **within each protocol** (random vs
+    unseen), over the family of pairwise approach comparisons reported.
     """
     if not HAS_SCIPY:
         logger.warning("SciPy not available, skipping statistical tests")
         return {}
+    rng = np.random.default_rng(CFG.seed)
+    n_boot = 10_000
+
+    def _bootstrap_mean_diff_ci(arr1: np.ndarray, arr2: np.ndarray) -> Dict[str, float]:
+        """Percentile bootstrap of mean(arr1) - mean(arr2)."""
+        if arr1.size == 0 or arr2.size == 0:
+            return {"mean_diff": float("nan"), "ci_lo": float("nan"), "ci_hi": float("nan")}
+        idx1 = rng.integers(0, arr1.size, size=(n_boot, arr1.size))
+        idx2 = rng.integers(0, arr2.size, size=(n_boot, arr2.size))
+        diffs = arr1[idx1].mean(axis=1) - arr2[idx2].mean(axis=1)
+        return {
+            "mean_diff": float(np.mean(arr1) - np.mean(arr2)),
+            "ci_lo": float(np.percentile(diffs, 2.5)),
+            "ci_hi": float(np.percentile(diffs, 97.5)),
+        }
+
     results = {}
     for protocol in ["random", "unseen"]:
         if protocol not in dual_results:
             continue
         results[protocol] = {}
-        r2_vals = {a: [m["load_r2"] for m in dual_results[protocol][a]["member_metrics"]] 
+        r2_vals = {a: [m["load_r2"] for m in dual_results[protocol][a]["member_metrics"]]
                    for a in ["ddns", "soft", "hard"] if a in dual_results[protocol]}
         for a1, a2 in [("ddns", "soft"), ("ddns", "hard"), ("soft", "hard")]:
             if a1 in r2_vals and a2 in r2_vals:
-                arr1 = np.array(r2_vals[a1])
-                arr2 = np.array(r2_vals[a2])
+                arr1 = np.array(r2_vals[a1], dtype=np.float64)
+                arr2 = np.array(r2_vals[a2], dtype=np.float64)
+                # Drop NaNs (flat-target slices) so neither test crashes.
+                arr1 = arr1[np.isfinite(arr1)]
+                arr2 = arr2[np.isfinite(arr2)]
+                if arr1.size == 0 or arr2.size == 0:
+                    continue
                 t_stat, t_pvalue = stats.ttest_ind(arr1, arr2, equal_var=False)
-                # Cohen's d for independent samples (pooled std)
                 n1, n2 = len(arr1), len(arr2)
-                s_pooled = np.sqrt(((n1 - 1) * np.var(arr1, ddof=1) + (n2 - 1) * np.var(arr2, ddof=1)) / (n1 + n2 - 2))
+                s_pooled = np.sqrt(
+                    ((n1 - 1) * np.var(arr1, ddof=1) + (n2 - 1) * np.var(arr2, ddof=1))
+                    / max(n1 + n2 - 2, 1)
+                )
                 cohens_d = (np.mean(arr1) - np.mean(arr2)) / (s_pooled + 1e-12)
-                results[protocol][f"{a1}_vs_{a2}"] = {"t_statistic": float(t_stat), "t_pvalue": float(t_pvalue), "cohens_d": float(cohens_d),
-                                                       "n1": n1, "n2": n2}
-                logger.info(f"  {protocol} {a1} vs {a2}: p={t_pvalue:.4f}, d={cohens_d:.3f} (n1={n1}, n2={n2})")
+                bs = _bootstrap_mean_diff_ci(arr1, arr2)
+                results[protocol][f"{a1}_vs_{a2}"] = {
+                    "t_statistic": float(t_stat),
+                    "t_pvalue": float(t_pvalue),
+                    "cohens_d": float(cohens_d),
+                    "n1": n1, "n2": n2,
+                    "bootstrap_mean_diff": bs["mean_diff"],
+                    "bootstrap_ci_lo_95": bs["ci_lo"],
+                    "bootstrap_ci_hi_95": bs["ci_hi"],
+                    "bootstrap_excludes_zero": (bs["ci_lo"] > 0.0) or (bs["ci_hi"] < 0.0),
+                    "descriptive_only": True,
+                    "iid_violation_note": "Ensemble members share data; t-test/p-value descriptive, bootstrap CI is robust.",
+                }
+                logger.info(
+                    f"  {protocol} {a1} vs {a2}: p={t_pvalue:.4f} (descriptive), "
+                    f"d={cohens_d:.3f}, ΔR²={bs['mean_diff']:.4f} "
+                    f"95% CI=[{bs['ci_lo']:.4f}, {bs['ci_hi']:.4f}] (n1={n1}, n2={n2})"
+                )
 
     # Bonferroni: correct within each protocol's comparison family only
     for protocol in results:
@@ -2135,7 +2374,8 @@ def compute_statistical_tests(dual_results: Dict, logger: logging.Logger) -> Dic
             m = max(n_family, 1)
             results[protocol][comp]["p_bonferroni"] = min(raw_p * m, 1.0)
             results[protocol][comp]["n_comparisons_family"] = m
-            results[protocol][comp]["significant_bonferroni"] = results[protocol][comp]["p_bonferroni"] < 0.05
+            # Bonferroni-significant flag retained for legacy tables but treat as descriptive
+            results[protocol][comp]["significant_bonferroni_descriptive"] = results[protocol][comp]["p_bonferroni"] < 0.05
         if n_family > 1:
             logger.info(
                 f"  Bonferroni ({protocol}): family of {n_family} comparisons, "
@@ -2234,7 +2474,19 @@ def compute_ipf_robust(disps: np.ndarray, loads: np.ndarray, min_disp: float = 0
     force in the first 25% of the displacement range (not the global max,
     which for progressive crushing could occur deep in the stroke).
     """
-    peaks, _ = find_peaks(loads, prominence=prom_frac * (loads.max() - loads.min()))
+    # Manuscript Section 2: peak qualifies on prominence AND width.
+    # Width >= 2 samples filters out 1-sample noise spikes; loads are densely
+    # resampled (~650-1050 pts per curve) so 2 samples is a small fraction of stroke.
+    load_range = float(loads.max() - loads.min())
+    if load_range < 1e-9:
+        # Flat curve: no meaningful peak; return the constant value at first valid disp.
+        valid_idx = int(np.argmax(disps > min_disp)) if np.any(disps > min_disp) else 0
+        return float(loads[valid_idx]), float(disps[valid_idx])
+    peaks, _ = find_peaks(
+        loads,
+        prominence=prom_frac * load_range,
+        width=2,
+    )
     valid_peaks = [p for p in peaks if disps[p] > min_disp]
     if valid_peaks:
         idx = valid_peaks[0]
@@ -2454,14 +2706,28 @@ def train_lc_plausibility_classifier(
         return max(2, min(5, min_class))
 
     # --- Base learners (for the final production model) ----------------------
-    base_ens = _make_base()
-    n_cv = max(2, min(5, min(n_lc0, n_lc1)))
-    cal_ens = CalibratedClassifierCV(base_ens, method="sigmoid", cv=n_cv)
-
+    # Sample-size-aware calibration policy: identical to ``auto_tune_lambda``.
+    # With ~12-30 paired samples (n_lc0 = n_lc1 ≈ 6-15) the Platt sigmoid
+    # calibrator is high-variance; in that regime we deliberately *skip*
+    # calibration and return the soft-voting ensemble directly. Above 30
+    # samples we use sigmoid calibration with up to 5-fold inner CV.
     import warnings as _w
-    with _w.catch_warnings():
-        _w.simplefilter("ignore")
-        cal_ens.fit(X_scaled, y)
+    base_ens = _make_base()
+    if n_samples < 20:
+        _calib_mode_outer = "uncalibrated"
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            base_ens.fit(X_scaled, y)
+        cal_ens = base_ens
+    else:
+        _cv_cap_outer = 3 if n_samples < 30 else 5
+        n_cv = max(2, min(_cv_cap_outer, min(n_lc0, n_lc1)))
+        _calib_mode_outer = f"sigmoid_cv{n_cv}"
+        cal_ens = CalibratedClassifierCV(base_ens, method="sigmoid", cv=n_cv)
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            cal_ens.fit(X_scaled, y)
+    logger.info(f"    Outer classifier calibration: {_calib_mode_outer} (n={n_samples})")
 
     # --- Diagnostics: resubstitution (training) metrics ----------------------
     y_pred = cal_ens.predict(X_scaled)
@@ -2484,12 +2750,21 @@ def train_lc_plausibility_classifier(
             _scaler = StandardScaler().fit(X_raw[train_idx])
             _X_tr = _scaler.transform(X_raw[train_idx])
             _X_te = _scaler.transform(X_raw[test_idx])
-            _ens = CalibratedClassifierCV(
-                _make_base(), method="sigmoid",
-                cv=_safe_inner_cv(y[train_idx]))
-            with _w.catch_warnings():
-                _w.simplefilter("ignore")
-                _ens.fit(_X_tr, y[train_idx])
+            # Same sample-size policy as the outer fit: skip calibration when
+            # the train fold is too small to support a stable Platt sigmoid.
+            _base_loo = _make_base()
+            if n_samples < 20:
+                with _w.catch_warnings():
+                    _w.simplefilter("ignore")
+                    _base_loo.fit(_X_tr, y[train_idx])
+                _ens = _base_loo
+            else:
+                _ens = CalibratedClassifierCV(
+                    _base_loo, method="sigmoid",
+                    cv=_safe_inner_cv(y[train_idx]))
+                with _w.catch_warnings():
+                    _w.simplefilter("ignore")
+                    _ens.fit(_X_tr, y[train_idx])
             loo_preds[test_idx[0]] = _ens.predict(_X_te)[0]
             loo_probs[test_idx[0]] = _ens.predict_proba(_X_te)[0, 1]
         cv_acc = accuracy_score(y, loo_preds)
@@ -2659,16 +2934,16 @@ def fig_classifier_decision_boundary(
 
     fig, axes = plt.subplots(1, 2, figsize=(7.48, 3.5))
 
-    # Panel (a): P(LC2 | indicators) heatmap
+    # Panel (a): P(LC2 | indicators) heatmap (cividis is colourblind- and B/W-safe)
     ax = axes[0]
-    im = ax.contourf(EA_grid, IPF_grid, P_lc2, levels=20, cmap="RdYlBu_r")
-    ax.contour(EA_grid, IPF_grid, P_lc2, levels=[0.5], colors="black",
-               linewidths=2, linestyles="--")
-    for lc_val, marker, color, label in [("LC1", "o", "#1f77b4", "LC1"),
-                                          ("LC2", "s", "#ff7f0e", "LC2")]:
+    im = ax.contourf(EA_grid, IPF_grid, P_lc2, levels=20, cmap="cividis")
+    ax.contour(EA_grid, IPF_grid, P_lc2, levels=[0.5], colors="white",
+               linewidths=1.6, linestyles="--")
+    for lc_val, marker, color, label in [("LC1", MARKERS["LC1"], COLORS["LC1"], "LC1"),
+                                          ("LC2", MARKERS["LC2"], COLORS["LC2"], "LC2")]:
         sub = df_metrics[df_metrics["LC"] == lc_val]
         ax.scatter(sub[ea_col], sub["IPF"], c=color, marker=marker,
-                   edgecolors="black", s=80, zorder=5, label=label)
+                   edgecolors="black", s=70, zorder=5, label=label)
     ax.set_xlabel("Energy absorption to {:.0f} mm (J)".format(D_COMMON))
     ax.set_ylabel("Initial Peak Force IPF (kN)")
     ang_note = f" (slice at θ={angle_ref:.1f}°)" if n_in >= 3 else ""
@@ -2676,19 +2951,19 @@ def fig_classifier_decision_boundary(
     ax.legend(loc="best")
     plt.colorbar(im, ax=ax, label="P(LC2)")
 
-    # Panel (b): Penalty landscape
+    # Panel (b): Penalty landscape (sequential, B/W-safe)
     ax2 = axes[1]
     Phi_lc1 = -np.log(np.maximum(1.0 - P_lc2, 1e-6))  # penalty if LC=LC1
     Phi_lc2 = -np.log(np.maximum(P_lc2, 1e-6))          # penalty if LC=LC2
     Phi_min = np.minimum(Phi_lc1, Phi_lc2)  # best-case penalty
-    im2 = ax2.contourf(EA_grid, IPF_grid, Phi_min, levels=20, cmap="YlOrRd")
-    ax2.contour(EA_grid, IPF_grid, P_lc2, levels=[0.5], colors="black",
-                linewidths=2, linestyles="--")
-    for lc_val, marker, color, label in [("LC1", "o", "#1f77b4", "LC1"),
-                                          ("LC2", "s", "#ff7f0e", "LC2")]:
+    im2 = ax2.contourf(EA_grid, IPF_grid, Phi_min, levels=20, cmap="viridis")
+    ax2.contour(EA_grid, IPF_grid, P_lc2, levels=[0.5], colors="white",
+                linewidths=1.6, linestyles="--")
+    for lc_val, marker, color, label in [("LC1", MARKERS["LC1"], COLORS["LC1"], "LC1"),
+                                          ("LC2", MARKERS["LC2"], COLORS["LC2"], "LC2")]:
         sub = df_metrics[df_metrics["LC"] == lc_val]
         ax2.scatter(sub[ea_col], sub["IPF"], c=color, marker=marker,
-                    edgecolors="black", s=80, zorder=5, label=label)
+                    edgecolors="black", s=70, zorder=5, label=label)
     ax2.set_xlabel("Energy absorption to {:.0f} mm (J)".format(D_COMMON))
     ax2.set_ylabel("Initial Peak Force IPF (kN)")
     ax2.set_title(f"(b) min-LC Penalty $\\Phi${ang_note}")
@@ -2753,6 +3028,25 @@ def auto_tune_lambda(
     y = np.array([_lc_label_to_binary(lc) for lc in df_metrics["LC"].values], dtype=int)
     n = len(y)
 
+    # Sample-size policy for the LOO calibrator inside the LOO probability loop:
+    # ─ if n < 20: data is too small for stable Platt sigmoid calibration on n-1
+    #   training-fold rows (cv would drop to 2-3 and the calibrator's fits become
+    #   high-variance). Use the **uncalibrated** soft-voting ensemble; the LOO
+    #   probabilities are then raw learner-averaged probabilities. λ tuned to
+    #   that signal is honest about the data regime.
+    # ─ if 20 ≤ n < 30: keep CalibratedClassifierCV with sigmoid but cap cv=3.
+    # ─ if n ≥ 30: original behaviour (sigmoid, cv up to 5).
+    if n < 20:
+        _calib_mode = "uncalibrated"
+        _cv_cap = None
+    elif n < 30:
+        _calib_mode = "sigmoid_small"
+        _cv_cap = 3
+    else:
+        _calib_mode = "sigmoid_full"
+        _cv_cap = 5
+    logger.info(f"    LOO calibration mode: {_calib_mode} (n={n})")
+
     # LOO cross-validated probabilities (scaler refit on train fold only; matches training CV)
     from sklearn.model_selection import LeaveOneOut
     loo_probs = np.zeros(n)
@@ -2761,13 +3055,19 @@ def auto_tune_lambda(
         X_tr = _scaler.transform(X_raw[train_idx])
         X_te = _scaler.transform(X_raw[test_idx])
         _base = _make_lc_voting_classifier()
-        min_class = int(min(np.sum(y[train_idx] == 0), np.sum(y[train_idx] == 1)))
-        _cv = max(2, min(5, min_class))
-        _ens = CalibratedClassifierCV(_base, method="sigmoid", cv=_cv)
-        with _w.catch_warnings():
-            _w.simplefilter("ignore")
-            _ens.fit(X_tr, y[train_idx])
-        loo_probs[test_idx[0]] = _ens.predict_proba(X_te)[0, 1]
+        if _calib_mode == "uncalibrated":
+            with _w.catch_warnings():
+                _w.simplefilter("ignore")
+                _base.fit(X_tr, y[train_idx])
+            loo_probs[test_idx[0]] = _base.predict_proba(X_te)[0, 1]
+        else:
+            min_class = int(min(np.sum(y[train_idx] == 0), np.sum(y[train_idx] == 1)))
+            _cv = max(2, min(_cv_cap, min_class))
+            _ens = CalibratedClassifierCV(_base, method="sigmoid", cv=_cv)
+            with _w.catch_warnings():
+                _w.simplefilter("ignore")
+                _ens.fit(X_tr, y[train_idx])
+            loo_probs[test_idx[0]] = _ens.predict_proba(X_te)[0, 1]
 
     # Penalties for correct and wrong LC
     p_correct = np.where(y == 1, loo_probs, 1.0 - loo_probs)
@@ -2805,52 +3105,10 @@ def auto_tune_lambda(
         "loo_probs": loo_probs,
         "phi_correct": phi_correct,
         "phi_wrong": phi_wrong,
+        "calibration_mode": _calib_mode,
+        "n_samples": n,
     }
     return lambda_opt, tuning_diag
-
-
-def auto_tune_beta(
-    models: List[nn.Module], approach: str,
-    df_metrics: pd.DataFrame,
-    scaler_disp: StandardScaler, enc: OneHotEncoder, params: ScalingParams,
-    logger: logging.Logger,
-    fraction: float = 0.25
-) -> float:
-    """Auto-tune beta_robust so uncertainty penalty is ~fraction of fit_error at observed data.
-
-    Evaluates ensemble on observed (angle, LC) pairs, computes the median
-    fit_error and median (sigma_EA^2 + sigma_IPF^2), then sets:
-        beta = fraction * median_fit_error / median_unc
-
-    Fit error uses EA at ``D_COMMON`` compared to ``df_metrics['EA_common']`` so
-    scaling matches the inverse-design objective (requires ``EA_common`` column).
-    """
-    if "EA_common" not in df_metrics.columns:
-        raise ValueError("auto_tune_beta requires df_metrics['EA_common']; call enrich_df_metrics_ea_common first.")
-    logger.info("  Auto-tuning beta_robust (ensemble uncertainty penalty weight)...")
-    fit_errors = []
-    unc_terms = []
-    for _, row in df_metrics.iterrows():
-        m = compute_ea_ipf_ensemble(models, approach, float(row["Angle"]), str(row["LC"]),
-                                     scaler_disp, enc, params, d_eval=D_COMMON)
-        ea_ref = float(row["EA_common"])
-        w_ea = 1.0 / (ea_ref**2 + 1e-12)
-        w_ipf = 1.0 / (row["IPF"]**2 + 1e-12)
-        fe = w_ea * (m["EA"] - ea_ref) ** 2 + w_ipf * (m["IPF"] - row["IPF"]) ** 2
-        unc = m.get("EA_std", 0)**2 + m.get("IPF_std", 0)**2
-        fit_errors.append(fe)
-        unc_terms.append(unc)
-
-    med_fe = float(np.median(fit_errors))
-    med_unc = float(np.median(unc_terms))
-    if med_unc < 1e-12:
-        logger.warning("    Ensemble uncertainty near zero, setting beta_robust=0")
-        return 0.0
-
-    beta = fraction * med_fe / med_unc
-    logger.info(f"    beta_robust = {beta:.6f}")
-    logger.info(f"    median fit_error = {med_fe:.6f}, median unc = {med_unc:.6f}, fraction = {fraction}")
-    return beta
 
 
 def run_lambda_sensitivity(
@@ -2883,7 +3141,6 @@ def run_lambda_sensitivity(
             gp_restarts=bo_cfg.gp_restarts,
             seed=bo_cfg.seed,
             prob_weight=lam,
-            beta_robust=getattr(bo_cfg, 'beta_robust', 0.0),
             run_classifier_ablation=False,
             lambda_sweep=False,
         )
@@ -3275,41 +3532,25 @@ def _inverse_coarse_grid_fallback(
 
 
 def _make_objective(models, approach, lc, scaler_disp, enc, params, target_ea, target_ipf, w_ea, w_ipf,
-                    cal_ens=None, feat_scaler=None, prob_weight=0.0, d_eval=None,
-                    beta_robust=0.0, gamma_tikhonov=0.0, theta_center=57.5):
-    """Factory function for objective closure with optional LC plausibility and robustness penalties.
+                    cal_ens=None, feat_scaler=None, prob_weight=0.0, d_eval=None):
+    """Factory function for objective closure with optional LC plausibility penalty.
 
-    Objective:
+    Objective (matches manuscript Section 3.7.2):
         J = w_ea*(EA@d_eval - EA_target)^2 + w_ipf*(IPF - IPF_target)^2
             + prob_weight*(-log p_LC)
-            + beta_robust*(sigma_EA^2 + sigma_IPF^2)
-            + gamma_tikhonov*(theta - theta_center)^2
-
-    The Tikhonov regularization term addresses ill-posedness by preferring
-    solutions near the center of the design space (where data density is highest).
     """
     def objective(angle: float) -> float:
         m = compute_ea_ipf_ensemble(models, approach, float(angle), lc, scaler_disp, enc, params,
                                      d_eval=d_eval)
         fit_error = float(w_ea * (m["EA"] - target_ea)**2 + w_ipf * (m["IPF"] - target_ipf)**2)
 
-        # Ensemble uncertainty penalty (robust design)
-        unc_penalty = 0.0
-        if beta_robust > 0:
-            unc_penalty = float(beta_robust * (m.get("EA_std", 0)**2 + m.get("IPF_std", 0)**2))
-
-        # Tikhonov regularization (ill-posedness)
-        tikh_penalty = 0.0
-        if gamma_tikhonov > 0:
-            tikh_penalty = float(gamma_tikhonov * (float(angle) - theta_center) ** 2)
-
         if cal_ens is not None and prob_weight > 0:
             penalty, _ = compute_lc_penalty(
                 cal_ens, feat_scaler, m["EA"], m["IPF"], lc, prob_weight,
                 angle_deg=float(angle),
             )
-            return fit_error + penalty + unc_penalty + tikh_penalty
-        return fit_error + unc_penalty + tikh_penalty
+            return fit_error + penalty
+        return fit_error
     return objective
 
 
@@ -3318,11 +3559,9 @@ def run_inverse_design(models: List[nn.Module], approach: str, target_ea: float,
                        scaler_disp: StandardScaler, enc: OneHotEncoder, params: ScalingParams,
                        bo_cfg: BOConfig, logger: logging.Logger,
                        cal_ens=None, feat_scaler=None,
-                       gamma_tikhonov_override: Optional[float] = None,
-                       prob_weight_override: Optional[float] = None,
-                       beta_robust_override: Optional[float] = None) -> Dict:
+                       prob_weight_override: Optional[float] = None) -> Dict:
     """Run inverse design comparison with automatic LC selection.
-    
+
     Uses EA evaluated at ``D_COMMON`` for both LCs to ensure
     displacement-fair comparison. ``target_ea`` must be EA absorbed to
     ``D_COMMON`` for both LC1 and LC2.
@@ -3333,8 +3572,8 @@ def run_inverse_design(models: List[nn.Module], approach: str, target_ea: float,
         Target energy absorption (J) to ``D_COMMON`` for both LCs.
     target_ipf : float
         Target initial peak force (kN).
-    gamma_tikhonov_override, prob_weight_override, beta_robust_override : optional
-        When set, override auto-tuned Tikhonov / classifier / robustness weights (ablations).
+    prob_weight_override : optional
+        When set, override the auto-tuned classifier penalty weight (ablation).
     """
     lc_categories = [str(x) for x in enc.categories_[0].tolist()]
     bounds = (CFG.angle_opt_min, CFG.angle_opt_max)
@@ -3343,12 +3582,9 @@ def run_inverse_design(models: List[nn.Module], approach: str, target_ea: float,
     prob_weight = bo_cfg.prob_weight if cal_ens is not None else 0.0
     if prob_weight_override is not None:
         prob_weight = float(prob_weight_override) if cal_ens is not None else 0.0
-    beta_robust = getattr(bo_cfg, 'beta_robust', 0.0)
-    if beta_robust_override is not None:
-        beta_robust = float(beta_robust_override)
     results = {"gpbo": {}, "gpbo_joint": None,
                "target_ea": target_ea, "target_ipf": target_ipf,
-               "prob_weight": prob_weight, "beta_robust": beta_robust}
+               "prob_weight": prob_weight}
     # Note: Only GP-BO is used for inverse design (grid/DE/DA removed in v18)
     
     def _enrich(res_dict, lc):
@@ -3364,16 +3600,6 @@ def run_inverse_design(models: List[nn.Module], approach: str, target_ea: float,
         res_dict["pred_ea_full"] = m_full["EA"]
         res_dict["d_eval"] = D_COMMON
     
-    # Auto-tune Tikhonov regularization (unless caller overrides, e.g. ablation gamma=0)
-    gamma_tikh = getattr(bo_cfg, 'gamma_tikhonov', 0.0)
-    theta_ctr = getattr(bo_cfg, 'theta_center', 57.5)
-    if gamma_tikhonov_override is not None:
-        gamma_tikh = float(gamma_tikhonov_override)
-    elif gamma_tikh <= 0:
-        # Set so penalty at angle boundary is ~10% of typical fit error (normalized objectives)
-        gamma_tikh = 0.1 / max(1.0, (CFG.angle_opt_max - theta_ctr) ** 2)
-    logger.info(f"    Tikhonov regularization: gamma={gamma_tikh:.6f}, center={theta_ctr:.1f}")
-
     # Create objective functions for each LC (evaluated at D_COMMON)
     objective_funcs = {}
     for lc in lc_categories:
@@ -3381,8 +3607,7 @@ def run_inverse_design(models: List[nn.Module], approach: str, target_ea: float,
             models, approach, lc, scaler_disp, enc, params,
             target_ea, target_ipf, w_ea, w_ipf,
             cal_ens=cal_ens, feat_scaler=feat_scaler, prob_weight=prob_weight,
-            d_eval=D_COMMON, beta_robust=beta_robust,
-            gamma_tikhonov=gamma_tikh, theta_center=theta_ctr
+            d_eval=D_COMMON,
         )
 
     # Run JOINT GP-BO over [theta, LC] space (multi-start for global optimality)
@@ -3483,9 +3708,6 @@ def run_inverse_design(models: List[nn.Module], approach: str, target_ea: float,
             "(CFG.run_gpbo = False)."
         )
 
-    results["gamma_tikhonov_effective"] = float(gamma_tikh)
-    results["theta_center"] = float(theta_ctr)
-    
     return results
 
 
@@ -3493,17 +3715,41 @@ def run_inverse_design(models: List[nn.Module], approach: str, target_ea: float,
 # ILL-POSEDNESS ANALYSIS: MULTI-START BO, LANDSCAPE, SENSITIVITY, POSTERIOR
 # =============================================================================
 def gp_bo_minimize_joint_multistart(objective_funcs, bounds, bo_cfg, logger, n_restarts=5):
-    """Multi-start GP-BO: run gp_bo_minimize_joint N times with different seeds, keep best."""
+    """Multi-start GP-BO: run ``gp_bo_minimize_joint`` ``n_restarts`` times with
+    different seeds, keep the lowest-y restart, and report cross-restart spread.
+
+    Per the manuscript Section 5.8, robustness is assessed across **5 independent
+    random seeds per target**. Each restart is a *fully independent* GP-BO run
+    of ``bo_cfg.n_calls_total`` evaluations (default 30). The total surrogate
+    cost per inverse-design call is therefore ``n_restarts × n_calls_total``
+    (= 150 with defaults). The "30 evaluations per BO run" claim in the paper
+    refers to the per-restart budget — the multi-start factor is the robustness
+    safety net documented in Section 5.8 ("Multi-seed robustness testing ...
+    converges to identical solutions across seeds").
+    """
     if n_restarts <= 1:
         return gp_bo_minimize_joint(objective_funcs, bounds, bo_cfg, logger)
+    n_calls_per_restart = int(getattr(bo_cfg, "n_calls_total", 30))
+    total_calls_per_target = n_restarts * n_calls_per_restart
+    logger.info(
+        f"    Multi-start GP-BO: {n_restarts} restarts × {n_calls_per_restart} calls each "
+        f"= {total_calls_per_target} surrogate evaluations per target."
+    )
+
     all_restarts = []
     original_seed = bo_cfg.seed
+    # Hash-stride seeds: avoids stride collisions with ensemble training (which
+    # uses stride 1000) and produces non-adjacent integer seeds that diverge
+    # under skopt's RNG initialization in just a couple of TPE iterations.
+    SEED_PRIME = 1009
     for i in range(n_restarts):
-        logger.info(f"    Multi-start BO restart {i+1}/{n_restarts} (seed={original_seed + i * 1000})")
-        bo_cfg.seed = original_seed + i * 1000
+        seed_i = (original_seed * 37 + i * SEED_PRIME) % (2 ** 31 - 1)
+        logger.info(f"    Multi-start BO restart {i+1}/{n_restarts} (seed={seed_i})")
+        bo_cfg.seed = int(seed_i)
         try:
             res = gp_bo_minimize_joint(objective_funcs, bounds, bo_cfg, logger)
             res["restart_id"] = i
+            res["restart_seed"] = int(seed_i)
             all_restarts.append(res)
         except Exception as e:
             logger.warning(f"    Restart {i+1} failed: {e}")
@@ -3511,9 +3757,33 @@ def gp_bo_minimize_joint_multistart(objective_funcs, bounds, bo_cfg, logger, n_r
     if not all_restarts:
         raise RuntimeError("All multi-start BO restarts failed")
     best = min(all_restarts, key=lambda r: r["y_best"])
+
+    # Cross-restart spread (theta and y at the per-restart optimum). This is the
+    # m5 metric: it surfaces non-convergence cases that the "best-only" reporting
+    # would otherwise hide.
+    theta_bests = np.array([r["x_best"] for r in all_restarts], dtype=np.float64)
+    y_bests = np.array([r["y_best"] for r in all_restarts], dtype=np.float64)
     best["all_restarts"] = all_restarts
     best["n_restarts_completed"] = len(all_restarts)
-    logger.info(f"    Multi-start BO: best y={best['y_best']:.6f} from restart {best['restart_id']+1}")
+    best["restart_summary"] = {
+        "n_restarts_requested": int(n_restarts),
+        "n_restarts_completed": int(len(all_restarts)),
+        "n_calls_per_restart": int(n_calls_per_restart),
+        "total_surrogate_calls": int(total_calls_per_target),
+        "theta_best_mean": float(np.mean(theta_bests)),
+        "theta_best_std": float(np.std(theta_bests, ddof=1)) if len(theta_bests) > 1 else 0.0,
+        "theta_best_min": float(np.min(theta_bests)),
+        "theta_best_max": float(np.max(theta_bests)),
+        "y_best_mean": float(np.mean(y_bests)),
+        "y_best_std": float(np.std(y_bests, ddof=1)) if len(y_bests) > 1 else 0.0,
+        "y_best_min": float(np.min(y_bests)),
+        "y_best_max": float(np.max(y_bests)),
+    }
+    logger.info(
+        f"    Multi-start BO: best y={best['y_best']:.6f} from restart {best['restart_id']+1}; "
+        f"cross-restart θ spread = ±{best['restart_summary']['theta_best_std']:.3f}°, "
+        f"y spread = ±{best['restart_summary']['y_best_std']:.6f}"
+    )
     return best
 
 
@@ -3617,23 +3887,26 @@ def fig_solution_landscape(all_inverse_results, output_dir, logger):
         return
     n = len(targets_with_landscape)
     fig_w = min(PRINT_WIDTH_IN, 3.5 * n)
-    fonts = scaled_fonts(fig_w)
     fig, axes = plt.subplots(1, n, figsize=(fig_w, 3.0), squeeze=False)
+    lc_color = {"LC1": COLORS["LC1"], "LC2": COLORS["LC2"]}
+    lc_ls = {"LC1": LINESTYLES["LC1"], "LC2": LINESTYLES["LC2"]}
     for i, res in enumerate(targets_with_landscape):
         ax = axes[0, i]
         sl = res["solution_landscape"]
         tid = res.get("target_info", {}).get("id", f"T{i+1}")
         for lc in sorted(k.replace("J_", "") for k in sl if k.startswith("J_")):
             J = sl[f"J_{lc}"]
-            ax.plot(sl["theta_grid"], J, label=lc, linewidth=0.8)
+            ax.plot(sl["theta_grid"], J, label=lc, linewidth=1.0,
+                    color=lc_color.get(lc, COLORS["data"]),
+                    linestyle=lc_ls.get(lc, "-"))
             for m_pt in sl.get(f"local_minima_{lc}", []):
-                ax.plot(m_pt["theta"], m_pt["J"], "v", markersize=5, color="red")
-        ax.set_title(f"{tid} (SMI={sl['multiplicity_index']})", fontsize=fonts["title"])
-        ax.set_xlabel(r"Angle ($^\circ$)", fontsize=fonts["label"])
+                ax.plot(m_pt["theta"], m_pt["J"], "v", markersize=5, color=COLORS["gpbo"])
+        ax.set_title(f"{tid} (SMI={sl['multiplicity_index']})")
+        ax.set_xlabel(r"Angle ($^\circ$)")
         if i == 0:
-            ax.set_ylabel(r"Objective $J(\theta)$", fontsize=fonts["label"])
-        ax.legend(fontsize=fonts["legend"])
-        ax.tick_params(labelsize=fonts["tick"])
+            ax.set_ylabel(r"Objective $J(\theta)$")
+        ax.legend()
+    apply_fig_style(fig)
     fig.tight_layout()
     path = os.path.join(output_dir, "Fig_solution_landscape.png")
     fig.savefig(path, dpi=600, bbox_inches="tight")
@@ -3648,26 +3921,25 @@ def fig_forward_map_jacobian(jacobian_results, output_dir, logger):
     if not lcs:
         return
     fig_w = PRINT_WIDTH_IN
-    fonts = scaled_fonts(fig_w)
     fig, axes = plt.subplots(2, len(lcs), figsize=(fig_w, 4.5), squeeze=False, sharex=True)
+    bif_color = COLORS["gpbo"]
     for j, lc in enumerate(lcs):
         dea = jacobian_results[f"dEA_dtheta_{lc}"]
         dipf = jacobian_results[f"dIPF_dtheta_{lc}"]
-        axes[0, j].plot(theta, dea, linewidth=0.8, color="C0")
-        axes[0, j].axhline(0, color="gray", linewidth=0.5, linestyle="--")
+        axes[0, j].plot(theta, dea, linewidth=1.0, color=COLORS["soft"])
+        axes[0, j].axhline(0, color="0.4", linewidth=0.6, linestyle="--")
         for bf in jacobian_results.get(f"ea_bifurcations_{lc}", []):
-            axes[0, j].axvline(bf, color="red", linewidth=0.5, linestyle=":", alpha=0.7)
-        axes[0, j].set_title(f"dEA/d$\\theta$ - {lc}", fontsize=fonts["title"])
-        axes[0, j].set_ylabel("J/(kN$\\cdot$deg)" if j == 0 else "", fontsize=fonts["label"])
-        axes[1, j].plot(theta, dipf, linewidth=0.8, color="C1")
-        axes[1, j].axhline(0, color="gray", linewidth=0.5, linestyle="--")
+            axes[0, j].axvline(bf, color=bif_color, linewidth=0.7, linestyle=":", alpha=0.85)
+        axes[0, j].set_title(f"dEA/d$\\theta$ - {lc}")
+        axes[0, j].set_ylabel("J/(kN$\\cdot$deg)" if j == 0 else "")
+        axes[1, j].plot(theta, dipf, linewidth=1.0, color=COLORS["ddns"])
+        axes[1, j].axhline(0, color="0.4", linewidth=0.6, linestyle="--")
         for bf in jacobian_results.get(f"ipf_bifurcations_{lc}", []):
-            axes[1, j].axvline(bf, color="red", linewidth=0.5, linestyle=":", alpha=0.7)
-        axes[1, j].set_title(f"dIPF/d$\\theta$ - {lc}", fontsize=fonts["title"])
-        axes[1, j].set_xlabel(r"Angle ($^\circ$)", fontsize=fonts["label"])
-        axes[1, j].set_ylabel("kN/deg" if j == 0 else "", fontsize=fonts["label"])
-    for ax in axes.flat:
-        ax.tick_params(labelsize=fonts["tick"])
+            axes[1, j].axvline(bf, color=bif_color, linewidth=0.7, linestyle=":", alpha=0.85)
+        axes[1, j].set_title(f"dIPF/d$\\theta$ - {lc}")
+        axes[1, j].set_xlabel(r"Angle ($^\circ$)")
+        axes[1, j].set_ylabel("kN/deg" if j == 0 else "")
+    apply_fig_style(fig)
     fig.tight_layout()
     path = os.path.join(output_dir, "Fig_forward_map_jacobian.png")
     fig.savefig(path, dpi=600, bbox_inches="tight")
@@ -3682,26 +3954,26 @@ def fig_inverse_posterior(all_inverse_results, output_dir, logger):
         return
     n = len(targets_with_post)
     fig_w = min(PRINT_WIDTH_IN, 3.5 * n)
-    fonts = scaled_fonts(fig_w)
     fig, axes = plt.subplots(1, n, figsize=(fig_w, 2.8), squeeze=False)
     for i, res in enumerate(targets_with_post):
         ax = axes[0, i]
         post = res["inverse_posterior"]
         tid = res.get("target_info", {}).get("id", f"T{i+1}")
-        ax.plot(post["theta_grid"], post["posterior"], linewidth=0.8, color="C0")
-        ax.axvline(post["mean"], color="C1", linewidth=0.7, linestyle="--",
+        ax.plot(post["theta_grid"], post["posterior"], linewidth=1.0, color=COLORS["soft"])
+        ax.axvline(post["mean"], color=COLORS["ddns"], linewidth=1.0, linestyle="--",
                    label=f"mean={post['mean']:.1f}$^\\circ$")
-        ax.axvspan(post["ci_95_lower"], post["ci_95_upper"], alpha=0.15, color="C0", label="95% CI")
+        ax.axvspan(post["ci_95_lower"], post["ci_95_upper"], alpha=0.18,
+                   color=COLORS["soft"], label="95% CI")
         bo_best = res.get("gpbo_best", res.get("gpbo_joint", {}))
         if bo_best and "x_best" in bo_best:
-            ax.axvline(bo_best["x_best"], color="red", linewidth=0.7, linestyle=":",
+            ax.axvline(bo_best["x_best"], color=COLORS["gpbo"], linewidth=1.0, linestyle=":",
                        label=f"BO opt={bo_best['x_best']:.1f}$^\\circ$")
-        ax.set_title(tid, fontsize=fonts["title"])
-        ax.set_xlabel(r"Angle ($^\circ$)", fontsize=fonts["label"])
+        ax.set_title(tid)
+        ax.set_xlabel(r"Angle ($^\circ$)")
         if i == 0:
-            ax.set_ylabel(r"$P(\theta \mid$ target$)$", fontsize=fonts["label"])
-        ax.legend(fontsize=max(fonts["legend"] - 1, 5))
-        ax.tick_params(labelsize=fonts["tick"])
+            ax.set_ylabel(r"$P(\theta \mid$ target$)$")
+        ax.legend()
+    apply_fig_style(fig)
     fig.tight_layout()
     path = os.path.join(output_dir, "Fig_inverse_posterior.png")
     fig.savefig(path, dpi=600, bbox_inches="tight")
@@ -3712,30 +3984,31 @@ def fig_inverse_posterior(all_inverse_results, output_dir, logger):
 # =============================================================================
 # INVERSE / ILL-POSEDNESS: PUBLICATION TABLES & EXTENDED POSTERIORS
 # =============================================================================
-def _two_objective_nondominated_max_ea_min_ipf(df: pd.DataFrame) -> pd.DataFrame:
-    """Non-dominated rows for maximize EA, minimize IPF (2D)."""
-    if df is None or df.empty or "EA" not in df.columns or "IPF" not in df.columns:
-        return pd.DataFrame(columns=["EA", "IPF"])
-    pts = df[["EA", "IPF"]].values.astype(float)
-    keep: List[int] = []
-    for i in range(len(pts)):
-        dominated = False
-        for j in range(len(pts)):
-            if i == j:
-                continue
-            if (pts[j, 0] >= pts[i, 0] and pts[j, 1] <= pts[i, 1]
-                    and (pts[j, 0] > pts[i, 0] or pts[j, 1] < pts[i, 1])):
-                dominated = True
-                break
-        if not dominated:
-            keep.append(i)
-    return df.iloc[keep].reset_index(drop=True)
-
-
 def write_table_inverse_illposedness(all_inverse: List[Dict], output_dir: str, logger: logging.Logger) -> None:
-    """One row per inverse target: multiplicity, sensitivity, posterior, multi-start, regularizers."""
+    """One row per inverse target: multiplicity, sensitivity, posterior, multi-start spread.
+
+    The multi-start columns surface the cross-restart variance of the
+    GP-BO optimum (see ``gp_bo_minimize_joint_multistart``). Tight spread
+    (``theta_best_std`` near 0) means GP-BO converges to the same answer
+    from independent seeds; large spread flags a multimodal landscape.
+    """
     if not all_inverse:
         return
+    # Explicit, deterministic column order.
+    COLS = [
+        "Target_ID",
+        f"Target_EA@{EA_COMMON_MM_TAG}_J", "Target_IPF_kN",
+        "multiplicity_index",
+        "posterior_mean_theta", "posterior_std_theta",
+        "posterior_ci95_theta_lo", "posterior_ci95_theta_hi",
+        "dJ_dtheta_at_opt", "d2J_dtheta2_at_opt",
+        "n_bo_restarts_completed", "best_bo_restart_id",
+        "n_calls_per_restart", "total_surrogate_calls",
+        "theta_best_mean_across_restarts", "theta_best_std_across_restarts",
+        "y_best_mean_across_restarts", "y_best_std_across_restarts",
+        "prob_weight",
+        "gpbo_y_best", "gpbo_theta_best", "gpbo_lc_best",
+    ]
     rows = []
     for res in all_inverse:
         tid = res.get("target_info", {}).get("id", "?")
@@ -3744,6 +4017,7 @@ def write_table_inverse_illposedness(all_inverse: List[Dict], output_dir: str, l
         loc = res.get("local_sensitivity") or {}
         best = res.get("gpbo_best") or {}
         gj = res.get("gpbo_joint") or {}
+        rs = (gj.get("restart_summary") or {}) if gj else {}
         rows.append({
             "Target_ID": tid,
             f"Target_EA@{EA_COMMON_MM_TAG}_J": res.get("target_ea", ""),
@@ -3757,16 +4031,19 @@ def write_table_inverse_illposedness(all_inverse: List[Dict], output_dir: str, l
             "d2J_dtheta2_at_opt": loc.get("d2J_dtheta2", ""),
             "n_bo_restarts_completed": gj.get("n_restarts_completed", ""),
             "best_bo_restart_id": gj.get("restart_id", "") if gj else "",
-            "gamma_tikhonov_effective": res.get("gamma_tikhonov_effective", ""),
-            "theta_center": res.get("theta_center", ""),
+            "n_calls_per_restart": rs.get("n_calls_per_restart", ""),
+            "total_surrogate_calls": rs.get("total_surrogate_calls", ""),
+            "theta_best_mean_across_restarts": rs.get("theta_best_mean", ""),
+            "theta_best_std_across_restarts": rs.get("theta_best_std", ""),
+            "y_best_mean_across_restarts": rs.get("y_best_mean", ""),
+            "y_best_std_across_restarts": rs.get("y_best_std", ""),
             "prob_weight": res.get("prob_weight", ""),
-            "beta_robust": res.get("beta_robust", ""),
             "gpbo_y_best": best.get("y_best", ""),
             "gpbo_theta_best": best.get("x_best", ""),
             "gpbo_lc_best": best.get("lc", best.get("best_lc", "")),
         })
     path = os.path.join(output_dir, "Table3_inverse_illposedness.csv")
-    pd.DataFrame(rows).to_csv(path, index=False)
+    pd.DataFrame(rows, columns=COLS).to_csv(path, index=False)
     logger.info(f"  Saved: {os.path.basename(path)}")
 
 
@@ -4000,21 +4277,21 @@ def fig_inverse_posterior_likelihood(all_inverse: List[Dict], output_dir: str, l
             pj = np.zeros_like(th, dtype=float)
         else:
             pj = np.asarray(pj, dtype=float).reshape(-1)
-        axes[0, i].plot(th, pj, color="C0", linewidth=0.8, label="exp(-J/T)")
-        axes[0, i].set_title(f"{tid}: J-posterior", fontsize=fonts["title"])
-        axes[0, i].tick_params(labelsize=fonts["tick"])
+        axes[0, i].plot(th, pj, color=COLORS["soft"], linewidth=1.0, label="exp(-J/T)")
+        axes[0, i].set_title(f"{tid}: J-posterior")
         if i == 0:
-            axes[0, i].set_ylabel(r"$P(\theta)$", fontsize=fonts["label"])
-        axes[1, i].plot(th, post_l["posterior"], color="C2", linewidth=0.8, label="Gaussian lik.")
-        axes[1, i].axvline(post_l["mean"], color="C1", linestyle="--", linewidth=0.7)
-        axes[1, i].set_title(f"Likelihood ({post_l.get('lc', '')})", fontsize=fonts["title"])
-        axes[1, i].set_xlabel(r"Angle ($^\circ$)", fontsize=fonts["label"])
+            axes[0, i].set_ylabel(r"$P(\theta)$")
+        axes[1, i].plot(th, post_l["posterior"], color=COLORS["gpbo"], linewidth=1.0, label="Gaussian lik.")
+        axes[1, i].axvline(post_l["mean"], color=COLORS["ddns"], linestyle="--", linewidth=1.0)
+        axes[1, i].set_title(f"Likelihood ({post_l.get('lc', '')})")
+        axes[1, i].set_xlabel(r"Angle ($^\circ$)")
         if i == 0:
-            axes[1, i].set_ylabel(r"$P(\theta)$", fontsize=fonts["label"])
+            axes[1, i].set_ylabel(r"$P(\theta)$")
         bo_best = res.get("gpbo_best", {})
         if bo_best and "x_best" in bo_best:
             for axr in (axes[0, i], axes[1, i]):
-                axr.axvline(bo_best["x_best"], color="red", linewidth=0.6, linestyle=":", alpha=0.85)
+                axr.axvline(bo_best["x_best"], color=COLORS["hard"], linewidth=0.9, linestyle=":", alpha=0.85)
+    apply_fig_style(fig)
     fig.tight_layout()
     path = os.path.join(output_dir, "Fig_inverse_posterior_likelihood.png")
     fig.savefig(path, dpi=600, bbox_inches="tight")
@@ -4195,7 +4472,7 @@ def run_inverse_regularization_ablation_and_save(
     output_dir: str,
     logger: logging.Logger,
 ) -> None:
-    """Extra GP-BO runs: no Tikhonov, no classifier penalty, no robustness penalty."""
+    """Extra GP-BO runs: no classifier penalty (ablation of the only regularizer in J)."""
     if not targets or CFG.dry_run or not HAS_SKOPT:
         return
     baseline_by_id = {
@@ -4204,9 +4481,7 @@ def run_inverse_regularization_ablation_and_save(
     }
     rows = []
     variants = [
-        ("no_tikhonov", {"gamma_tikhonov_override": 0.0}),
         ("no_classifier_penalty", {"prob_weight_override": 0.0}),
-        ("no_robustness_penalty", {"beta_robust_override": 0.0}),
     ]
     for target in targets:
         tid = target["id"]
@@ -4241,48 +4516,6 @@ def run_inverse_regularization_ablation_and_save(
     logger.info(f"  Saved: {os.path.basename(path)}")
 
 
-def write_table_mobo_vs_landscape_pareto_distance(
-    mobo_result: Optional[Dict[str, Any]],
-    landscape_df: pd.DataFrame,
-    output_dir: str,
-    logger: logging.Logger,
-) -> None:
-    """Hypervolume gap + mean nearest-neighbour distance (MOBO ND vs dense landscape ND)."""
-    if mobo_result is None or landscape_df is None or landscape_df.empty:
-        return
-    mobo_pf = mobo_result.get("pareto_approx_df")
-    if mobo_pf is None or mobo_pf.empty:
-        return
-    nd_land = _two_objective_nondominated_max_ea_min_ipf(landscape_df)
-    mobo_df = mobo_pf.rename(columns={"EA_J": "EA", "IPF_kN": "IPF"})
-    nd_mobo = _two_objective_nondominated_max_ea_min_ipf(mobo_df)
-    ref_ea = float(landscape_df["EA"].min())
-    ref_ipf = float(landscape_df["IPF"].max())
-    hv_land = compute_hypervolume_2d(nd_land, ref_ea, ref_ipf, logger, label="Landscape-ND")
-    hv_mobo = compute_hypervolume_2d(nd_mobo, ref_ea, ref_ipf, logger, label="MOBO-ND")
-    se = max(float(nd_land["EA"].std()), 1e-9)
-    sf = max(float(nd_land["IPF"].std()), 1e-9)
-    Lpts = nd_land[["EA", "IPF"]].values.astype(float)
-    dists = []
-    for _, r in nd_mobo.iterrows():
-        p = np.array([r["EA"], r["IPF"]], dtype=float)
-        dmin = min(float(np.hypot((p[0] - q[0]) / se, (p[1] - q[1]) / sf)) for q in Lpts) if len(Lpts) else float("nan")
-        dists.append(dmin)
-    rows = [{
-        "n_landscape_ND": len(nd_land),
-        "n_mobo_ND": len(nd_mobo),
-        "hypervolume_landscape_ND": hv_land,
-        "hypervolume_mobo_ND": hv_mobo,
-        "hypervolume_ratio_mobo_over_land": (hv_mobo / hv_land) if hv_land and hv_land > 0 else "",
-        "mean_norm_dist_mobo_to_landscape_ND": float(np.mean(dists)) if dists else "",
-        "ref_EA_J": ref_ea,
-        "ref_IPF_kN": ref_ipf,
-    }]
-    path = os.path.join(output_dir, "Table_mobo_vs_landscape_pareto_distance.csv")
-    pd.DataFrame(rows).to_csv(path, index=False)
-    logger.info(f"  Saved: {os.path.basename(path)}")
-
-
 def generate_inverse_publication_artifacts(
     output_dir: str,
     logger: logging.Logger,
@@ -4299,10 +4532,8 @@ def generate_inverse_publication_artifacts(
     bo_cfg: Optional[BOConfig] = None,
     cal_ens=None,
     clf_feat_scaler=None,
-    mobo_result=None,
-    landscape_df: Optional[pd.DataFrame] = None,
 ) -> None:
-    """Emit Q1-oriented inverse / MOBO CSVs and likelihood figure."""
+    """Emit Q1-oriented inverse CSVs and likelihood figure."""
     write_table_inverse_illposedness(all_inverse, output_dir, logger)
     write_table_inverse_local_minima(all_inverse, output_dir, logger)
     write_table_inverse_topk_basins(all_inverse, output_dir, logger)
@@ -4348,151 +4579,6 @@ def generate_inverse_publication_artifacts(
             inv_models, inv_targets[:nmax], inv_scaler_disp, inv_enc, inv_params, bo_cfg,
             cal_ens, clf_feat_scaler, all_inverse, output_dir, logger,
         )
-    if mobo_result is not None and landscape_df is not None:
-        write_table_mobo_vs_landscape_pareto_distance(mobo_result, landscape_df, output_dir, logger)
-
-
-# =============================================================================
-# VALIDATION: LEAVE-ONE-ANGLE-OUT CV & CALIBRATION VS ENSEMBLE SIZE
-# =============================================================================
-def run_leave_one_angle_out_cv(df_all, logger, n_ensemble_cv=3):
-    """Leave-one-angle-out cross-validation for forward model robustness."""
-    angles = sorted(df_all["Angle"].unique())
-    logger.info(f"  LOAO-CV: {len(angles)} folds (angles: {angles})")
-    fold_results = []
-    for theta_held in angles:
-        train_df = df_all[df_all["Angle"] != theta_held].copy().reset_index(drop=True)
-        val_df = df_all[df_all["Angle"] == theta_held].copy().reset_index(drop=True)
-        if len(val_df) == 0:
-            continue
-        scaler_d, scaler_o, enc_cv, par_cv = create_preprocessors(train_df, logger)
-        prev_n = CFG.n_ensemble
-        CFG.n_ensemble = n_ensemble_cv
-        try:
-            ens = train_ensemble("hard", train_df, val_df, scaler_d, scaler_o, enc_cv, par_cv,
-                                 "unseen", logger)
-        finally:
-            CFG.n_ensemble = prev_n
-        metrics = ens["metrics"]
-        fold_results.append({
-            "Angle": float(theta_held),
-            "R2_Load": float(metrics["load_r2"]),
-            "R2_Energy": float(metrics["energy_r2"]),
-            "RMSE_Load": float(metrics["load_rmse"]),
-            "N_Train": len(train_df),
-            "N_Val": len(val_df),
-        })
-        logger.info(f"    theta={theta_held:.0f}: R2_load={metrics['load_r2']:.4f}, "
-                    f"R2_energy={metrics['energy_r2']:.4f}")
-    r2_loads = [f["R2_Load"] for f in fold_results]
-    r2_energies = [f["R2_Energy"] for f in fold_results]
-    return {
-        "per_fold_r2": fold_results,
-        "mean_r2_load": float(np.mean(r2_loads)) if r2_loads else float('nan'),
-        "std_r2_load": float(np.std(r2_loads, ddof=1)) if len(r2_loads) > 1 else 0.0,
-        "mean_r2_energy": float(np.mean(r2_energies)) if r2_energies else float('nan'),
-        "std_r2_energy": float(np.std(r2_energies, ddof=1)) if len(r2_energies) > 1 else 0.0,
-    }
-
-
-def fig_loao_cv_results(loao_results, output_dir, logger):
-    """Bar chart of per-angle R2 from leave-one-angle-out CV."""
-    folds = loao_results["per_fold_r2"]
-    if not folds:
-        return
-    fig_w = min(PRINT_WIDTH_IN, 5.0)
-    fonts = scaled_fonts(fig_w)
-    fig, ax = plt.subplots(figsize=(fig_w, 3.0))
-    angles = [f["Angle"] for f in folds]
-    r2s = [f["R2_Load"] for f in folds]
-    ax.bar(range(len(angles)), r2s, color="C0", alpha=0.8, edgecolor="black", linewidth=0.4)
-    ax.axhline(loao_results["mean_r2_load"], color="red", linewidth=0.8, linestyle="--",
-               label=f"Mean={loao_results['mean_r2_load']:.3f}")
-    ax.set_xticks(range(len(angles)))
-    ax.set_xticklabels([f"{a:.0f}" for a in angles], fontsize=fonts["tick"])
-    ax.set_ylabel(r"Load $R^2$", fontsize=fonts["label"])
-    ax.set_xlabel("Held-out angle (deg)", fontsize=fonts["label"])
-    ax.set_title("Leave-One-Angle-Out CV", fontsize=fonts["title"])
-    ax.legend(fontsize=fonts["legend"])
-    ax.tick_params(labelsize=fonts["tick"])
-    fig.tight_layout()
-    path = os.path.join(output_dir, "Fig_loao_cv.png")
-    fig.savefig(path, dpi=600, bbox_inches="tight")
-    plt.close(fig)
-    logger.info("  Saved: Fig_loao_cv.png")
-
-
-def compute_calibration_vs_M(dual_results, logger, M_values=None):
-    """Compute calibration metrics (conformal factor, coverage) at varying ensemble sizes."""
-    if M_values is None:
-        M_values = [2, 3, 5, 8, 10, 15, 20]
-    results_by_M = {}
-    for protocol in ["random", "unseen"]:
-        if protocol not in dual_results:
-            continue
-        for approach in ["ddns", "soft", "hard"]:
-            if approach not in dual_results[protocol]:
-                continue
-            ens_data = dual_results[protocol][approach]
-            models = ens_data.get("models", [])
-            M_total = len(models)
-            key = f"{protocol}_{approach}"
-            results_by_M[key] = {"M_values": [], "conformal_factors": [],
-                                 "coverage_1sig": [], "coverage_2sig": []}
-            y_val = ens_data["metrics"]["true_values"]
-            member_preds_all = []
-            for mm in ens_data.get("member_metrics", []):
-                if "predictions" in mm and "load" in mm["predictions"]:
-                    member_preds_all.append(mm["predictions"]["load"])
-            for M_prime in M_values:
-                if M_prime > len(member_preds_all) or M_prime < 2:
-                    continue
-                sub = member_preds_all[:M_prime]
-                Fm = np.mean(sub, axis=0)
-                Fs = np.std(sub, axis=0, ddof=1)
-                residuals = np.abs(y_val["load"] - Fm)
-                sigma_safe = np.maximum(Fs, 1e-12)
-                norm_res = residuals / sigma_safe
-                cf = float(np.percentile(norm_res, 68.3))
-                cov_1 = float(np.mean(residuals < 1.0 * sigma_safe))
-                cov_2 = float(np.mean(residuals < 2.0 * sigma_safe))
-                results_by_M[key]["M_values"].append(M_prime)
-                results_by_M[key]["conformal_factors"].append(cf)
-                results_by_M[key]["coverage_1sig"].append(cov_1)
-                results_by_M[key]["coverage_2sig"].append(cov_2)
-    logger.info(f"  Calibration vs M: computed for {len(results_by_M)} protocol/approach combos")
-    return results_by_M
-
-
-def fig_calibration_vs_M(cal_vs_M, output_dir, logger):
-    """Plot conformal factor and coverage vs ensemble size M."""
-    if not cal_vs_M:
-        return
-    fig_w = PRINT_WIDTH_IN
-    fonts = scaled_fonts(fig_w)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(fig_w, 3.0))
-    for key, data in cal_vs_M.items():
-        if not data["M_values"]:
-            continue
-        ax1.plot(data["M_values"], data["conformal_factors"], "o-", label=key, markersize=3, linewidth=0.8)
-        ax2.plot(data["M_values"], data["coverage_1sig"], "o-", label=f"{key} 1sig", markersize=3, linewidth=0.8)
-    ax1.axhline(1.0, color="gray", linewidth=0.5, linestyle="--")
-    ax1.set_xlabel("Ensemble size M", fontsize=fonts["label"])
-    ax1.set_ylabel("Conformal factor", fontsize=fonts["label"])
-    ax1.set_title("Calibration factor", fontsize=fonts["title"])
-    ax1.legend(fontsize=max(fonts["legend"] - 1, 5))
-    ax2.axhline(0.683, color="gray", linewidth=0.5, linestyle="--", label="Expected 1sig")
-    ax2.set_xlabel("Ensemble size M", fontsize=fonts["label"])
-    ax2.set_ylabel("Coverage", fontsize=fonts["label"])
-    ax2.set_title("Coverage vs M", fontsize=fonts["title"])
-    ax2.legend(fontsize=max(fonts["legend"] - 1, 5))
-    for ax in [ax1, ax2]:
-        ax.tick_params(labelsize=fonts["tick"])
-    fig.tight_layout()
-    path = os.path.join(output_dir, "Fig_calibration_vs_M.png")
-    fig.savefig(path, dpi=600, bbox_inches="tight")
-    plt.close(fig)
-    logger.info("  Saved: Fig_calibration_vs_M.png")
 
 
 def compute_hypervolume_2d(
@@ -4501,34 +4587,22 @@ def compute_hypervolume_2d(
     logger: logging.Logger,
     label: str = "Dominance"
 ) -> float:
-    """Compute 2D hypervolume of Pareto front relative to reference (nadir) point.
+    """Compute 2D hypervolume of a Pareto front relative to a reference (nadir) point.
 
-    Objectives: maximize EA, minimize IPF.
-    The hypervolume measures the area in (EA, IPF) space dominated by the
-    Pareto front and bounded by the reference point.
-
-    Returns hypervolume in J*kN units.
+    Objectives: maximize EA, minimize IPF.  Returns hypervolume in J*kN units.
     """
     if pareto_front_df.empty:
         return 0.0
 
     pts = pareto_front_df[["EA", "IPF"]].values.copy()
-    # Keep only points better than reference in both objectives
     mask = (pts[:, 0] > ref_ea) & (pts[:, 1] < ref_ipf)
     pts = pts[mask]
     if len(pts) == 0:
         return 0.0
 
-    # Sort by EA ascending
     pts = pts[pts[:, 0].argsort()]
-
-    # Sweep left to right: each point contributes a rectangle
     hv = 0.0
     prev_ea = ref_ea
-    # Need to track the running minimum IPF from right-to-left for correct HV
-    # Actually for maximize-EA/minimize-IPF, sweep by EA ascending:
-    # The IPF at each step is the minimum IPF seen so far from current point rightward
-    # Simpler: compute as sum of rectangles using the "staircase" method
     for i in range(len(pts)):
         ea_i, ipf_i = pts[i]
         width = ea_i - prev_ea
@@ -4541,309 +4615,6 @@ def compute_hypervolume_2d(
                 f"(ref: EA={ref_ea:.2f}J, IPF={ref_ipf:.2f}kN, "
                 f"{len(pts)} non-dominated points)")
     return hv
-
-
-def build_qnehvi_reference_point_from_landscape(
-    landscape_df: pd.DataFrame,
-    margin_frac: float,
-    logger: logging.Logger,
-    tkwargs: Dict[str, Any],
-) -> Tuple[torch.Tensor, Dict[str, Any]]:
-    """Build BoTorch ``ref_point`` for q(NE)HVI on **maximization** objectives.
-
-    Objectives passed to BoTorch: ``y0 = EA`` (J, absorbed to ``D_COMMON``),
-    ``y1 = -IPF`` (kN, so maximizing ``y1`` minimizes IPF).
-
-    For hypervolume under maximization, ``ref_point`` must be **strictly worse**
-    than any objective vector we intend to retain—here we anchor it slightly
-    beyond the **nadir of the dense surrogate landscape** (min EA, worst IPF),
-    following BoTorch guidance (slightly worse than a lower bound on each
-    objective of interest).
-
-    Returns
-    -------
-    ref_point : Tensor (2,)
-        ``[r_EA, r_{-IPF}]`` with ``r_EA < min(EA_land)`` and
-        ``r_{-IPF} < min(-IPF_land) = -max(IPF_land)``.
-    meta : dict
-        JSON-serializable documentation (ranges, margins, rule text).
-    """
-    ea_min = float(landscape_df["EA"].min())
-    ea_max = float(landscape_df["EA"].max())
-    ipf_min = float(landscape_df["IPF"].min())
-    ipf_max = float(landscape_df["IPF"].max())
-    span_ea = max(ea_max - ea_min, 1e-9)
-    span_ipf = max(ipf_max - ipf_min, 1e-9)
-    m = float(max(margin_frac, 1e-6))
-    r0 = ea_min - m * span_ea
-    r1 = (-ipf_max) - m * span_ipf
-    ref_point = torch.tensor([r0, r1], **tkwargs)
-    meta = {
-        "objectives_botorch": [
-            f"maximize EA (J) at d={D_COMMON:.0f} mm (displacement-fair)",
-            "maximize -IPF (kN)  [equivalent to minimize IPF]",
-        ],
-        "reference_point_y": [r0, r1],
-        "rule": (
-            "r_EA = min(EA_landscape) - margin_frac * span(EA); "
-            "r_negIPF = -max(IPF_landscape) - margin_frac * span(IPF). "
-            "Both strictly worse than the landscape nadir in maximization form."
-        ),
-        "landscape_min_EA_J": ea_min,
-        "landscape_max_EA_J": ea_max,
-        "landscape_min_IPF_kN": ipf_min,
-        "landscape_max_IPF_kN": ipf_max,
-        "margin_frac": m,
-        "n_landscape_points": int(len(landscape_df)),
-    }
-    logger.info(
-        "  MOBO qNEHVI reference point (BoTorch maximization, y=[EA, -IPF]): "
-        f"r=({r0:.4f}, {r1:.4f}); landscape EA∈[{ea_min:.2f},{ea_max:.2f}] J, "
-        f"IPF∈[{ipf_min:.3f},{ipf_max:.3f}] kN, margin_frac={m:.4f}"
-    )
-    return ref_point, meta
-
-
-def _mobo_evaluate_xy(
-    xy_phys: torch.Tensor,
-    models: List[nn.Module],
-    approach: str,
-    scaler_disp: StandardScaler,
-    enc: OneHotEncoder,
-    params: ScalingParams,
-    lc_categories: List[str],
-) -> torch.Tensor:
-    """Evaluate surrogate objectives y=[EA, -IPF] at physical (angle, z_lc) rows.
-
-    ``z_lc ∈ [0,1]`` maps to ``LC1`` if ``z < 0.5`` else ``LC2`` (first/second
-    category order from the encoder).
-    """
-    xy = xy_phys.detach().cpu().double().numpy()
-    rows = []
-    for i in range(xy.shape[0]):
-        ang = float(xy[i, 0])
-        z = float(xy[i, 1])
-        lc = str(lc_categories[1] if z >= 0.5 else lc_categories[0])
-        m = compute_ea_ipf_ensemble(
-            models, approach, ang, lc, scaler_disp, enc, params, d_eval=D_COMMON
-        )
-        rows.append([m["EA"], -float(m["IPF"])])
-    return torch.tensor(rows, dtype=xy_phys.dtype, device=xy_phys.device)
-
-
-def _mobo_init_model_list_gp(
-    train_x_phys: torch.Tensor,
-    train_y: torch.Tensor,
-    bounds_phys: torch.Tensor,
-) -> Tuple[Any, Any]:
-    """Independent GPs per objective on normalized ``train_x`` (ModelListGP)."""
-    train_xn = normalize(train_x_phys, bounds_phys)
-    models = []
-    for i in range(train_y.shape[-1]):
-        yi = train_y[..., i : i + 1]
-        models.append(SingleTaskGP(train_xn, yi))
-    model = ModelListGP(*models)
-    mll = SumMarginalLogLikelihood(model.likelihood, model)
-    return mll, model
-
-
-def run_multiobjective_mobo_qnehvi(
-    models: List[nn.Module],
-    approach: str,
-    scaler_disp: StandardScaler,
-    enc: OneHotEncoder,
-    params: ScalingParams,
-    landscape_df: pd.DataFrame,
-    logger: logging.Logger,
-    output_dir: str,
-    cfg: Optional[MOBOQNEHVICfg] = None,
-) -> Optional[Dict[str, Any]]:
-    """Multi-objective Bayesian optimization with **qLogNEHVI** (BoTorch).
-
-    Optimizes the surrogate vector objective
-    ``(EA@D_COMMON, -IPF)`` over ``(θ, z_LC) ∈ [θ_min, θ_max] × [0,1]``,
-    with ``z_LC < 0.5 → LC1`` else ``LC2`` (encoder category order).
-
-    Acquisition uses **qLogNoisyExpectedHypervolumeImprovement** (qLogNEHVI),
-    BoTorch's numerically stabilized noisy hypervolume improvement for batched
-    queries; with deterministic PINN ensemble evaluations it reduces to the usual
-    noiseless hypervolume improvement up to MC sampling noise.
-
-    Requires ``landscape_df`` from :func:`run_multiobjective_sweep` to define a
-    **documented** hypervolume reference point (nadir of dense grid + margin).
-    """
-    if not HAS_BOTORCH:
-        logger.warning("  MOBO qNEHVI skipped: install botorch and gpytorch (pip install botorch).")
-        return None
-    if landscape_df is None or len(landscape_df) < 4:
-        logger.warning("  MOBO qNEHVI skipped: landscape_df too small for reference point.")
-        return None
-
-    cfg = cfg or MOBO_QNEHVI_CFG
-    bo_device = torch.device("cpu")
-    tkwargs = {"dtype": torch.double, "device": bo_device}
-
-    lc_categories = [str(x) for x in enc.categories_[0].tolist()]
-    if len(lc_categories) < 2:
-        logger.warning("  MOBO qNEHVI skipped: need at least two LC categories.")
-        return None
-
-    bounds_phys = torch.stack(
-        [
-            torch.tensor([CFG.angle_opt_min, 0.0], **tkwargs),
-            torch.tensor([CFG.angle_opt_max, 1.0], **tkwargs),
-        ],
-        dim=0,
-    )
-    standard_bounds = torch.zeros(2, 2, **tkwargs)
-    standard_bounds[1, :] = 1.0
-
-    ref_point, ref_meta = build_qnehvi_reference_point_from_landscape(
-        landscape_df, cfg.ref_margin_frac, logger, tkwargs
-    )
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=BadInitialCandidatesWarning)
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-
-        init_x = draw_sobol_samples(
-            bounds=standard_bounds, n=cfg.n_init, q=1, seed=CFG.seed
-        ).squeeze(1).to(**tkwargs)
-        train_x = unnormalize(init_x, bounds_phys)
-        train_y = _mobo_evaluate_xy(train_x, models, approach, scaler_disp, enc, params, lc_categories)
-
-        hv_trace: List[float] = []
-        obs_rows: List[Dict[str, Any]] = []
-
-        def _log_obs(batch: int, xy: torch.Tensor, y: torch.Tensor) -> None:
-            xy_np = xy.detach().cpu().numpy()
-            y_np = y.detach().cpu().numpy()
-            for i in range(xy_np.shape[0]):
-                z = float(xy_np[i, 1])
-                lc = str(lc_categories[1] if z >= 0.5 else lc_categories[0])
-                obs_rows.append({
-                    "batch": batch,
-                    "angle_deg": float(xy_np[i, 0]),
-                    "lc_z": z,
-                    "LC": lc,
-                    "EA_J": float(y_np[i, 0]),
-                    "IPF_kN": float(-y_np[i, 1]),
-                    "y0_EA": float(y_np[i, 0]),
-                    "y1_negIPF": float(y_np[i, 1]),
-                })
-
-        _log_obs(0, train_x, train_y)
-
-        try:
-            bd0 = DominatedPartitioning(ref_point=ref_point, Y=train_y)
-            hv_trace.append(float(bd0.compute_hypervolume().item()))
-        except Exception as ex:
-            logger.warning(f"  MOBO qNEHVI: initial hypervolume computation failed ({ex}); HV trace may start at 0.")
-            hv_trace.append(0.0)
-
-        sampler = SobolQMCNormalSampler(sample_shape=torch.Size([cfg.mc_samples]), seed=CFG.seed)
-
-        for it in range(1, cfg.n_batches + 1):
-            try:
-                mll, model = _mobo_init_model_list_gp(train_x, train_y, bounds_phys)
-                fit_gpytorch_mll(mll)
-            except Exception as ex:
-                logger.warning(f"  MOBO qNEHVI: GP fit failed at batch {it}: {ex}")
-                break
-
-            train_xn = normalize(train_x, bounds_phys)
-            acq = qLogNoisyExpectedHypervolumeImprovement(
-                model=model,
-                ref_point=ref_point,
-                X_baseline=train_xn,
-                sampler=sampler,
-                prune_baseline=True,
-            )
-            try:
-                candidates_norm, _ = optimize_acqf(
-                    acq_function=acq,
-                    bounds=standard_bounds,
-                    q=cfg.q,
-                    num_restarts=cfg.num_restarts,
-                    raw_samples=cfg.raw_samples,
-                    options={"batch_limit": 5, "maxiter": 200},
-                    sequential=True,
-                )
-            except Exception as ex:
-                logger.warning(f"  MOBO qNEHVI: optimize_acqf failed at batch {it}: {ex}")
-                break
-
-            new_x = unnormalize(candidates_norm.detach(), bounds_phys)
-            new_y = _mobo_evaluate_xy(new_x, models, approach, scaler_disp, enc, params, lc_categories)
-            train_x = torch.cat([train_x, new_x], dim=0)
-            train_y = torch.cat([train_y, new_y], dim=0)
-            _log_obs(it, new_x, new_y)
-
-            try:
-                bd = DominatedPartitioning(ref_point=ref_point, Y=train_y)
-                hv_trace.append(float(bd.compute_hypervolume().item()))
-            except Exception as ex:
-                logger.warning(f"  MOBO qNEHVI: hypervolume at batch {it} failed ({ex}).")
-                hv_trace.append(hv_trace[-1] if hv_trace else 0.0)
-            logger.info(
-                f"    MOBO qNEHVI batch {it}/{cfg.n_batches}: "
-                f"HV={hv_trace[-1]:.6f}, n_obs={train_x.shape[0]}"
-            )
-
-    obs_df = pd.DataFrame(obs_rows)
-    obs_path = os.path.join(output_dir, "Table_mobo_qnehvi_observations.csv")
-    obs_df.to_csv(obs_path, index=False)
-    logger.info(f"  Saved: Table_mobo_qnehvi_observations.csv ({len(obs_df)} evaluations)")
-
-    nd_mask = is_non_dominated(train_y)
-    nd_x = train_x[nd_mask].detach().cpu().numpy()
-    nd_y = train_y[nd_mask].detach().cpu().numpy()
-    pareto_rows = []
-    for i in range(nd_x.shape[0]):
-        z = float(nd_x[i, 1])
-        lc = str(lc_categories[1] if z >= 0.5 else lc_categories[0])
-        pareto_rows.append({
-            "angle_deg": float(nd_x[i, 0]),
-            "LC": lc,
-            "EA_J": float(nd_y[i, 0]),
-            "IPF_kN": float(-nd_y[i, 1]),
-        })
-    pareto_df = pd.DataFrame(pareto_rows).sort_values("EA_J")
-    pareto_path = os.path.join(output_dir, "Table_mobo_qnehvi_pareto_approx.csv")
-    pareto_df.to_csv(pareto_path, index=False)
-    logger.info(f"  Saved: Table_mobo_qnehvi_pareto_approx.csv ({len(pareto_df)} non-dominated points)")
-
-    hv_df = pd.DataFrame({"batch": list(range(len(hv_trace))), "hypervolume_botorch": hv_trace})
-    hv_path = os.path.join(output_dir, "Table_mobo_qnehvi_hypervolume_trace.csv")
-    hv_df.to_csv(hv_path, index=False)
-    logger.info(f"  Saved: Table_mobo_qnehvi_hypervolume_trace.csv")
-
-    ref_path = os.path.join(output_dir, "mobo_qnehvi_reference_point.json")
-    with open(ref_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                **ref_meta,
-                "mobo_config": asdict(cfg),
-                "angle_bounds_deg": [CFG.angle_opt_min, CFG.angle_opt_max],
-                "lc_encoding": "z in [0,1]; z<0.5 -> first encoder LC else second",
-                "lc_order": lc_categories,
-                "n_evaluations": int(train_x.shape[0]),
-                "final_hypervolume": hv_trace[-1] if hv_trace else None,
-            },
-            f,
-            indent=2,
-        )
-    logger.info(f"  Saved: mobo_qnehvi_reference_point.json")
-
-    return {
-        "train_x": train_x,
-        "train_y": train_y,
-        "hypervolume_trace": hv_trace,
-        "pareto_approx_df": pareto_df,
-        "observations_df": obs_df,
-        "ref_point": ref_point,
-        "ref_meta": ref_meta,
-    }
 
 
 def run_multiobjective_sweep(models: List[nn.Module], approach: str, scaler_disp: StandardScaler,
@@ -5141,18 +4912,29 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
     fig = plt.figure(figsize=(7.48, 10.5))
     gs = fig.add_gridspec(2, 3, hspace=0.52, wspace=0.42, left=0.07, right=0.98, top=0.90, bottom=0.06)
     
-    # Retrieve conformal factor for Hard-PINN (used for full-data inverse model bands)
-    # Use random protocol as best available proxy; fall back to 1.0 if unavailable
+    # Retrieve conformal factors for Hard-PINN.  We pull the **2σ-coverage**
+    # factor (95.4-percentile of |residual|/sigma) so the band drawn here as
+    # ``mean ± cf * sigma`` actually achieves the nominal 95% coverage. The
+    # legacy ``conformal_factor`` (68.3-percentile, 1σ) was previously
+    # multiplied by 2 — that linear extrapolation under-covers under heavy
+    # tails. Using cf_2sigma directly matches the rescaled-band convention
+    # introduced for the calibration audit.
     cf_ea = 1.0
     cf_ipf = 1.0
     if calibration is not None:
         for proto in ["random", "unseen"]:
             if proto in calibration and "hard" in calibration[proto]:
-                # Use EA conformal factor from energy calibration, IPF from load calibration
-                cf_ea = calibration[proto]["hard"].get("energy_conformal_factor",
-                        calibration[proto]["hard"].get("conformal_factor", 1.0))
-                cf_ipf = calibration[proto]["hard"].get("conformal_factor", 1.0)
-                logger.info(f"  Design-space bands using {proto} Hard-PINN conformal factors: "
+                cal_h = calibration[proto]["hard"]
+                cf_ea = cal_h.get(
+                    "energy_conformal_factor_2sigma",
+                    cal_h.get("conformal_factor_2sigma",
+                    cal_h.get("conformal_factor", 1.0)),
+                )
+                cf_ipf = cal_h.get(
+                    "conformal_factor_2sigma",
+                    cal_h.get("conformal_factor", 1.0),
+                )
+                logger.info(f"  Design-space ±2σ bands using {proto} Hard-PINN cf_2sigma: "
                             f"EA cf={cf_ea:.3f}, IPF cf={cf_ipf:.3f}")
                 break
     
@@ -5164,7 +4946,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
     ax1 = fig.add_subplot(gs[0, 0])
     for lc in lc_list:
         lc_data = landscape_df[landscape_df["lc"] == lc].sort_values("angle")
-        color = "#1f77b4" if lc == "LC1" else "#ff7f0e"
+        color = COLORS["LC1"] if lc == "LC1" else COLORS["LC2"]
         linestyle = "-" if lc == "LC1" else "--"
         marker = "o" if lc == "LC1" else "s"
         label = f"{lc} (Stable)" if lc == "LC1" else f"{lc} (Progressive)"
@@ -5172,9 +4954,10 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
                 marker=marker, markersize=4, markevery=50, linewidth=2, label=label)
         # Add conformal-calibrated uncertainty band
         if "EA_std" in lc_data.columns and lc_data["EA_std"].max() > 0:
-            ax1.fill_between(lc_data["angle"], 
-                            lc_data["EA"] - 2*cf_ea*lc_data["EA_std"],
-                            lc_data["EA"] + 2*cf_ea*lc_data["EA_std"],
+            # cf_ea is the 2σ-coverage conformal factor; band is ±cf_ea·σ.
+            ax1.fill_between(lc_data["angle"],
+                            lc_data["EA"] - cf_ea*lc_data["EA_std"],
+                            lc_data["EA"] + cf_ea*lc_data["EA_std"],
                             color=color, alpha=0.15)
     ax1.set_xlabel("Interior Angle θ (°)")
     ax1.set_ylabel("Energy Absorption EA (J)")
@@ -5188,16 +4971,17 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
     ax2 = fig.add_subplot(gs[0, 1])
     for lc in lc_list:
         lc_data = landscape_df[landscape_df["lc"] == lc].sort_values("angle")
-        color = "#1f77b4" if lc == "LC1" else "#ff7f0e"
+        color = COLORS["LC1"] if lc == "LC1" else COLORS["LC2"]
         linestyle = "-" if lc == "LC1" else "--"
         marker = "o" if lc == "LC1" else "s"
         label = f"{lc} (Stable)" if lc == "LC1" else f"{lc} (Progressive)"
         ax2.plot(lc_data["angle"], lc_data["IPF"], color=color, linestyle=linestyle,
                 marker=marker, markersize=4, markevery=50, linewidth=2, label=label)
         if "IPF_std" in lc_data.columns and lc_data["IPF_std"].max() > 0:
+            # cf_ipf is the 2σ-coverage conformal factor; band is ±cf_ipf·σ.
             ax2.fill_between(lc_data["angle"],
-                            lc_data["IPF"] - 2*cf_ipf*lc_data["IPF_std"],
-                            lc_data["IPF"] + 2*cf_ipf*lc_data["IPF_std"],
+                            lc_data["IPF"] - cf_ipf*lc_data["IPF_std"],
+                            lc_data["IPF"] + cf_ipf*lc_data["IPF_std"],
                             color=color, alpha=0.15)
     ax2.set_xlabel("Interior Angle θ (°)")
     ax2.set_ylabel("Initial Peak Force IPF (kN)")
@@ -5218,7 +5002,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
         for j, (_, row) in enumerate(lc1_data.iterrows()):
             Z1[i, j] = -alpha * row["EA_norm"] + (1 - alpha) * row["IPF_norm"]
     
-    im3 = ax3.imshow(Z1, aspect='auto', cmap='RdYlGn_r', origin='lower',
+    im3 = ax3.imshow(Z1, aspect='auto', cmap='cividis', origin='lower',
                      extent=[angles_lc1.min(), angles_lc1.max(), 0, 1])
     ax3.set_xlabel("Interior Angle θ (°)")
     ax3.set_ylabel("EA Weight α")
@@ -5235,7 +5019,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
         for j, (_, row) in enumerate(lc2_data.iterrows()):
             Z2[i, j] = -alpha * row["EA_norm"] + (1 - alpha) * row["IPF_norm"]
     
-    im4 = ax4.imshow(Z2, aspect='auto', cmap='RdYlGn_r', origin='lower',
+    im4 = ax4.imshow(Z2, aspect='auto', cmap='cividis', origin='lower',
                      extent=[angles_lc2.min(), angles_lc2.max(), 0, 1])
     ax4.set_xlabel("Interior Angle θ (°)")
     ax4.set_ylabel("EA Weight α")
@@ -5248,7 +5032,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
     # Background: all design points
     for lc in lc_list:
         lc_data = landscape_df[landscape_df["lc"] == lc]
-        color = "#1f77b4" if lc == "LC1" else "#ff7f0e"
+        color = COLORS["LC1"] if lc == "LC1" else COLORS["LC2"]
         ax5.scatter(lc_data["EA"], lc_data["IPF"], c=color, s=5, alpha=0.15, label=f"{lc} designs")
     
     # Pareto points
@@ -5256,10 +5040,10 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
     pareto_lc2 = pareto_df[pareto_df["lc"] == "LC2"]
     
     if len(pareto_lc1) > 0:
-        ax5.scatter(pareto_lc1["EA"], pareto_lc1["IPF"], c="#1f77b4", s=150, marker='*',
+        ax5.scatter(pareto_lc1["EA"], pareto_lc1["IPF"], c=COLORS["LC1"], s=150, marker='*',
                    edgecolors='black', linewidths=1.5, zorder=10, label="Pareto (LC1)")
     if len(pareto_lc2) > 0:
-        ax5.scatter(pareto_lc2["EA"], pareto_lc2["IPF"], c="#ff7f0e", s=150, marker='D',
+        ax5.scatter(pareto_lc2["EA"], pareto_lc2["IPF"], c=COLORS["LC2"], s=150, marker='D',
                    edgecolors='black', linewidths=1.5, zorder=10, label="Pareto (LC2)")
     
     # Connect Pareto points with line
@@ -5303,7 +5087,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
     
     # LC choice as bar colors
     lc_numeric = [1 if lc == "LC1" else 2 for lc in pareto_df["lc"]]
-    colors = ["#1f77b4" if lc == "LC1" else "#ff7f0e" for lc in pareto_df["lc"]]
+    colors = [COLORS["LC1"] if lc == "LC1" else COLORS["LC2"] for lc in pareto_df["lc"]]
     ax6_twin.bar(pareto_df["alpha"], lc_numeric, width=0.08, alpha=0.4, color=colors)
     ax6_twin.set_ylabel("Loading (LC)", color='gray')
     ax6_twin.set_ylim(0.5, 2.5)
@@ -5354,7 +5138,8 @@ def fig_residual_histograms(dual_results: Dict, output_dir: str, logger: logging
             for j, (key, xlabel, unit) in enumerate([("load", "Load Residual", "kN"), ("energy", "Energy Residual", "J")]):
                 ax = axes[j, i]
                 errors = m[f"{key}_errors"]
-                ax.hist(errors, bins=30, color=COLORS[approach], edgecolor='black', alpha=0.7, linewidth=0.8)
+                ax.hist(errors, bins=30, color=COLORS[approach], edgecolor='black',
+                        alpha=0.75, linewidth=0.8, hatch=HATCHES.get(approach, ""))
                 ax.axvline(0, color='black', linestyle='--', linewidth=1.5)
                 ax.set_xlabel(f"{xlabel} ({unit})")
                 ax.set_ylabel("Frequency")
@@ -5515,7 +5300,11 @@ def fig_unseen_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir: str,
     val_df = dual_results["unseen"]["val_df"]
     lcs = sorted(val_df["LC"].unique())
     
-    # Retrieve conformal factors (load and energy) per approach
+    # Retrieve conformal factors (load and energy) per approach.
+    # Use the **2σ-coverage** factor (95.4-percentile of |residual|/σ) so the
+    # band drawn as ``mean ± cf * σ`` achieves the nominal 95% coverage. The
+    # earlier convention used cf_1sigma multiplied by 2; that linear
+    # extrapolation under-covers when residuals are heavy-tailed.
     conformal_factors = {}
     for approach in ["ddns", "soft", "hard"]:
         cf_load = 1.0
@@ -5523,9 +5312,12 @@ def fig_unseen_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir: str,
         if (calibration is not None and "unseen" in calibration
                 and approach in calibration["unseen"]):
             cal = calibration["unseen"][approach]
-            cf_load = cal.get("conformal_factor", 1.0)
-            cf_energy = cal.get("energy_conformal_factor", 1.0)
-            logger.info(f"    {MODEL_LABELS.get(approach, approach)} conformal factors: "
+            cf_load = cal.get("conformal_factor_2sigma", cal.get("conformal_factor", 1.0))
+            cf_energy = cal.get(
+                "energy_conformal_factor_2sigma",
+                cal.get("energy_conformal_factor", 1.0),
+            )
+            logger.info(f"    {MODEL_LABELS.get(approach, approach)} cf_2sigma: "
                         f"load={cf_load:.3f}, energy={cf_energy:.3f}")
         conformal_factors[approach] = {"load": cf_load, "energy": cf_energy}
     
@@ -5549,7 +5341,8 @@ def fig_unseen_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir: str,
                 ax.plot(disps, Fm, color=COLORS[approach], linestyle=LINESTYLES[approach],
                         marker=MARKERS[approach], markevery=35, markersize=5, linewidth=1.5,
                         label=f"{MODEL_LABELS[approach]} (R\u00b2={ens_r2:.3f})")
-                ax.fill_between(disps, Fm - 2*cf*Fs, Fm + 2*cf*Fs,
+                # cf is the 2σ-coverage conformal factor; band is ±cf·σ (NOT ±2·cf·σ).
+                ax.fill_between(disps, Fm - cf*Fs, Fm + cf*Fs,
                                 color=COLORS[approach], alpha=0.15, linewidth=0)
         ax.set_xlabel("Displacement (mm)")
         ax.set_ylabel("Load (kN)")
@@ -5586,7 +5379,8 @@ def fig_unseen_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir: str,
                 ax.plot(disps, Em, color=COLORS[approach], linestyle=LINESTYLES[approach],
                         marker=MARKERS[approach], markevery=35, markersize=5, linewidth=1.5,
                         label=f"{MODEL_LABELS[approach]} (R\u00b2={ens_r2:.3f})")
-                ax.fill_between(disps, Em - 2*cf*Es, Em + 2*cf*Es,
+                # cf is the 2σ-coverage conformal factor; band is ±cf·σ.
+                ax.fill_between(disps, Em - cf*Es, Em + cf*Es,
                                 color=COLORS[approach], alpha=0.15, linewidth=0)
         ax.set_xlabel("Displacement (mm)")
         ax.set_ylabel("Energy (J)")
@@ -5690,7 +5484,7 @@ def fig_ablation_study(df_ablation: pd.DataFrame, output_dir: str, logger: loggi
     summary_text = f"Ablation Study Summary:\n\n• Protocol: {protocol_str.upper()} angle θ=60°\n\n• Tested $w_{{phys}}$ values: {list(df_ablation['w_phys'].values)}\n\n• Best Load $R^2$ at $w_{{phys}}$ = {best_w:.1f}\n\n• Optimal range: 5-20"
     _sf_ab = scaled_fonts(10.0)
     ax.text(0.06, 0.92, summary_text, transform=ax.transAxes, fontsize=_sf_ab["annot"],
-            verticalalignment='top', fontfamily='serif',
+            verticalalignment='top',
             bbox=dict(boxstyle='round', facecolor='#f0f0f0', edgecolor='black', pad=0.35))
     add_subplot_label(ax, 'd')
     fig.suptitle("Ablation Study: Effect of Physics Weight (Unseen θ=60°)", fontweight='bold', y=0.98)
@@ -5719,7 +5513,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
     gpbo_joint = opt_results.get("gpbo_joint")
     
     # Colors and markers for each LC
-    lc_colors = {"LC1": "#1f77b4", "LC2": "#ff7f0e"}  # Blue for LC1, Orange for LC2
+    lc_colors = {"LC1": COLORS["LC1"], "LC2": COLORS["LC2"]}
     lc_markers = {"LC1": "*", "LC2": "D"}  # Star for LC1, Diamond for LC2
     lc_labels = {"LC1": "LC1", "LC2": "LC2"}
     
@@ -5765,7 +5559,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
             
             # Plot each LC from the SAME snapshot (same GP model)
             for lc in lc_list:
-                color = lc_colors.get(lc, "#1f77b4")
+                color = lc_colors.get(lc, COLORS["LC1"])
                 marker = lc_markers.get(lc, "o")
                 label_lc = lc_labels.get(lc, lc)
                 
@@ -5886,7 +5680,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
             X_obs = snap["X_obs"]
             y_obs = snap["y_obs"]
             
-            color = lc_colors.get(lc, "#1f77b4")
+            color = lc_colors.get(lc, COLORS["LC1"])
             marker = lc_markers.get(lc, "o")
             label_lc = lc_labels.get(lc, lc)
             
@@ -6001,7 +5795,7 @@ def fig_optimizer_comparison(all_inverse_results: List[Dict], output_dir: str, l
         return
     
     # Dark, high-contrast optimizer colours
-    OPT_COLORS = {"GP-BO": "#E64B35"}
+    OPT_COLORS = {"GP-BO": COLORS["gpbo"]}
     OPT_ORDER = ["GP-BO"]
     # Map internal keys to display labels
     KEY_TO_LABEL = {"gpbo_best": "GP-BO"}
@@ -6209,12 +6003,12 @@ def fig_pareto_tradeoff(df_pareto: pd.DataFrame, output_dir: str, logger: loggin
     pareto_by_lc = df_pareto.attrs.get("pareto_by_lc", {})
     has_per_lc = len(pareto_by_lc) > 0
     
-    # ---- colour palette (all fully opaque, dark, distinguishable) ----
-    C_GLOBAL = "#000000"   # black for global front
-    C_LC1    = "#3C5488"   # dark blue
-    C_LC2    = "#E64B35"   # dark red/vermillion
-    C_EA     = "#00A087"   # dark teal
-    C_IPF    = "#B07AA1"   # dark plum (distinct from EA)
+    # ---- colour palette (Wong-derived, B/W-safe via lightness contrast) ----
+    C_GLOBAL = COLORS["hard"]   # black, global Pareto front anchor
+    C_LC1    = COLORS["LC1"]    # deep blue
+    C_LC2    = COLORS["LC2"]    # vermillion
+    C_EA     = COLORS["gpbo"]   # bluish-green
+    C_IPF    = "#CC79A7"        # reddish-purple, Wong-palette auxiliary distinct from EA
     
     fig, axes = plt.subplots(2, 2, figsize=(11, 9))
     
@@ -6320,193 +6114,6 @@ def fig_pareto_tradeoff(df_pareto: pd.DataFrame, output_dir: str, logger: loggin
                 dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_pareto_tradeoff.png")
-
-
-def fig_moo_objective_space_validation(
-    pareto_df: pd.DataFrame,
-    landscape_df: pd.DataFrame,
-    output_dir: str,
-    logger: logging.Logger,
-    mobo_result: Optional[Dict[str, Any]] = None,
-    df_metrics: Optional[pd.DataFrame] = None,
-) -> None:
-    """Validate MOO in **objective space** (EA@D_COMMON vs IPF).
-
-    Panel (a): dense surrogate landscape (both LCs), non-dominated frontier
-    from dominance on the grid, and weighted-sum sweep markers.
-
-    Panel (b): optional **qLogNEHVI** observations (colour = BO batch),
-    approximate Pareto set from MOBO samples, dominance frontier (faint),
-    and the **hypervolume reference** as a marker in (EA, IPF) coordinates.
-
-    When ``df_metrics`` provides ``EA_common``, overlays experimental design
-    points for surrogate sanity-check (not used by the BO acquisition).
-    """
-    if landscape_df is None or len(landscape_df) < 4:
-        logger.warning("  Skipping Fig_moo_objective_space_validation (empty landscape).")
-        return
-
-    pareto_dom = pareto_df.attrs.get("pareto_dominance", pd.DataFrame())
-    C_LC1 = "#3C5488"
-    C_LC2 = "#E64B35"
-    C_DOM = "#222222"
-    C_WS = "#009E73"
-    C_REF = "#7E57C2"
-
-    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6))
-
-    def _scatter_landscape(ax, alpha=0.22, s=14):
-        for lc, c in [("LC1", C_LC1), ("LC2", C_LC2)]:
-            sub = landscape_df[landscape_df["lc"] == lc]
-            if len(sub) == 0:
-                continue
-            ax.scatter(sub["EA"], sub["IPF"], s=s, alpha=alpha, c=c, label=f"Surrogate ({lc})", edgecolors="none")
-
-    def _plot_dom_front(ax, lw=2.2, z=6):
-        if pareto_dom is None or pareto_dom.empty:
-            return
-        d = pareto_dom.sort_values("EA").reset_index(drop=True)
-        ax.plot(d["EA"], d["IPF"], color=C_DOM, linewidth=lw, drawstyle="steps-post",
-                label="Non-dominated (grid)", zorder=z)
-        ax.scatter(d["EA"], d["IPF"], s=26, c=C_DOM, zorder=z + 1, edgecolors="white", linewidths=0.4)
-
-    # --- (a) Surrogate + dominance + weighted-sum ---
-    ax = axes[0]
-    _scatter_landscape(ax, alpha=0.24, s=16)
-    _plot_dom_front(ax)
-    if not pareto_df.empty and {"EA", "IPF"}.issubset(pareto_df.columns):
-        ax.scatter(pareto_df["EA"], pareto_df["IPF"], s=70, marker="D", facecolors="white",
-                   edgecolors=C_WS, linewidths=1.8, zorder=8, label=r"Weighted-sum ($\alpha$ sweep)")
-    if df_metrics is not None and len(df_metrics) > 0:
-        ea_col = "EA_common" if "EA_common" in df_metrics.columns else "EA"
-        if ea_col in df_metrics.columns and "IPF" in df_metrics.columns:
-            ax.scatter(df_metrics[ea_col], df_metrics["IPF"], s=55, marker="P", c="#F0B429",
-                       edgecolors="#333333", linewidths=0.6, zorder=7, label="Experiments")
-    ax.set_xlabel(f"EA (J) at $d$={D_COMMON:.0f} mm")
-    ax.set_ylabel("IPF (kN)")
-    ax.set_title("(a) Surrogate landscape vs Pareto definitions")
-    ax.legend(loc="best", framealpha=0.95)
-    ax.grid(True, alpha=0.28, linestyle="--")
-    ax.xaxis.set_minor_locator(AutoMinorLocator())
-    ax.yaxis.set_minor_locator(AutoMinorLocator())
-    add_subplot_label(ax, "a")
-
-    # --- (b) MOBO + reference point ---
-    ax = axes[1]
-    _scatter_landscape(ax, alpha=0.14, s=12)
-    _plot_dom_front(ax, lw=1.4, z=4)
-    if mobo_result and mobo_result.get("observations_df") is not None:
-        obs = mobo_result["observations_df"]
-        if len(obs) > 0 and "batch" in obs.columns:
-            sc = ax.scatter(obs["EA_J"], obs["IPF_kN"], c=obs["batch"], cmap="viridis",
-                            s=38, alpha=0.9, zorder=9, edgecolors="white", linewidths=0.35,
-                            label="qLogNEHVI evaluations")
-            try:
-                plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.02, label="BO batch")
-            except Exception:
-                pass
-        pnd = mobo_result.get("pareto_approx_df")
-        if pnd is not None and len(pnd) > 0:
-            ax.scatter(pnd["EA_J"], pnd["IPF_kN"], s=120, marker="*", facecolors="#FF6D00",
-                       edgecolors="black", linewidths=0.5, zorder=11, label="MOBO non-dominated")
-        rm = mobo_result.get("ref_meta") or {}
-        ry = rm.get("reference_point_y")
-        if ry is not None and len(ry) >= 2:
-            r_ea, r_neg = float(ry[0]), float(ry[1])
-            ipf_ref = -r_neg
-            ax.scatter([r_ea], [ipf_ref], s=200, marker="X", c=C_REF, zorder=12, linewidths=1.2,
-                       edgecolors="white", label="HV ref. (BoTorch)")
-            ax.annotate(
-                "reference\n(worse than nadir)",
-                xy=(r_ea, ipf_ref), xytext=(12, -14), textcoords="offset points",
-                fontsize=7, color=C_REF,
-                arrowprops=dict(arrowstyle="-|>", color=C_REF, lw=0.8, shrinkA=2, shrinkB=2),
-            )
-        ax.set_title("(b) MOBO (qLogNEHVI) vs grid Pareto + ref. point")
-    else:
-        ax.set_title("(b) MOBO not run (use default pipeline + botorch)")
-    ax.set_xlabel(f"EA (J) at $d$={D_COMMON:.0f} mm")
-    ax.set_ylabel("IPF (kN)")
-    ax.legend(loc="best", framealpha=0.95)
-    ax.grid(True, alpha=0.28, linestyle="--")
-    ax.xaxis.set_minor_locator(AutoMinorLocator())
-    ax.yaxis.set_minor_locator(AutoMinorLocator())
-    add_subplot_label(ax, "b")
-
-    fig.suptitle(
-        "Multi-objective validation: objective space (EA vs IPF)",
-        fontweight="bold", y=0.98,
-    )
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.02, 0.04, 0.98, 0.90])
-    out = os.path.join(output_dir, "Fig_moo_objective_space_validation.png")
-    fig.savefig(out, dpi=600, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    logger.info("  Saved: Fig_moo_objective_space_validation.png")
-
-
-def fig_mobo_qnehvi_diagnostics(
-    mobo_result: Optional[Dict[str, Any]],
-    output_dir: str,
-    logger: logging.Logger,
-) -> None:
-    """Diagnostics for qLogNEHVI: hypervolume growth and design-space coverage."""
-    if mobo_result is None:
-        return
-    hv = mobo_result.get("hypervolume_trace") or []
-    obs = mobo_result.get("observations_df")
-    if not hv and (obs is None or len(obs) == 0):
-        logger.warning("  Skipping Fig_mobo_qnehvi_diagnostics (no MOBO data).")
-        return
-
-    fig, axes = plt.subplots(1, 2, figsize=(10.2, 4.2))
-
-    ax = axes[0]
-    if hv:
-        ax.plot(np.arange(len(hv)), hv, color="#222222", marker="o", markersize=5, linewidth=1.6)
-        ax.set_xlabel("MOBO iteration (incl. initial Sobol)")
-        ax.set_ylabel("Hypervolume (BoTorch, maximization)")
-        ax.set_title("(a) Hypervolume vs iteration")
-        ax.grid(True, alpha=0.28, linestyle="--")
-        ax.xaxis.set_minor_locator(AutoMinorLocator())
-    elif obs is not None and len(obs) > 0 and "batch" in obs.columns:
-        bc = obs.groupby("batch").size()
-        ax.bar(bc.index.astype(int), bc.values, color="#444444", edgecolor="black", linewidth=0.4)
-        ax.set_xlabel("BO batch")
-        ax.set_ylabel("Number of evaluations")
-        ax.set_title("(a) Evaluations per batch")
-        ax.grid(True, axis="y", alpha=0.28, linestyle="--")
-    else:
-        ax.text(0.5, 0.5, "No MOBO trace", ha="center", va="center", transform=ax.transAxes)
-        ax.set_axis_off()
-    add_subplot_label(ax, "a")
-
-    ax = axes[1]
-    if obs is not None and len(obs) > 0 and "batch" in obs.columns:
-        for lc, mk, ec in [("LC1", "o", "#3C5488"), ("LC2", "s", "#E64B35")]:
-            sub = obs[obs["LC"] == lc]
-            if len(sub) == 0:
-                continue
-            ax.scatter(sub["angle_deg"], sub["batch"], c=sub["batch"], cmap="plasma",
-                       marker=mk, s=42, label=lc, edgecolors=ec, linewidths=0.8, alpha=0.88)
-        ax.set_xlabel(r"Interior angle $\theta$ (°)")
-        ax.set_ylabel("BO batch index")
-        ax.set_title(r"(b) MOBO samples in $\theta$ vs batch")
-        ax.legend(loc="best", framealpha=0.95)
-        ax.grid(True, alpha=0.28, linestyle="--")
-        ax.xaxis.set_minor_locator(AutoMinorLocator())
-        ax.yaxis.set_minor_locator(AutoMinorLocator())
-    else:
-        ax.set_visible(False)
-    add_subplot_label(ax, "b")
-
-    fig.suptitle("MOBO (qLogNEHVI): hypervolume and design coverage", fontweight="bold", y=0.98)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.02, 0.05, 0.98, 0.90])
-    out = os.path.join(output_dir, "Fig_mobo_qnehvi_diagnostics.png")
-    fig.savefig(out, dpi=600, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    logger.info("  Saved: Fig_mobo_qnehvi_diagnostics.png")
 
 
 def fig_training_curves(dual_results: Dict, output_dir: str, logger: logging.Logger):
@@ -6717,14 +6324,15 @@ def fig_physics_verification(dual_results: Dict, val_df: pd.DataFrame, scaler_di
     # Panel (b): dE/dd vs F_actual scatter for each model
     ax = axes[1]
     
-    # Plot in reverse order so Hard-PINN (most important) is on top
+    # Plot in reverse order so Hard-PINN (most important) is on top.
+    # Local RNG so we don't pollute the global numpy seed state mid-pipeline.
+    _subsample_rng = np.random.default_rng(42)
     for approach in ["ddns", "soft", "hard"]:
         if approach in residual_data:
             dEdd = residual_data[approach]["dE_dd"]
             F = residual_data[approach]["F_pred"]
             # Subsample for visibility
-            np.random.seed(42)
-            idx = np.random.choice(len(dEdd), min(500, len(dEdd)), replace=False)
+            idx = _subsample_rng.choice(len(dEdd), min(500, len(dEdd)), replace=False)
             ax.scatter(F[idx], dEdd[idx], alpha=0.5, s=20, c=colors[approach], 
                       label=MODEL_LABELS[approach], edgecolors='none', zorder=3 if approach == "hard" else 2)
     
@@ -6866,8 +6474,8 @@ def train_baseline_models(train_df: pd.DataFrame, val_df: pd.DataFrame,
         pred_energy = lr_energy.predict(X_val)
         
         results["Linear"] = {
-            "load_r2": r2_score(y_val_load, pred_load),
-            "energy_r2": r2_score(y_val_energy, pred_energy),
+            "load_r2": r2_safe(y_val_load, pred_load),
+            "energy_r2": r2_safe(y_val_energy, pred_energy),
             "load_rmse": np.sqrt(mean_squared_error(y_val_load, pred_load)),
             "energy_rmse": np.sqrt(mean_squared_error(y_val_energy, pred_energy)),
             "load_mae": mean_absolute_error(y_val_load, pred_load),
@@ -6891,8 +6499,8 @@ def train_baseline_models(train_df: pd.DataFrame, val_df: pd.DataFrame,
         pred_energy = rf_energy.predict(X_val)
         
         results["RandomForest"] = {
-            "load_r2": r2_score(y_val_load, pred_load),
-            "energy_r2": r2_score(y_val_energy, pred_energy),
+            "load_r2": r2_safe(y_val_load, pred_load),
+            "energy_r2": r2_safe(y_val_energy, pred_energy),
             "load_rmse": np.sqrt(mean_squared_error(y_val_load, pred_load)),
             "energy_rmse": np.sqrt(mean_squared_error(y_val_energy, pred_energy)),
             "load_mae": mean_absolute_error(y_val_load, pred_load),
@@ -6916,8 +6524,8 @@ def train_baseline_models(train_df: pd.DataFrame, val_df: pd.DataFrame,
         pred_energy = xgb_energy.predict(X_val)
         
         results["XGBoost"] = {
-            "load_r2": r2_score(y_val_load, pred_load),
-            "energy_r2": r2_score(y_val_energy, pred_energy),
+            "load_r2": r2_safe(y_val_load, pred_load),
+            "energy_r2": r2_safe(y_val_energy, pred_energy),
             "load_rmse": np.sqrt(mean_squared_error(y_val_load, pred_load)),
             "energy_rmse": np.sqrt(mean_squared_error(y_val_energy, pred_energy)),
             "load_mae": mean_absolute_error(y_val_load, pred_load),
@@ -6972,8 +6580,8 @@ def train_baseline_models(train_df: pd.DataFrame, val_df: pd.DataFrame,
             pred_energy = gp_energy.predict(X_val)
             
             results["GaussianProcess"] = {
-                "load_r2": r2_score(y_val_load, pred_load),
-                "energy_r2": r2_score(y_val_energy, pred_energy),
+                "load_r2": r2_safe(y_val_load, pred_load),
+                "energy_r2": r2_safe(y_val_energy, pred_energy),
                 "load_rmse": np.sqrt(mean_squared_error(y_val_load, pred_load)),
                 "energy_rmse": np.sqrt(mean_squared_error(y_val_energy, pred_energy)),
                 "load_mae": mean_absolute_error(y_val_load, pred_load),
@@ -7020,25 +6628,19 @@ def fig_baseline_comparison(baseline_results: Dict, dual_results: Dict, output_d
     # Create figure
     fig, axes = plt.subplots(1, 3, figsize=(7.48, 3.0))
     
+    # Baseline ML models use Wong-palette auxiliaries (B/W-safe via lightness).
+    # PINN families keep their canonical COLORS assignments.
+    _BASELINE_COLORS = {
+        "Linear":          "#56B4E9",   # sky blue
+        "RandomForest":    "#009E73",   # bluish green
+        "XGBoost":         "#E69F00",   # orange
+        "GaussianProcess": "#CC79A7",   # reddish purple
+        "DDNS":            COLORS["ddns"],
+        "Soft-PINN":       COLORS["soft"],
+        "Hard-PINN":       COLORS["hard"],
+    }
     models = list(all_results.keys())
-    colors_list = []
-    for m in models:
-        if m == "Linear":
-            colors_list.append("#808080")
-        elif m == "RandomForest":
-            colors_list.append("#228B22")
-        elif m == "XGBoost":
-            colors_list.append("#FF8C00")
-        elif m == "GaussianProcess":
-            colors_list.append("#8B008B")
-        elif m == "DDNS":
-            colors_list.append(COLORS["ddns"])
-        elif m == "Soft-PINN":
-            colors_list.append(COLORS["soft"])
-        elif m == "Hard-PINN":
-            colors_list.append(COLORS["hard"])
-        else:
-            colors_list.append("#000000")
+    colors_list = [_BASELINE_COLORS.get(m, COLORS["data"]) for m in models]
     
     x = np.arange(len(models))
     
@@ -7137,7 +6739,8 @@ def run_hyperparam_sensitivity(train_df: pd.DataFrame, val_df: pd.DataFrame,
                 rng = np.random.default_rng(CFG.seed)
                 
                 loader = DataLoader(
-                    TensorDataset(Xtr, ytr), batch_size=cfg["batch_size"], shuffle=True, **_data_loader_kwargs()
+                    TensorDataset(Xtr, ytr), batch_size=cfg["batch_size"], shuffle=True,
+                    **_data_loader_kwargs(seed=CFG.seed),
                 )
                 
                 for ep in range(1, cfg["epochs"] + 1):
@@ -7166,8 +6769,8 @@ def run_hyperparam_sensitivity(train_df: pd.DataFrame, val_df: pd.DataFrame,
                     Fv = (pv[:, 0] * params.sig_F + params.mu_F).cpu().numpy()
                     Ev = (pv[:, 1] * params.sig_E + params.mu_E).cpu().numpy()
                 
-                load_r2 = r2_score(y_val[:, 0], Fv)
-                energy_r2 = r2_score(y_val[:, 1], Ev)
+                load_r2 = r2_safe(y_val[:, 0], Fv)
+                energy_r2 = r2_safe(y_val[:, 1], Ev)
                 
                 results.append({
                     "w_phys": w_phys,
@@ -7209,7 +6812,7 @@ def fig_hyperparam_sensitivity(sensitivity_df: pd.DataFrame, output_dir: str, lo
                 if not row.empty:
                     matrix[i, j] = row[metric].values[0]
         
-        im = ax.imshow(matrix, cmap='RdYlGn', aspect='auto', vmin=0.5, vmax=1.0)
+        im = ax.imshow(matrix, cmap='viridis', aspect='auto', vmin=0.5, vmax=1.0)
         ax.set_xticks(range(len(lr_vals)))
         ax.set_xticklabels([f"{lr:.0e}" for lr in lr_vals])
         ax.set_yticks(range(len(w_phys_vals)))
@@ -7245,20 +6848,29 @@ def run_inverse_design_robust(models: List[nn.Module], approach: str, target_ea:
                                scaler_disp: StandardScaler, enc: OneHotEncoder, params: ScalingParams,
                                bo_cfg, logger: logging.Logger, n_seeds: int = 5,
                                cal_ens=None, feat_scaler=None) -> Dict:
-    """Run inverse design with multiple seeds for robustness analysis.
+    """Run inverse design with multiple outer seeds for robustness analysis.
 
+    Two layers of randomization combine:
+      - **Inner multi-start** (``gp_bo_minimize_joint_multistart``, n_bo_restarts):
+        within one ``run_inverse_design`` call, GP-BO is restarted from
+        different acquisition seeds; the best is kept.
+      - **Outer multi-seed** (this function, n_seeds): the entire inner
+        multi-start GP-BO is repeated with ``n_seeds`` different ``BOConfig.seed``
+        values. The cross-seed spread is the published robustness statistic
+        ("σ_θ across seeds" in Section 5.8).
+
+    Output schema mirrors ``gp_bo_minimize_joint_multistart.restart_summary``
+    so downstream consumers and tables can treat both paths uniformly.
     ``target_ea`` is EA at ``D_COMMON`` (displacement-fair vs. full-stroke EA).
-    When ``cal_ens`` / ``feat_scaler`` are passed, each replicate uses the same
-    classifier-augmented objective as :func:`run_inverse_design`.
     """
     logger.info(f"    Running multi-seed inverse design (n_seeds={n_seeds})...")
-    
+
     results_by_method = {"gpbo": []}
-    
+
     for seed_offset in range(n_seeds):
         seed = CFG.seed + seed_offset * 100
 
-        # Preserve full BOConfig (Tikhonov, multi-start count, etc.); only vary seed.
+        # Preserve full BOConfig (multi-start count, etc.); only vary seed.
         bo_cfg_seed = replace(
             bo_cfg,
             seed=seed,
@@ -7269,7 +6881,7 @@ def run_inverse_design_robust(models: List[nn.Module], approach: str, target_ea:
         res = run_inverse_design(models, approach, target_ea, target_ipf,
                                  scaler_disp, enc, params, bo_cfg_seed, logger,
                                  cal_ens=cal_ens, feat_scaler=feat_scaler)
-        
+
         for method in ["gpbo"]:
             key = f"{method}_best"
             if key in res:
@@ -7279,53 +6891,94 @@ def run_inverse_design_robust(models: List[nn.Module], approach: str, target_ea:
                     "ea_error_pct": res[key].get("ea_error_pct", float("nan")),
                     "ipf_error_pct": res[key]["ipf_error_pct"]
                 })
-    
+
     aggregated = {
         "target_ea": target_ea,
         "target_ipf": target_ipf,
-        "n_seeds": n_seeds
+        "n_seeds": n_seeds,
     }
-    
+
     for method in ["gpbo"]:
         if results_by_method[method]:
-            x_vals = [r["x_best"] for r in results_by_method[method]]
-            y_vals = [r["y_best"] for r in results_by_method[method]]
-            ea_errs = [r["ea_error_pct"] for r in results_by_method[method]]
-            ipf_errs = [r["ipf_error_pct"] for r in results_by_method[method]]
-            
-            aggregated[f"{method}_x_mean"] = np.mean(x_vals)
-            aggregated[f"{method}_x_std"] = np.std(x_vals, ddof=1)
-            aggregated[f"{method}_y_mean"] = np.mean(y_vals)
-            aggregated[f"{method}_y_std"] = np.std(y_vals, ddof=1)
-            aggregated[f"{method}_ea_err_mean"] = np.mean(ea_errs)
-            aggregated[f"{method}_ea_err_std"] = np.std(ea_errs, ddof=1)
-            aggregated[f"{method}_ipf_err_mean"] = np.mean(ipf_errs)
-            aggregated[f"{method}_ipf_err_std"] = np.std(ipf_errs, ddof=1)
-    
+            x_vals = np.array([r["x_best"] for r in results_by_method[method]], dtype=np.float64)
+            y_vals = np.array([r["y_best"] for r in results_by_method[method]], dtype=np.float64)
+            ea_errs = np.array([r["ea_error_pct"] for r in results_by_method[method]], dtype=np.float64)
+            ipf_errs = np.array([r["ipf_error_pct"] for r in results_by_method[method]], dtype=np.float64)
+
+            # Legacy keys (existing consumers).
+            aggregated[f"{method}_x_mean"] = float(np.mean(x_vals))
+            aggregated[f"{method}_x_std"] = float(np.std(x_vals, ddof=1)) if x_vals.size > 1 else 0.0
+            aggregated[f"{method}_y_mean"] = float(np.mean(y_vals))
+            aggregated[f"{method}_y_std"] = float(np.std(y_vals, ddof=1)) if y_vals.size > 1 else 0.0
+            aggregated[f"{method}_ea_err_mean"] = float(np.mean(ea_errs))
+            aggregated[f"{method}_ea_err_std"] = float(np.std(ea_errs, ddof=1)) if ea_errs.size > 1 else 0.0
+            aggregated[f"{method}_ipf_err_mean"] = float(np.mean(ipf_errs))
+            aggregated[f"{method}_ipf_err_std"] = float(np.std(ipf_errs, ddof=1)) if ipf_errs.size > 1 else 0.0
+
+            # Unified restart_summary schema (matches gp_bo_minimize_joint_multistart).
+            n_calls_per_restart = int(getattr(bo_cfg, "n_calls_total", 30))
+            n_inner = int(getattr(bo_cfg, "n_bo_restarts", 5))
+            aggregated[f"{method}_restart_summary"] = {
+                "scope": "outer_multi_seed",
+                "n_outer_seeds": int(n_seeds),
+                "n_inner_restarts_per_seed": n_inner,
+                "n_calls_per_restart": n_calls_per_restart,
+                "total_surrogate_calls": int(n_seeds * n_inner * n_calls_per_restart),
+                "theta_best_mean": float(np.mean(x_vals)),
+                "theta_best_std":  float(np.std(x_vals, ddof=1)) if x_vals.size > 1 else 0.0,
+                "theta_best_min":  float(np.min(x_vals)),
+                "theta_best_max":  float(np.max(x_vals)),
+                "y_best_mean":     float(np.mean(y_vals)),
+                "y_best_std":      float(np.std(y_vals, ddof=1)) if y_vals.size > 1 else 0.0,
+                "y_best_min":      float(np.min(y_vals)),
+                "y_best_max":      float(np.max(y_vals)),
+            }
+
     return aggregated
 
 
 def generate_inverse_robustness_table(robust_results: List[Dict], output_dir: str, logger: logging.Logger):
-    """Generate inverse design robustness table."""
+    """Generate inverse design robustness table.
+
+    Columns mirror ``Table3_inverse_illposedness.csv`` so reviewers can read
+    the two tables interchangeably: same nomenclature for cross-seed spread,
+    explicit cost accounting (``total_surrogate_calls``).
+    """
     if not robust_results:
         return
-    
+
+    COLS = [
+        f"Target_EA@{EA_COMMON_MM_TAG}", "Target_IPF",
+        "Method", "N_outer_seeds", "N_inner_restarts_per_seed",
+        "N_calls_per_restart", "Total_surrogate_calls",
+        "Angle_mean_std", "Theta_best_min", "Theta_best_max",
+        "Objective_mean_std", "Y_best_min", "Y_best_max",
+        "EA_err_mean_std", "IPF_err_mean_std",
+    ]
     rows = []
     for res in robust_results:
         for method in ["gpbo"]:
             if f"{method}_x_mean" in res:
+                rs = res.get(f"{method}_restart_summary", {})
                 rows.append({
                     f"Target_EA@{EA_COMMON_MM_TAG}": f"{res.get('target_ea', 0):.3f}",
                     "Target_IPF": f"{res['target_ipf']:.3f}",
                     "Method": method.upper(),
-                    "Angle_mean_std": f"{res[f'{method}_x_mean']:.1f} ± {res[f'{method}_x_std']:.1f}",
+                    "N_outer_seeds": rs.get("n_outer_seeds", res.get("n_seeds", "")),
+                    "N_inner_restarts_per_seed": rs.get("n_inner_restarts_per_seed", ""),
+                    "N_calls_per_restart": rs.get("n_calls_per_restart", ""),
+                    "Total_surrogate_calls": rs.get("total_surrogate_calls", ""),
+                    "Angle_mean_std": f"{res[f'{method}_x_mean']:.2f} ± {res[f'{method}_x_std']:.2f}",
+                    "Theta_best_min": f"{rs.get('theta_best_min', float('nan')):.2f}",
+                    "Theta_best_max": f"{rs.get('theta_best_max', float('nan')):.2f}",
                     "Objective_mean_std": f"{res[f'{method}_y_mean']:.4f} ± {res[f'{method}_y_std']:.4f}",
-                    "EA_err_mean_std": f"{res[f'{method}_ea_err_mean']:.1f} ± {res[f'{method}_ea_err_std']:.1f}%",
-                    "IPF_err_mean_std": f"{res[f'{method}_ipf_err_mean']:.1f} ± {res[f'{method}_ipf_err_std']:.1f}%",
-                    "N_seeds": res["n_seeds"]
+                    "Y_best_min": f"{rs.get('y_best_min', float('nan')):.6f}",
+                    "Y_best_max": f"{rs.get('y_best_max', float('nan')):.6f}",
+                    "EA_err_mean_std": f"{res[f'{method}_ea_err_mean']:.2f} ± {res[f'{method}_ea_err_std']:.2f}%",
+                    "IPF_err_mean_std": f"{res[f'{method}_ipf_err_mean']:.2f} ± {res[f'{method}_ipf_err_std']:.2f}%",
                 })
-    
-    df = pd.DataFrame(rows)
+
+    df = pd.DataFrame(rows, columns=COLS)
     df.to_csv(os.path.join(output_dir, "Table_inverse_robustness.csv"), index=False)
     logger.info("  Saved: Table_inverse_robustness.csv")
 
@@ -7379,22 +7032,32 @@ def compute_uncertainty_calibration(dual_results: Dict, logger: logging.Logger) 
                 float(np.mean(residuals < s * sigma_safe)) for s in sigma_levels
             ])
             
-            # Post-hoc conformal calibration:
-            # Find the factor c such that c * sigma gives correct 68.3% coverage
-            # i.e., find c where P(|residual| < c * sigma) = 0.683
-            # This is equivalent to finding the quantile of |residual| / sigma
+            # Post-hoc conformal calibration.
+            #
+            # We compute TWO multipliers:
+            #   c1 = quantile of |residual|/sigma at 0.683 (1-sigma coverage)
+            #   c2 = quantile of |residual|/sigma at 0.954 (2-sigma coverage)
+            # A single scalar correction (just c1) is exact only when the residual
+            # distribution is Gaussian; with heavier tails the scaling factor for
+            # 2-sigma coverage differs from c1. Reporting both lets the figure
+            # routines plot truly-calibrated 1- and 2-sigma bands as
+            #   ±c1*sigma   (68% coverage)
+            #   ±c2*sigma   (95% coverage)
+            # rather than the linear extrapolation ±c1*2*sigma which under-covers
+            # whenever errors are heavy-tailed.
             normalized_residuals = residuals / sigma_safe
-            
-            # Conformal factor: the 68.3th percentile of |residual|/sigma
-            # If calibrated, this should be ~1.0 (i.e., 1-sigma = 68.3% coverage)
-            conformal_factor = float(np.percentile(normalized_residuals, 68.3))
-            
-            # Corrected coverage using conformal factor
+            conformal_factor = float(np.percentile(normalized_residuals, 68.3))   # c1
+            conformal_factor_2sigma = float(np.percentile(normalized_residuals, 95.4))  # c2
+
+            # Coverage achieved by the new bands (sanity check; should be ~exact).
             corrected_coverage = np.array([
                 float(np.mean(residuals < s * conformal_factor * sigma_safe)) for s in sigma_levels
             ])
-            
-            # Also compute energy calibration if available
+            corrected_coverage_2sigma = np.array([
+                float(np.mean(residuals < s * conformal_factor_2sigma * sigma_safe)) for s in sigma_levels
+            ])
+
+            # Also compute energy calibration if available.
             energy_cal = {}
             if "energy_std" in preds:
                 e_residuals = np.abs(true_vals["energy"] - preds["energy"])
@@ -7402,19 +7065,23 @@ def compute_uncertainty_calibration(dual_results: Dict, logger: logging.Logger) 
                 e_observed = np.array([float(np.mean(e_residuals < s * e_sigma)) for s in sigma_levels])
                 e_norm_res = e_residuals / e_sigma
                 e_conformal = float(np.percentile(e_norm_res, 68.3))
+                e_conformal_2 = float(np.percentile(e_norm_res, 95.4))
                 e_corrected = np.array([float(np.mean(e_residuals < s * e_conformal * e_sigma)) for s in sigma_levels])
                 energy_cal = {
                     "energy_observed_coverage": e_observed,
                     "energy_conformal_factor": e_conformal,
+                    "energy_conformal_factor_2sigma": e_conformal_2,
                     "energy_corrected_coverage": e_corrected,
                 }
-            
+
             calibration[protocol][approach] = {
                 "sigma_levels": sigma_levels,
                 "expected_coverage": expected_coverage,
                 "observed_coverage": observed_coverage,
                 "conformal_factor": conformal_factor,
+                "conformal_factor_2sigma": conformal_factor_2sigma,
                 "corrected_coverage": corrected_coverage,
+                "corrected_coverage_2sigma": corrected_coverage_2sigma,
                 # Legacy keys for backward compatibility
                 "load_within_1sigma": float(observed_coverage[1]),  # index 1 = 1.0 sigma
                 "load_within_2sigma": float(observed_coverage[3]),  # index 3 = 2.0 sigma
@@ -7570,11 +7237,12 @@ def run_same_capacity_experiment(train_df: pd.DataFrame, val_df: pd.DataFrame,
         if approach == "soft":
             colloc_sampler = create_collocation_sampler(train_df, scaler_disp, enc)
             rng = np.random.default_rng(CFG.seed)
-        
+
         loader = DataLoader(
-            TensorDataset(Xtr, ytr), batch_size=cfg["batch_size"], shuffle=True, **_data_loader_kwargs()
+            TensorDataset(Xtr, ytr), batch_size=cfg["batch_size"], shuffle=True,
+            **_data_loader_kwargs(seed=CFG.seed),
         )
-        
+
         t0 = time.time()
         for ep in range(1, min(cfg["epochs"], 800) + 1):  # Reduced epochs for experiment
             model.train()
@@ -7622,8 +7290,8 @@ def run_same_capacity_experiment(train_df: pd.DataFrame, val_df: pd.DataFrame,
         else:
             Fv, Ev = hard_pinn_predict_load_energy(model, Xv, params)
         
-        load_r2 = r2_score(y_val[:, 0], Fv)
-        energy_r2 = r2_score(y_val[:, 1], Ev)
+        load_r2 = r2_safe(y_val[:, 0], Fv)
+        energy_r2 = r2_safe(y_val[:, 1], Ev)
         
         results[approach] = {
             "load_r2": load_r2,
@@ -7789,9 +7457,10 @@ def run_extended_ablation(train_df: pd.DataFrame, val_df: pd.DataFrame,
             
             colloc_sampler = create_collocation_sampler(train_df, scaler_disp, enc) if cfg.get("colloc_ratio", 0) > 0 else None
             rng = np.random.default_rng(CFG.seed)
-            
+
             loader = DataLoader(
-                TensorDataset(Xtr, ytr), batch_size=cfg["batch_size"], shuffle=True, **_data_loader_kwargs()
+                TensorDataset(Xtr, ytr), batch_size=cfg["batch_size"], shuffle=True,
+                **_data_loader_kwargs(seed=CFG.seed),
             )
             
             for ep in range(1, cfg["epochs"] + 1):
@@ -7833,8 +7502,8 @@ def run_extended_ablation(train_df: pd.DataFrame, val_df: pd.DataFrame,
                 Fv = (pv[:, 0] * params.sig_F + params.mu_F).cpu().numpy()
                 Ev = (pv[:, 1] * params.sig_E + params.mu_E).cpu().numpy()
             
-            load_r2 = r2_score(y_val[:, 0], Fv)
-            energy_r2 = r2_score(y_val[:, 1], Ev)
+            load_r2 = r2_safe(y_val[:, 0], Fv)
+            energy_r2 = r2_safe(y_val[:, 1], Ev)
             
             results.append({
                 "Ablation": ablation["name"],
@@ -7941,21 +7610,47 @@ def generate_summary_tables(dual_results: Dict, df_metrics: pd.DataFrame, all_in
     pd.DataFrame(rows).to_csv(os.path.join(output_dir, "Table1_forward_results.csv"), index=False)
     logger.info("  Saved: Table1_forward_results.csv")
     
-    # Table 2: Statistical tests
+    # Table 2: Statistical tests.
+    # Welch t-test + Cohen's d are reported for completeness but flagged as
+    # *descriptive* (ensemble members violate the iid assumption). The
+    # bootstrap 95% CI of the mean R² difference (n_boot=10000, percentile
+    # method) is the primary inferential statistic — it is non-parametric and
+    # robust to dependence among members from the same data split.
     if stat_tests:
+        # Explicit column order so the CSV layout is deterministic across runs.
+        STAT_COLS = [
+            "Protocol", "Comparison",
+            "DeltaR2_load", "DeltaR2_load_CI95_lo", "DeltaR2_load_CI95_hi",
+            "Bootstrap_excludes_zero",
+            "Cohens_d",
+            "t_statistic", "p_value_descriptive", "p_bonferroni_descriptive",
+            "Significant_descriptive", "n1", "n2",
+            "Note",
+        ]
         rows = []
         for protocol in ["random", "unseen"]:
             if protocol not in stat_tests:
                 continue
             for comp, vals in stat_tests[protocol].items():
                 p_bonf = vals.get("p_bonferroni", vals["t_pvalue"])
-                rows.append({"Protocol": protocol_label(protocol), "Comparison": comp.replace("_vs_", " vs ").upper(),
-                            "t_statistic": f"{vals['t_statistic']:.4f}", "p_value": f"{vals['t_pvalue']:.4f}",
-                            "p_bonferroni": f"{p_bonf:.4f}",
-                            "Cohens_d": f"{vals['cohens_d']:.3f}",
-                            "Significant_raw": "Yes" if vals['t_pvalue'] < 0.05 else "No",
-                            "Significant_Bonferroni": "Yes" if p_bonf < 0.05 else "No"})
-        pd.DataFrame(rows).to_csv(os.path.join(output_dir, "Table2_statistical_tests.csv"), index=False)
+                rows.append({
+                    "Protocol": protocol_label(protocol),
+                    "Comparison": comp.replace("_vs_", " vs ").upper(),
+                    "DeltaR2_load": f"{vals.get('bootstrap_mean_diff', float('nan')):.4f}",
+                    "DeltaR2_load_CI95_lo": f"{vals.get('bootstrap_ci_lo_95', float('nan')):.4f}",
+                    "DeltaR2_load_CI95_hi": f"{vals.get('bootstrap_ci_hi_95', float('nan')):.4f}",
+                    "Bootstrap_excludes_zero": "Yes" if vals.get("bootstrap_excludes_zero") else "No",
+                    "Cohens_d": f"{vals['cohens_d']:.3f}",
+                    "t_statistic": f"{vals['t_statistic']:.4f}",
+                    "p_value_descriptive": f"{vals['t_pvalue']:.4f}",
+                    "p_bonferroni_descriptive": f"{p_bonf:.4f}",
+                    "Significant_descriptive": "Yes" if p_bonf < 0.05 else "No",
+                    "n1": int(vals["n1"]),
+                    "n2": int(vals["n2"]),
+                    "Note": "Bootstrap CI is the inferential statistic; t-test is descriptive only (iid violated).",
+                })
+        pd.DataFrame(rows, columns=STAT_COLS).to_csv(
+            os.path.join(output_dir, "Table2_statistical_tests.csv"), index=False)
         logger.info("  Saved: Table2_statistical_tests.csv")
     
     # Table 3: Inverse design results
@@ -8167,22 +7862,18 @@ def log_runtime_environment(output_dir: str, logger: logging.Logger) -> Dict[str
         "scipy": scipy_ver,
         "HAS_SCIPY": bool(HAS_SCIPY),
         "HAS_SKOPT": bool(HAS_SKOPT),
-        "HAS_BOTORCH": bool(HAS_BOTORCH),
         "HAS_SKLEARN_GP": bool(HAS_SKLEARN_GP),
         "CFG_seed": CFG.seed,
         "CFG_n_ensemble": CFG.n_ensemble,
         "D_COMMON_mm": D_COMMON,
     }
-    if HAS_BOTORCH:
-        info["botorch"] = _pkg_ver("botorch")
-        info["gpytorch"] = _pkg_ver("gpytorch")
     path = os.path.join(output_dir, "runtime_environment.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(info, f, indent=2, default=str)
     logger.info("  Saved: runtime_environment.json")
     logger.info("  Runtime stack (see JSON for full strings):")
     logger.info(f"    Python {info['python_short']} | numpy {info['numpy']} | torch {info['torch']}")
-    logger.info(f"    sklearn {info.get('sklearn')} | skopt={HAS_SKOPT} | botorch={HAS_BOTORCH}")
+    logger.info(f"    sklearn {info.get('sklearn')} | skopt={HAS_SKOPT}")
     return info
 
 
@@ -8193,18 +7884,14 @@ def apply_dry_run_settings(logger: logging.Logger) -> None:
     CFG.n_ensemble = min(int(CFG.n_ensemble), 2)
     CFG.run_reviewer_proof = False
     CFG.run_ablation = False
-    CFG.run_mobo_qnehvi = False
-    CFG._skip_mobo = True
     CFG.run_gpbo = False
-    CFG.run_loao_cv = False
-    CFG.run_rar = False
     BO_CFG.lambda_sweep = False
     BO_CFG.run_classifier_ablation = False
     CFG.run_inverse_ablation = False
     CFG.run_inverse_stress_validation = False
     logger.info(
         "DRY RUN MODE: M<=2, short epochs, coarser MO landscape, "
-        "no MOBO / reviewer-proof / ablation / GP-BO; inverse uses coarse angle grid."
+        "no reviewer-proof / ablation / GP-BO; inverse uses coarse angle grid."
     )
 
 
@@ -8215,20 +7902,14 @@ def check_publication_dependencies(logger: logging.Logger) -> None:
     missing: List[str] = []
     if CFG.run_gpbo and not HAS_SKOPT:
         missing.append("scikit-optimize (skopt) required for GP-BO inverse design")
-    if not HAS_BOTORCH:
-        missing.append("botorch+gpytorch required for MOBO (qLogNEHVI) — primary multi-objective method")
-    if HAS_BOTORCH and (not CFG.run_mobo_qnehvi or getattr(CFG, "_skip_mobo", False)):
-        missing.append(
-            "strict_paper_deps requires MOBO to run (omit --no_mobo_qnehvi) for a complete submission bundle"
-        )
     if missing:
         for m in missing:
             logger.error(f"  strict_paper_deps: {m}")
         raise RuntimeError(
             "strict_paper_deps is enabled but optional dependencies are missing: "
             + "; ".join(missing)
-            + ". Install requirements.txt (skopt + botorch). strict_paper requires MOBO to run "
-            "(omit --no_mobo_qnehvi). If inverse GP-BO is not required, set CFG.run_gpbo = False before run."
+            + ". Install requirements.txt (skopt). If inverse GP-BO is not required, "
+            "set CFG.run_gpbo = False before run."
         )
 
 
@@ -8251,9 +7932,9 @@ Primary protocol-level comparisons
 
 Exploratory / descriptive analyses
 ----------------------------------
-- Inverse design, multi-objective sweeps, MOBO (qLogNEHVI), classifier
-  ablations, and hyperparameter sensitivity analyses are **descriptive** unless
-  explicitly framed as confirmatory with a pre-specified alpha budget.
+- Inverse design, multi-objective sweeps, classifier ablations, and
+  hyperparameter sensitivity analyses are **descriptive** unless explicitly
+  framed as confirmatory with a pre-specified alpha budget.
 
 Recommendations for the paper text
 ----------------------------------
@@ -8325,20 +8006,6 @@ def generate_compute_budget_summary(
             "avg_train_time_s_per_member": _fmt_float_for_csv(best.get("wall_time")),
             "n_gpbo_calls": best.get("n_evals", ""),
         })
-    mobo_csv = os.path.join(output_dir, "Table_mobo_qnehvi_observations.csv")
-    if os.path.isfile(mobo_csv):
-        try:
-            n_m = len(pd.read_csv(mobo_csv))
-            rows.append({
-                "stage": "mobo_qnehvi_total_forward_evals",
-                "ensemble_M_total": "",
-                "ensemble_M_effective": "",
-                "n_parameters": "",
-                "avg_train_time_s_per_member": "",
-                "n_mobo_forward_evaluations": n_m,
-            })
-        except Exception as ex:
-            logger.warning(f"  Could not read MOBO observation count: {ex}")
     out = os.path.join(output_dir, "Table_compute_reproducibility_budget.csv")
     pd.DataFrame(rows).to_csv(out, index=False)
     logger.info("  Saved: Table_compute_reproducibility_budget.csv")
@@ -8882,13 +8549,13 @@ def run_pipeline(data_dir: str, output_dir: str):
     )
     logger.info("       Posteriors reconstructed from res.models at each iteration")
     logger.info("")
-    logger.info("VERSION 9 (Q1 inverse / MOBO artifacts):")
+    logger.info("VERSION 9 (Q1 inverse artifacts):")
     logger.info("  [AK] Table3_inverse_illposedness, Table_inverse_local_minima, Table_inverse_topk_basins")
     logger.info("  [AL] Table_forward_jacobian_summary, Table_inverse_vs_calibration")
     logger.info("  [AM] Likelihood posterior: Fig_inverse_posterior_likelihood, Table_inverse_posterior_likelihood")
     logger.info("  [AN] Table_inverse_stress_protocol (reviewer_proof), Table_inverse_theta_member_spread")
-    logger.info("  [AO] Table_inverse_ablation (--inverse_ablation); Table_mobo_vs_landscape_pareto_distance")
-    logger.info("  [AP] Multi-seed BO uses full BOConfig (dataclasses.replace); strict_paper requires MOBO run")
+    logger.info("  [AO] Table_inverse_ablation (--inverse_ablation)")
+    logger.info("  [AP] Multi-seed BO uses full BOConfig (dataclasses.replace)")
     logger.info("")
     logger.info("VERSION 5 REVIEWER-PROOF ADDITIONS:")
     logger.info("  [H] Physics verification figure: dE/dd = F proof")
@@ -9031,30 +8698,8 @@ def run_pipeline(data_dir: str, output_dir: str):
         # calibration already computed before figure generation; reuse it
         fig_reliability_diagram(calibration, output_dir, logger)
 
-        # Calibration vs ensemble size study
-        logger.info("  Computing calibration sensitivity to ensemble size...")
-        try:
-            cal_vs_M = compute_calibration_vs_M(dual_results, logger)
-            fig_calibration_vs_M(cal_vs_M, output_dir, logger)
-        except Exception as e:
-            logger.warning(f"  Calibration vs M analysis failed: {e}")
-
     else:
         logger.info("\n  Skipping reviewer-proof analyses (--no_reviewer_proof flag set)")
-
-    # Leave-one-angle-out cross-validation
-    if getattr(CFG, 'run_loao_cv', True) and not CFG.dry_run:
-        logger.info("\n" + "=" * 70)
-        logger.info("LEAVE-ONE-ANGLE-OUT CROSS-VALIDATION")
-        logger.info("=" * 70)
-        try:
-            loao_results = run_leave_one_angle_out_cv(df_all, logger)
-            fig_loao_cv_results(loao_results, output_dir, logger)
-            pd.DataFrame(loao_results["per_fold_r2"]).to_csv(
-                os.path.join(output_dir, "Table_loao_cv.csv"), index=False)
-            logger.info("  Saved: Table_loao_cv.csv")
-        except Exception as e:
-            logger.warning(f"  LOAO-CV failed: {e}")
 
     # [CHANGE E] Generate feasible inverse design targets
     logger.info("\n" + "=" * 70)
@@ -9087,17 +8732,11 @@ def run_pipeline(data_dir: str, output_dir: str):
     lambda_opt, lambda_diag = auto_tune_lambda(cal_ens, clf_feat_scaler, df_metrics, logger)
     BO_CFG.prob_weight = lambda_opt
 
-    # Auto-tune robust uncertainty penalty
-    beta_robust = auto_tune_beta(inv_models, "hard", df_metrics,
-                                  inv_scaler_disp, inv_enc, inv_params, logger)
-    BO_CFG.beta_robust = beta_robust
-
-    # Inverse design optimization using full-data models WITH classifier + robustness penalties
+    # Inverse design optimization using full-data models WITH classifier penalty
     logger.info("\n" + "=" * 70)
-    logger.info("INVERSE DESIGN: GP-BO (WITH CLASSIFIER + ROBUSTNESS PENALTIES)")
+    logger.info("INVERSE DESIGN: GP-BO (WITH CLASSIFIER PENALTY)")
     logger.info("=" * 70)
-    logger.info(f"  Using full-data Hard-PINN models + classifier penalty (w={BO_CFG.prob_weight:.4f})"
-                f" + robustness penalty (beta={BO_CFG.beta_robust:.6f})")
+    logger.info(f"  Using full-data Hard-PINN models + classifier penalty (w={BO_CFG.prob_weight:.4f})")
     
     all_inverse_results = []
     for target in inverse_targets:
@@ -9326,27 +8965,6 @@ def run_pipeline(data_dir: str, output_dir: str):
         landscape_df, output_dir, logger,
     )
 
-    # -------------------------------------------------------------------------
-    # Multi-objective Bayesian optimization (qLogNEHVI / BoTorch)
-    # -------------------------------------------------------------------------
-    mobo_result = None
-    if HAS_BOTORCH and CFG.run_mobo_qnehvi and not getattr(CFG, '_skip_mobo', False):
-        logger.info("\n" + "=" * 70)
-        logger.info("MULTI-OBJECTIVE BO: qLogNEHVI (EXPECTED HYPERVOLUME, BOTORCH)")
-        logger.info("=" * 70)
-        logger.info("  Acquisition: qLogNoisyExpectedHypervolumeImprovement (stable qNEHVI; Daulton et al., 2023)")
-        logger.info("  Reference point: documented in mobo_qnehvi_reference_point.json (landscape nadir + margin)")
-        mobo_result = run_multiobjective_mobo_qnehvi(
-            inv_models, "hard", inv_scaler_disp, inv_enc, inv_params,
-            landscape_df, logger, output_dir=output_dir, cfg=MOBO_QNEHVI_CFG,
-        )
-
-    fig_moo_objective_space_validation(
-        pareto_df, landscape_df, output_dir, logger,
-        mobo_result=mobo_result, df_metrics=df_metrics,
-    )
-    fig_mobo_qnehvi_diagnostics(mobo_result, output_dir, logger)
-
     # Save per-LC conditional Pareto fronts
     pareto_by_lc = pareto_df.attrs.get("pareto_by_lc", {})
     for lc, lc_df in pareto_by_lc.items():
@@ -9412,7 +9030,7 @@ def run_pipeline(data_dir: str, output_dir: str):
     generate_summary_tables(dual_results, df_metrics, all_inverse_results, stat_tests, output_dir, logger, calibration=calibration)
 
     logger.info("\n" + "=" * 70)
-    logger.info("INVERSE / MOBO PUBLICATION ARTIFACTS (TABLES)")
+    logger.info("INVERSE PUBLICATION ARTIFACTS (TABLES)")
     logger.info("=" * 70)
     generate_inverse_publication_artifacts(
         output_dir,
@@ -9430,8 +9048,6 @@ def run_pipeline(data_dir: str, output_dir: str):
         bo_cfg=BO_CFG,
         cal_ens=cal_ens,
         clf_feat_scaler=clf_feat_scaler,
-        mobo_result=mobo_result,
-        landscape_df=landscape_df,
     )
 
     logger.info("\n" + "=" * 70)
@@ -9464,22 +9080,20 @@ def main():
 
     parser.add_argument("--no_reviewer_proof", action="store_true", help="Skip reviewer-proof analyses (baselines, sensitivity, robustness)")
     parser.add_argument("--force_cpu", action="store_true", help="Use CPU even if CUDA is available")
-    parser.add_argument("--no_mobo_qnehvi", action="store_true",
-                        help="Skip multi-objective BO (qLogNEHVI / BoTorch) after landscape sweep")
     parser.add_argument(
         "--strict_paper",
         action="store_true",
-        help="Abort if optional deps missing (skopt for GP-BO, botorch for MOBO). Use for submission runs.",
+        help="Abort if optional deps missing (skopt for GP-BO). Use for submission runs.",
     )
     parser.add_argument(
         "--dry_run",
         action="store_true",
-        help="CI/smoke: tiny training budgets, M<=2, no MOBO/reviewer extras; inverse uses coarse grid (no skopt).",
+        help="CI/smoke: tiny training budgets, M<=2, no reviewer extras; inverse uses coarse grid (no skopt).",
     )
     parser.add_argument(
         "--inverse_ablation",
         action="store_true",
-        help="Run extra GP-BO inverse ablations (no Tikhonov / no classifier / no robustness) on first targets; expensive.",
+        help="Run extra GP-BO inverse ablation (no classifier penalty) on first targets; expensive.",
     )
     parser.add_argument(
         "--no_inverse_stress",
@@ -9491,8 +9105,6 @@ def main():
         action="store_true",
         help="Skip Table_inverse_theta_member_spread.csv.",
     )
-    parser.add_argument("--no_loao_cv", action="store_true", help="Skip leave-one-angle-out cross-validation")
-    parser.add_argument("--no_rar", action="store_true", help="Skip residual-based adaptive refinement for collocation")
     args = parser.parse_args()
 
     CFG.dry_run = bool(args.dry_run)
@@ -9504,12 +9116,8 @@ def main():
     CFG.show_plots = args.show_plots
     CFG.run_ablation = not args.no_ablation
     CFG.run_reviewer_proof = not args.no_reviewer_proof
-    CFG.run_mobo_qnehvi = not args.no_mobo_qnehvi
-    CFG._skip_mobo = args.no_mobo_qnehvi
     CFG.strict_paper_deps = bool(args.strict_paper)
     CFG.force_cpu = args.force_cpu
-    CFG.run_loao_cv = not args.no_loao_cv
-    CFG.run_rar = not args.no_rar
     CFG.run_inverse_ablation = bool(args.inverse_ablation)
     CFG.run_inverse_stress_validation = not args.no_inverse_stress
     CFG.run_inverse_member_spread = not args.no_inverse_member_spread

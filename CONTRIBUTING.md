@@ -30,4 +30,4 @@ All 103 tests must pass before submitting a pull request.
 Open an issue on GitHub with:
 1. Steps to reproduce
 2. Expected vs actual behavior
-3. Output of `python -c "import torch; print(torch.__version__); import botorch; print(botorch.__version__)"`
+3. Output of `python -c "import torch, skopt; print(torch.__version__, skopt.__version__)"`

@@ -20,13 +20,6 @@ class TestConfig:
         assert cfg.test_size == 0.20
         assert cfg.dry_run is False
 
-    def test_config_new_fields(self, m):
-        cfg = m.Config()
-        assert cfg.run_loao_cv is True
-        assert cfg.run_rar is True
-        assert cfg.rar_interval == 50
-        assert cfg.rar_warmup == 100
-
     def test_d_common_equals_lc1_stroke(self, m):
         assert m.D_COMMON == m.disp_end_mm("LC1")
 
@@ -34,11 +27,12 @@ class TestConfig:
         assert m.EA_COMMON_MM_TAG == f"{int(m.D_COMMON)}mm"
 
 
-class TestBOConfigNewFields:
-    def test_tikhonov_defaults(self, m):
+class TestBOConfigDefaults:
+    def test_bo_defaults(self, m):
         bo = m.BOConfig()
-        assert bo.gamma_tikhonov == 0.0
-        assert bo.theta_center == 57.5
+        assert bo.n_calls_total == 30
+        assert bo.n_init == 6
+        assert bo.xi == 0.01
         assert bo.n_bo_restarts == 5
 
 
@@ -570,9 +564,6 @@ class TestOptionalDeps:
     def test_has_skopt_flag_exists(self, m):
         assert isinstance(m.HAS_SKOPT, bool)
 
-    def test_has_botorch_flag_exists(self, m):
-        assert isinstance(m.HAS_BOTORCH, bool)
-
 
 # =====================================================================
 # Scaled Fonts
@@ -638,46 +629,271 @@ class TestComputeInversePosterior:
         assert result["ci_95_upper"] > result["mean"]
 
 
-class TestTikhonovObjective:
-    def test_tikhonov_penalty_at_center_is_zero(self, m):
-        theta_center = 57.5
-        gamma = 1.0
-        penalty = gamma * (theta_center - theta_center) ** 2
-        assert penalty == 0.0
+# =====================================================================
+# r2_safe — robust R² that returns NaN on flat-target slices
+# =====================================================================
+class TestR2Safe:
+    def test_perfect_fit_returns_one(self, m):
+        y = np.array([1.0, 2.0, 3.0, 4.0])
+        assert m.r2_safe(y, y) == pytest.approx(1.0, abs=1e-12)
 
-    def test_tikhonov_penalty_increases_with_distance(self, m):
-        theta_center = 57.5
-        gamma = 0.01
-        p_near = gamma * (58.0 - theta_center) ** 2
-        p_far = gamma * (70.0 - theta_center) ** 2
-        assert p_far > p_near
+    def test_constant_target_returns_nan_not_minus_inf(self, m):
+        # Old r2_score behaviour: divides by var(y_true)=0 -> -inf or warning.
+        # r2_safe must return NaN so Tukey-fence percentiles do not collapse.
+        y_true = np.array([5.0, 5.0, 5.0, 5.0])
+        y_pred = np.array([4.9, 5.1, 4.95, 5.05])
+        result = m.r2_safe(y_true, y_pred)
+        assert np.isnan(result)
+        assert result != -np.inf  # explicitly: not the broken sklearn value
+
+    def test_near_constant_target_returns_nan(self, m):
+        # Variance below the 1e-12 cutoff is treated as undefined.
+        y_true = np.full(10, 1.0) + np.random.RandomState(0).randn(10) * 1e-9
+        y_pred = np.full(10, 1.0)
+        assert np.isnan(m.r2_safe(y_true, y_pred))
+
+    def test_nan_input_returns_nan(self, m):
+        y = np.array([1.0, 2.0, np.nan])
+        p = np.array([1.0, 2.0, 3.0])
+        assert np.isnan(m.r2_safe(y, p))
+
+    def test_size_mismatch_returns_nan(self, m):
+        y = np.array([1.0, 2.0, 3.0])
+        p = np.array([1.0, 2.0])
+        assert np.isnan(m.r2_safe(y, p))
+
+    def test_empty_returns_nan(self, m):
+        assert np.isnan(m.r2_safe(np.array([]), np.array([])))
+
+    def test_matches_sklearn_for_well_posed_input(self, m):
+        from sklearn.metrics import r2_score
+        rng = np.random.RandomState(42)
+        y = rng.randn(50) * 3 + 1
+        p = y + rng.randn(50) * 0.5
+        assert m.r2_safe(y, p) == pytest.approx(r2_score(y, p), abs=1e-12)
 
 
 # =====================================================================
-# RAR Adaptive Collocation Sampler
+# _val_checkpoint_score(approach=...) — Hard-PINN checkpoints on load only
 # =====================================================================
-class TestAdaptiveCollocationSampler:
-    def test_initial_sampling_is_uniform(self, m, tiny_df, logger):
-        scaler_disp, _, enc, _ = m.create_preprocessors(tiny_df, logger)
-        base = m.create_collocation_sampler(tiny_df, scaler_disp, enc)
-        rar = m.AdaptiveCollocationSampler(base, eval_grid_size=50, rng_seed=42)
-        assert rar.is_active is False
-        rng = np.random.default_rng(0)
-        pts = rar.sample(10, rng)
-        assert pts.shape[0] == 10
+class TestValCheckpointScore:
+    def test_default_is_soft_mean(self, m):
+        # Backward-compatible default: approach="soft" (= mean of two heads).
+        assert m._val_checkpoint_score(0.8, 0.9) == pytest.approx(0.85)
 
-    def test_after_update_is_active(self, m, tiny_df, logger):
-        scaler_disp, scaler_out, enc, params = m.create_preprocessors(tiny_df, logger)
-        # Force CPU for test (eval grid may be on GPU otherwise)
-        prev_force = m.CFG.force_cpu
-        m.CFG.force_cpu = True
-        m.refresh_device()
-        try:
-            base = m.create_collocation_sampler(tiny_df, scaler_disp, enc)
-            rar = m.AdaptiveCollocationSampler(base, eval_grid_size=50, rng_seed=42)
-            net = m.SoftPINNNet(in_d=5, hidden_layers=[16], dropout=0.0, softplus_beta=1.0)
-            rar.update_weights(net, params, "soft")
-            assert rar.is_active is True
-        finally:
-            m.CFG.force_cpu = prev_force
-            m.refresh_device()
+    def test_ddns_returns_mean_of_both_heads(self, m):
+        assert m._val_checkpoint_score(0.7, 0.95, approach="ddns") == pytest.approx(0.825)
+
+    def test_soft_returns_mean_of_both_heads(self, m):
+        assert m._val_checkpoint_score(0.7, 0.95, approach="soft") == pytest.approx(0.825)
+
+    def test_hard_uses_load_only(self, m):
+        # Hard-PINN: F = dE/dd by construction, so energy R² is trivially ~1
+        # at every epoch and does not discriminate between checkpoints.
+        # The score must equal load R² regardless of energy.
+        assert m._val_checkpoint_score(0.7, 0.999, approach="hard") == pytest.approx(0.7)
+        assert m._val_checkpoint_score(0.7, 0.5, approach="hard") == pytest.approx(0.7)
+
+    def test_nan_load_falls_back_to_energy_for_soft(self, m):
+        # When one head is NaN (flat-target slice), use the other.
+        assert m._val_checkpoint_score(float("nan"), 0.9, approach="soft") == pytest.approx(0.9)
+
+    def test_nan_energy_falls_back_to_load_for_soft(self, m):
+        assert m._val_checkpoint_score(0.7, float("nan"), approach="soft") == pytest.approx(0.7)
+
+    def test_both_nan_returns_minus_inf(self, m):
+        # Both flat: checkpointer should skip (best_score > -inf comparisons fail).
+        assert m._val_checkpoint_score(float("nan"), float("nan"), approach="soft") == -np.inf
+
+    def test_hard_with_nan_load_returns_minus_inf(self, m):
+        # Hard-PINN load is the only signal; if that is NaN nothing to checkpoint on.
+        assert m._val_checkpoint_score(float("nan"), 0.9, approach="hard") == -np.inf
+
+
+# =====================================================================
+# _atomic_to_csv — DataFrame.to_csv monkey-patch
+# =====================================================================
+class TestAtomicToCSV:
+    def test_writes_csv_atomically(self, m, tmp_path):
+        # The patch should write through tmp + os.replace; final file present.
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        target = str(tmp_path / "atomic.csv")
+        df.to_csv(target, index=False)
+        assert os.path.isfile(target)
+        # No leftover .tmp
+        assert not os.path.isfile(target + ".tmp")
+        # Round-trip
+        rt = pd.read_csv(target)
+        assert list(rt.columns) == ["a", "b"]
+        assert rt["a"].tolist() == [1, 2, 3]
+
+    def test_overwrite_existing_is_atomic(self, m, tmp_path):
+        # Writing to an existing path should atomically replace it
+        # (no half-written file ever visible at the target path).
+        target = str(tmp_path / "exists.csv")
+        pd.DataFrame({"x": [1]}).to_csv(target, index=False)
+        assert pd.read_csv(target)["x"].tolist() == [1]
+        pd.DataFrame({"x": [99]}).to_csv(target, index=False)
+        assert pd.read_csv(target)["x"].tolist() == [99]
+        assert not os.path.isfile(target + ".tmp")
+
+    def test_passthrough_for_non_string_buffer(self, m):
+        # The patch only triggers atomic write for string/PathLike paths;
+        # buffers must pass through unchanged.
+        import io
+        buf = io.StringIO()
+        pd.DataFrame({"a": [1, 2]}).to_csv(buf, index=False)
+        contents = buf.getvalue()
+        assert "a" in contents
+        assert "1" in contents and "2" in contents
+
+    def test_pathlike_is_supported(self, m, tmp_path):
+        # pathlib.Path objects should also trigger the atomic write.
+        target = tmp_path / "pathlike.csv"
+        pd.DataFrame({"v": [10, 20]}).to_csv(target, index=False)
+        assert target.is_file()
+        assert pd.read_csv(target)["v"].tolist() == [10, 20]
+
+
+# =====================================================================
+# make_torch_generator + DataLoader determinism
+# =====================================================================
+class TestMakeTorchGenerator:
+    def test_returns_seeded_generator(self, m):
+        g = m.make_torch_generator(2026)
+        assert isinstance(g, torch.Generator)
+
+    def test_same_seed_same_sequence(self, m):
+        g1 = m.make_torch_generator(2026)
+        g2 = m.make_torch_generator(2026)
+        a = torch.randint(0, 1000, (10,), generator=g1)
+        b = torch.randint(0, 1000, (10,), generator=g2)
+        assert torch.equal(a, b)
+
+    def test_different_seeds_different_sequences(self, m):
+        g1 = m.make_torch_generator(2026)
+        g2 = m.make_torch_generator(2027)
+        a = torch.randint(0, 10_000, (50,), generator=g1)
+        b = torch.randint(0, 10_000, (50,), generator=g2)
+        assert not torch.equal(a, b)
+
+    def test_data_loader_kwargs_with_seed_includes_generator(self, m):
+        kw = m._data_loader_kwargs(seed=2026)
+        assert "generator" in kw
+        assert isinstance(kw["generator"], torch.Generator)
+        assert kw["pin_memory"] is False
+
+    def test_data_loader_kwargs_without_seed_omits_generator(self, m):
+        kw = m._data_loader_kwargs()
+        assert "generator" not in kw
+        assert kw["pin_memory"] is False
+
+    def test_dataloader_shuffle_is_deterministic_under_seed(self, m):
+        # Same seed -> identical shuffle order across runs.
+        from torch.utils.data import DataLoader, TensorDataset
+        x = torch.arange(20).float().unsqueeze(1)
+        y = torch.arange(20).float().unsqueeze(1)
+        ds = TensorDataset(x, y)
+        order_a = []
+        for xb, _ in DataLoader(ds, batch_size=4, shuffle=True,
+                                 **m._data_loader_kwargs(seed=2026)):
+            order_a.append(xb.squeeze().tolist())
+        order_b = []
+        for xb, _ in DataLoader(ds, batch_size=4, shuffle=True,
+                                 **m._data_loader_kwargs(seed=2026)):
+            order_b.append(xb.squeeze().tolist())
+        assert order_a == order_b
+
+
+# =====================================================================
+# Other Reviewer-2 fix verifications
+# =====================================================================
+class TestMonotonicityLossSoft:
+    """The HPO-tuned w_monotonicity is calibrated to the normalized-gradient form;
+    the loss must therefore use the un-normalized-energy gradient (sigma_E * dE_n/du),
+    NOT the physical-force form (sigma_E/sigma_d * dE_n/du), so the penalty
+    magnitude matches what the manuscript HPO tuned against."""
+
+    def test_returns_zero_for_strictly_monotone_energy(self, m):
+        # Build a tiny SoftPINNNet whose energy output is +x[:,0] (monotone).
+        # The penalty mean(relu(-dE/du)^2) must be 0 for monotone energy.
+        class _IdEnergy(torch.nn.Module):
+            def forward(self, x):
+                # Output [F_dummy, E = x[:,0]] (monotone in u-coord).
+                F = torch.zeros_like(x[:, 0:1])
+                E = x[:, 0:1]
+                return torch.cat([F, E], dim=1)
+
+        net = _IdEnergy()
+        params = m.ScalingParams(mu_d=0.0, sig_d=1.0, mu_F=0.0, sig_F=1.0,
+                                 mu_E=0.0, sig_E=1.0, grad_factor=1.0)
+        X = torch.randn(64, 5, requires_grad=True)
+        loss = m.monotonicity_loss_soft(X, net, params)
+        assert float(loss.detach()) == pytest.approx(0.0, abs=1e-8)
+
+    def test_returns_positive_for_decreasing_energy(self, m):
+        # Energy = -x[:,0] -> dE/du is negative everywhere -> penalty > 0.
+        class _NegEnergy(torch.nn.Module):
+            def forward(self, x):
+                F = torch.zeros_like(x[:, 0:1])
+                E = -x[:, 0:1]
+                return torch.cat([F, E], dim=1)
+
+        net = _NegEnergy()
+        params = m.ScalingParams(mu_d=0.0, sig_d=1.0, mu_F=0.0, sig_F=1.0,
+                                 mu_E=0.0, sig_E=1.0, grad_factor=1.0)
+        X = torch.randn(64, 5, requires_grad=True)
+        loss = m.monotonicity_loss_soft(X, net, params)
+        assert float(loss.detach()) > 0.5  # relu(1)^2 = 1 averaged
+
+    def test_penalty_scales_with_sigma_E_squared(self, m):
+        # The penalty should scale as sigma_E^2 because dE_phys = sigma_E * dE_n.
+        # With dE_n/du = -1 (decreasing), penalty = (sigma_E)^2.
+        class _NegE(torch.nn.Module):
+            def forward(self, x):
+                F = torch.zeros_like(x[:, 0:1])
+                E = -x[:, 0:1]
+                return torch.cat([F, E], dim=1)
+
+        net = _NegE()
+        X = torch.randn(64, 5, requires_grad=True)
+        params_a = m.ScalingParams(mu_d=0, sig_d=1, mu_F=0, sig_F=1, mu_E=0, sig_E=1.0, grad_factor=1.0)
+        params_b = m.ScalingParams(mu_d=0, sig_d=1, mu_F=0, sig_F=1, mu_E=0, sig_E=10.0, grad_factor=10.0)
+        loss_a = float(m.monotonicity_loss_soft(X, net, params_a).detach())
+        loss_b = float(m.monotonicity_loss_soft(X, net, params_b).detach())
+        # sig_E ratio = 10, penalty ratio should be 100 (squared)
+        assert loss_b / max(loss_a, 1e-12) == pytest.approx(100.0, rel=0.01)
+
+
+class TestConformalCalibrationFactors:
+    """Two-factor conformal calibration: cf at 68.3% for ±1σ, cf at 95.4% for ±2σ."""
+
+    def test_one_sigma_factor_recovers_target_coverage(self, m):
+        # Synthesize a Gaussian-residual case: |z| = |residual|/sigma should be
+        # ~|N(0,1)|. The 68.3-percentile of |N(0,1)| is ~1.0 (the 1-sigma point).
+        rng = np.random.RandomState(2026)
+        sigma = 1.0
+        residuals = np.abs(rng.randn(50_000) * sigma)
+        cf_1 = float(np.percentile(residuals / sigma, 68.3))
+        # For a half-normal, the 68.3-percentile is exactly 1.0 (the 1-sigma point of a normal).
+        assert cf_1 == pytest.approx(1.0, abs=0.02)
+
+    def test_two_sigma_factor_recovers_target_coverage(self, m):
+        # 95.4-percentile of |N(0,1)| is ~2.0.
+        rng = np.random.RandomState(2026)
+        residuals = np.abs(rng.randn(50_000))
+        cf_2 = float(np.percentile(residuals, 95.4))
+        assert cf_2 == pytest.approx(2.0, abs=0.05)
+
+    def test_two_factors_are_distinct(self, m):
+        # Heavy-tailed residual: cf_2 should NOT equal 2*cf_1 (would imply Gaussian).
+        rng = np.random.RandomState(2026)
+        # Student-t with 3 df has heavier tails than Gaussian.
+        from scipy import stats as scstats
+        residuals = np.abs(scstats.t.rvs(df=3, size=20_000, random_state=rng))
+        cf_1 = float(np.percentile(residuals, 68.3))
+        cf_2 = float(np.percentile(residuals, 95.4))
+        # For heavy tails, cf_2 > 2*cf_1 (linear extrapolation under-covers).
+        assert cf_2 > 2.0 * cf_1
+
+

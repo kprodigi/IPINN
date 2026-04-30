@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ipinn-crashworthiness"
-version = "0.19.0"
+version = "0.19.1"
 description = "Physics-informed neural networks for forward prediction and inverse design of composite ring structures under quasi-static crushing"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -40,10 +40,9 @@ dependencies = [
 
 [project.optional-dependencies]
 gpbo = ["scikit-optimize>=0.10.1"]
-mobo = ["gpytorch>=1.11", "botorch>=0.9.2"]
-all = ["scikit-optimize>=0.10.1", "gpytorch>=1.11", "botorch>=0.9.2"]
+all = ["scikit-optimize>=0.10.1"]
 test = ["pytest>=7.4"]
-dev = ["pytest>=7.4", "scikit-optimize>=0.10.1", "gpytorch>=1.11", "botorch>=0.9.2"]
+dev = ["pytest>=7.4", "scikit-optimize>=0.10.1"]
 
 [project.scripts]
 ipinn = "composite_design_v19:main"

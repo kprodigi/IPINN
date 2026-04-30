@@ -57,6 +57,33 @@ def _load(path: str) -> Any:
         return pickle.load(f)
 
 
+def _load_or_die(path: str, dep_stage: str, current_stage: str) -> Any:
+    """Load a staged pickle or fail loudly with a clear error.
+
+    On a SLURM cluster, ``--dependency=afterok:`` should prevent us from
+    reaching this code if the upstream stage never finished, but we still
+    guard against (a) manual stage invocation in the wrong order, (b)
+    output_dir typos, (c) cluster filesystem propagation lag, and (d) the
+    upstream stage exiting 0 without writing its expected output.
+    """
+    if not os.path.isfile(path):
+        msg = (
+            f"\n[stage={current_stage}] missing dependency: {path}\n"
+            f"  This file should have been produced by upstream stage "
+            f"'{dep_stage}'. Re-run that stage first, or check that the "
+            f"--output_dir argument matches the upstream run."
+        )
+        raise FileNotFoundError(msg)
+    try:
+        return _load(path)
+    except (pickle.UnpicklingError, EOFError) as ex:
+        raise RuntimeError(
+            f"\n[stage={current_stage}] corrupt staging pickle at {path}: {ex}\n"
+            f"  Likely a SIGTERM during the prior write of stage '{dep_stage}'. "
+            f"Re-run that stage."
+        ) from ex
+
+
 def _logger(output_dir: str, tag: str) -> logging.Logger:
     return cd.setup_logging(output_dir)
 
@@ -122,10 +149,6 @@ def _apply_cfg(args) -> None:
     cd.CFG.show_plots = False
     cd.CFG.run_reviewer_proof = True
     cd.CFG.run_ablation = True
-    cd.CFG.run_mobo_qnehvi = True
-    cd.CFG._skip_mobo = False
-    cd.CFG.run_loao_cv = True
-    cd.CFG.run_rar = True
     cd.refresh_device()
     cd.set_publication_style()
     if cd.CFG.dry_run:
@@ -137,6 +160,7 @@ def _apply_cfg(args) -> None:
 # ---------------------------------------------------------------------------
 
 def run_prep(args):
+    __cur_stage__ = "prep"
     out = args.output_dir
     stg = _staging(out)
     logger = _logger(out, "prep")
@@ -171,13 +195,13 @@ def run_prep(args):
     _save({
         "CFG": dataclasses.asdict(cd.CFG),
         "BO_CFG": dataclasses.asdict(cd.BO_CFG),
-        "MOBO_CFG": dataclasses.asdict(cd.MOBO_QNEHVI_CFG),
     }, os.path.join(stg, "cfg.pkl"))
 
     logger.info("PREP COMPLETE")
 
 
 def run_train_ensemble(args):
+    __cur_stage__ = "train_ensemble"
     """Generic training stage — parses protocol/approach from stage name."""
     stage = args.stage  # e.g. "train_random_ddns"
     parts = stage.replace("train_", "").split("_", 1)
@@ -187,7 +211,7 @@ def run_train_ensemble(args):
     logger = _logger(out, stage)
     logger.info(f"TRAINING: protocol={protocol}, approach={approach}")
 
-    split = _load(os.path.join(stg, f"{protocol}_split.pkl"))
+    split = _load_or_die(os.path.join(stg, f"{protocol}_split.pkl"), dep_stage="prep", current_stage=__cur_stage__)
     train_df = split["train_df"]
     val_df = split["val_df"]
     sd, so, enc, par = split["scaler_disp"], split["scaler_out"], split["enc"], split["params"]
@@ -199,11 +223,12 @@ def run_train_ensemble(args):
 
 
 def run_train_inverse(args):
+    __cur_stage__ = "train_inverse"
     out = args.output_dir
     stg = _staging(out)
     logger = _logger(out, "train_inverse")
 
-    df_all = _load(os.path.join(stg, "df_all.pkl"))
+    df_all = _load_or_die(os.path.join(stg, "df_all.pkl"), dep_stage="prep", current_stage=__cur_stage__)
     inv_models, inv_sd, inv_so, inv_enc, inv_par = cd.train_full_data_hard_pinn(df_all, logger)
 
     serialised_models = [_serialize_model(m, "hard", "unseen", inv_sd) for m in inv_models]
@@ -215,31 +240,17 @@ def run_train_inverse(args):
     logger.info("INVERSE TRAINING COMPLETE")
 
 
-def run_loao_cv(args):
-    out = args.output_dir
-    stg = _staging(out)
-    logger = _logger(out, "loao_cv")
-
-    df_all = _load(os.path.join(stg, "df_all.pkl"))
-    loao = cd.run_leave_one_angle_out_cv(df_all, logger)
-    _save(loao, os.path.join(stg, "loao_cv.pkl"))
-
-    import pandas as pd
-    cd.fig_loao_cv_results(loao, out, logger)
-    pd.DataFrame(loao["per_fold_r2"]).to_csv(os.path.join(out, "Table_loao_cv.csv"), index=False)
-    logger.info("LOAO-CV COMPLETE")
-
-
 def run_forward_analysis(args):
+    __cur_stage__ = "forward_analysis"
     import pandas as pd
     out = args.output_dir
     stg = _staging(out)
     logger = _logger(out, "forward_analysis")
 
-    df_all = _load(os.path.join(stg, "df_all.pkl"))
-    df_metrics = _load(os.path.join(stg, "df_metrics.pkl"))
-    r_split = _load(os.path.join(stg, "random_split.pkl"))
-    u_split = _load(os.path.join(stg, "unseen_split.pkl"))
+    df_all = _load_or_die(os.path.join(stg, "df_all.pkl"), dep_stage="prep", current_stage=__cur_stage__)
+    df_metrics = _load_or_die(os.path.join(stg, "df_metrics.pkl"), dep_stage="prep", current_stage=__cur_stage__)
+    r_split = _load_or_die(os.path.join(stg, "random_split.pkl"), dep_stage="prep", current_stage=__cur_stage__)
+    u_split = _load_or_die(os.path.join(stg, "unseen_split.pkl"), dep_stage="prep", current_stage=__cur_stage__)
     device = cd.DEVICE
 
     # Reassemble dual_results
@@ -299,11 +310,6 @@ def run_forward_analysis(args):
             s["enc"], s["params"], "unseen", logger)
         cd.fig_hyperparam_sensitivity(sens_df, out, logger, tag="unseen")
         cd.fig_reliability_diagram(calibration, out, logger)
-        try:
-            cal_vs_M = cd.compute_calibration_vs_M(dual_results, logger)
-            cd.fig_calibration_vs_M(cal_vs_M, out, logger)
-        except Exception as e:
-            logger.warning(f"Calibration vs M failed: {e}")
 
     # Save dual_results for downstream (serialise models)
     dr_ser = {}
@@ -319,18 +325,19 @@ def run_forward_analysis(args):
 
 
 def run_inverse_analysis(args):
+    __cur_stage__ = "inverse_analysis"
     import pandas as pd
     out = args.output_dir
     stg = _staging(out)
     logger = _logger(out, "inverse_analysis")
     device = cd.DEVICE
 
-    df_all = _load(os.path.join(stg, "df_all.pkl"))
-    df_metrics = _load(os.path.join(stg, "df_metrics.pkl"))
-    calibration = _load(os.path.join(stg, "calibration.pkl"))
+    df_all = _load_or_die(os.path.join(stg, "df_all.pkl"), dep_stage="prep", current_stage=__cur_stage__)
+    df_metrics = _load_or_die(os.path.join(stg, "df_metrics.pkl"), dep_stage="prep", current_stage=__cur_stage__)
+    calibration = _load_or_die(os.path.join(stg, "calibration.pkl"), dep_stage="forward_analysis", current_stage=__cur_stage__)
 
     # Load and deserialise dual_results (needed for publication artifacts)
-    dr_ser = _load(os.path.join(stg, "dual_results.pkl"))
+    dr_ser = _load_or_die(os.path.join(stg, "dual_results.pkl"), dep_stage="forward_analysis", current_stage=__cur_stage__)
     dual_results = {}
     for protocol in dr_ser:
         dual_results[protocol] = {}
@@ -341,7 +348,7 @@ def run_inverse_analysis(args):
                 dual_results[protocol][k] = v
 
     # Load inverse models
-    inv_data = _load(os.path.join(stg, "train_inverse.pkl"))
+    inv_data = _load_or_die(os.path.join(stg, "train_inverse.pkl"), dep_stage="train_inverse", current_stage=__cur_stage__)
     inv_models = [_deserialize_model(m, device) for m in inv_data["models"]]
     inv_sd = inv_data["scaler_disp"]
     inv_so = inv_data["scaler_out"]
@@ -359,8 +366,6 @@ def run_inverse_analysis(args):
 
     lambda_opt, _ = cd.auto_tune_lambda(cal_ens, clf_fs, df_metrics, logger)
     cd.BO_CFG.prob_weight = lambda_opt
-    beta_robust = cd.auto_tune_beta(inv_models, "hard", df_metrics, inv_sd, inv_enc, inv_par, logger)
-    cd.BO_CFG.beta_robust = beta_robust
 
     # Inverse design loop
     all_inverse_results = []
@@ -444,46 +449,35 @@ def run_inverse_analysis(args):
     cd.fig_pareto_tradeoff(pareto_df, out, logger)
     cd.fig_multiobjective_heatmaps(pareto_df, landscape_df, out, logger, calibration=calibration)
 
-    # MOBO
-    mobo_result = None
-    if cd.HAS_BOTORCH and not getattr(cd.CFG, '_skip_mobo', False):
-        mobo_result = cd.run_multiobjective_mobo_qnehvi(
-            inv_models, "hard", inv_sd, inv_enc, inv_par,
-            landscape_df, logger, output_dir=out, cfg=cd.MOBO_QNEHVI_CFG)
-    cd.fig_moo_objective_space_validation(
-        pareto_df, landscape_df, out, logger, mobo_result=mobo_result, df_metrics=df_metrics)
-    cd.fig_mobo_qnehvi_diagnostics(mobo_result, out, logger)
-
     # Publication artifacts
     cd.generate_inverse_publication_artifacts(
         out, logger, all_inverse_results,
         calibration=calibration, jacobian_results=jacobian_results,
         inv_models=inv_models, inv_scaler_disp=inv_sd, inv_enc=inv_enc,
         inv_params=inv_par, dual_results=dual_results, df_metrics=df_metrics,
-        df_all=df_all, bo_cfg=cd.BO_CFG, cal_ens=cal_ens, clf_feat_scaler=clf_fs,
-        mobo_result=mobo_result, landscape_df=landscape_df)
+        df_all=df_all, bo_cfg=cd.BO_CFG, cal_ens=cal_ens, clf_feat_scaler=clf_fs)
 
     # Save for aggregation
     _save(all_inverse_results, os.path.join(stg, "all_inverse_results.pkl"))
     _save({"pareto_df": pareto_df, "landscape_df": landscape_df}, os.path.join(stg, "landscape.pkl"))
-    _save(mobo_result, os.path.join(stg, "mobo_result.pkl"))
     _save(jacobian_results, os.path.join(stg, "jacobian_results.pkl"))
     logger.info("INVERSE ANALYSIS COMPLETE")
 
 
 def run_aggregate(args):
+    __cur_stage__ = "aggregate"
     out = args.output_dir
     stg = _staging(out)
     logger = _logger(out, "aggregate")
     device = cd.DEVICE
 
-    df_metrics = _load(os.path.join(stg, "df_metrics.pkl"))
-    stat_tests = _load(os.path.join(stg, "stat_tests.pkl"))
-    calibration = _load(os.path.join(stg, "calibration.pkl"))
-    all_inverse = _load(os.path.join(stg, "all_inverse_results.pkl"))
+    df_metrics = _load_or_die(os.path.join(stg, "df_metrics.pkl"), dep_stage="prep", current_stage=__cur_stage__)
+    stat_tests = _load_or_die(os.path.join(stg, "stat_tests.pkl"), dep_stage="forward_analysis", current_stage=__cur_stage__)
+    calibration = _load_or_die(os.path.join(stg, "calibration.pkl"), dep_stage="forward_analysis", current_stage=__cur_stage__)
+    all_inverse = _load_or_die(os.path.join(stg, "all_inverse_results.pkl"), dep_stage="inverse_analysis", current_stage=__cur_stage__)
 
     # Reconstruct dual_results
-    dr_ser = _load(os.path.join(stg, "dual_results.pkl"))
+    dr_ser = _load_or_die(os.path.join(stg, "dual_results.pkl"), dep_stage="forward_analysis", current_stage=__cur_stage__)
     dual_results = {}
     for protocol in dr_ser:
         dual_results[protocol] = {}
@@ -513,7 +507,6 @@ STAGES = {
     "train_unseen_soft":   run_train_ensemble,
     "train_unseen_hard":   run_train_ensemble,
     "train_inverse":       run_train_inverse,
-    "loao_cv":             run_loao_cv,
     "forward_analysis":    run_forward_analysis,
     "inverse_analysis":    run_inverse_analysis,
     "aggregate":           run_aggregate,
