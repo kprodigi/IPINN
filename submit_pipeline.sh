@@ -92,7 +92,11 @@ export MKL_NUM_THREADS=4
 module purge
 module load ${CUDA_MODULE}
 module load ${CUDNN_MODULE}
-source activate ${CONDA_ENV}
+# Source conda's shell hook so 'conda activate' works in a non-interactive
+# SBATCH/SRUN context (the bare 'source activate' form fails because
+# /usr/bin/bash has no 'activate' on PATH).  HOME-relative path is portable.
+source \$HOME/miniconda3/etc/profile.d/conda.sh
+conda activate ${CONDA_ENV}
 
 echo "=== Stage: ${STAGE}  Node: \$(hostname)  GPU: \${CUDA_VISIBLE_DEVICES:-none} ==="
 echo "=== Start: \$(date)   PYTHONHASHSEED=${SEED}   CUDA: \$(nvcc --version 2>/dev/null | tail -1) ==="
