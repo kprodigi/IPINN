@@ -598,7 +598,7 @@ class Config:
     unseen_fixed_epochs: int = 300
     run_gpbo: bool = True
     run_ablation: bool = True
-    run_reviewer_proof: bool = True  # V5: Reviewer-proof analyses
+    run_robustness_analyses: bool = True  # extended robustness analyses
     # When True, missing optional deps (skopt for GP-BO) abort at startup.
     strict_paper_deps: bool = False
     # Expensive inverse ablations (extra GP-BO runs per target); enable with --inverse_ablation.
@@ -4552,7 +4552,7 @@ def generate_inverse_publication_artifacts(
                 inv_models, "hard", all_inverse, inv_scaler_disp, inv_enc, inv_params, output_dir, logger,
             )
     if (
-        getattr(CFG, "run_reviewer_proof", True)
+        getattr(CFG, "run_robustness_analyses", True)
         and getattr(CFG, "run_inverse_stress_validation", True)
         and dual_results is not None
         and df_metrics is not None
@@ -4918,7 +4918,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
     # legacy ``conformal_factor`` (68.3-percentile, 1σ) was previously
     # multiplied by 2 — that linear extrapolation under-covers under heavy
     # tails. Using cf_2sigma directly matches the rescaled-band convention
-    # introduced for the calibration audit.
+    # introduced when reconciling 1-sigma vs 2-sigma scaling.
     cf_ea = 1.0
     cf_ipf = 1.0
     if calibration is not None:
@@ -7882,7 +7882,7 @@ def apply_dry_run_settings(logger: logging.Logger) -> None:
     if not getattr(CFG, "dry_run", False):
         return
     CFG.n_ensemble = min(int(CFG.n_ensemble), 2)
-    CFG.run_reviewer_proof = False
+    CFG.run_robustness_analyses = False
     CFG.run_ablation = False
     CFG.run_gpbo = False
     BO_CFG.lambda_sweep = False
@@ -7891,7 +7891,7 @@ def apply_dry_run_settings(logger: logging.Logger) -> None:
     CFG.run_inverse_stress_validation = False
     logger.info(
         "DRY RUN MODE: M<=2, short epochs, coarser MO landscape, "
-        "no reviewer-proof / ablation / GP-BO; inverse uses coarse angle grid."
+        "no robustness / ablation / GP-BO; inverse uses coarse angle grid."
     )
 
 
@@ -8499,7 +8499,7 @@ def run_pipeline(data_dir: str, output_dir: str):
     check_publication_dependencies(logger)
     
     logger.info("=" * 80)
-    logger.info("PINN CRASHWORTHINESS FRAMEWORK - VERSION 5 (Reviewer-Proof Edition)")
+    logger.info("PINN CRASHWORTHINESS FRAMEWORK - VERSION 5 (Extended Analyses Edition)")
     logger.info("=" * 80)
     logger.info(f"Data directory: {data_dir}")
     logger.info(f"Output directory: {output_dir}")
@@ -8553,11 +8553,11 @@ def run_pipeline(data_dir: str, output_dir: str):
     logger.info("  [AK] Table3_inverse_illposedness, Table_inverse_local_minima, Table_inverse_topk_basins")
     logger.info("  [AL] Table_forward_jacobian_summary, Table_inverse_vs_calibration")
     logger.info("  [AM] Likelihood posterior: Fig_inverse_posterior_likelihood, Table_inverse_posterior_likelihood")
-    logger.info("  [AN] Table_inverse_stress_protocol (reviewer_proof), Table_inverse_theta_member_spread")
+    logger.info("  [AN] Table_inverse_stress_protocol (robustness), Table_inverse_theta_member_spread")
     logger.info("  [AO] Table_inverse_ablation (--inverse_ablation)")
     logger.info("  [AP] Multi-seed BO uses full BOConfig (dataclasses.replace)")
     logger.info("")
-    logger.info("VERSION 5 REVIEWER-PROOF ADDITIONS:")
+    logger.info("VERSION 5 EXTENDED ANALYSES:")
     logger.info("  [H] Physics verification figure: dE/dd = F proof")
     logger.info("  [I] Baseline comparison: Linear, RF, XGBoost, GP")
     logger.info("  [K] Hyperparameter sensitivity: w_phys × lr heatmap")
@@ -8669,37 +8669,37 @@ def run_pipeline(data_dir: str, output_dir: str):
     #     fig_ablation_study(df_ablation, output_dir, logger)
     
     # =========================================================================
-    # REVIEWER-PROOF ADDITIONS (V5)
+    # EXTENDED ANALYSES (V5)
     # =========================================================================
-    if CFG.run_reviewer_proof:
+    if CFG.run_robustness_analyses:
         logger.info("\n" + "=" * 70)
-        logger.info("REVIEWER-PROOF ANALYSIS: PHYSICS VERIFICATION")
+        logger.info("ROBUSTNESS ANALYSIS: PHYSICS VERIFICATION")
         logger.info("=" * 70)
         physics_residuals = fig_physics_verification(dual_results, val_df_u, scaler_disp_u, 
                                                        enc_u, params_u, output_dir, logger)
         
         # --- BASELINE COMPARISON: UNSEEN PROTOCOL ONLY ---
         logger.info("\n" + "=" * 70)
-        logger.info("REVIEWER-PROOF ANALYSIS: BASELINE MODEL COMPARISON (UNSEEN θ=60°)")
+        logger.info("ROBUSTNESS ANALYSIS: BASELINE MODEL COMPARISON (UNSEEN θ=60°)")
         logger.info("=" * 70)
         baseline_results_u = train_baseline_models(train_df_u, val_df_u, scaler_disp_u, enc_u, params_u, logger)
         fig_baseline_comparison(baseline_results_u, dual_results, output_dir, logger, protocol="unseen")
         
         # --- HYPERPARAMETER SENSITIVITY: UNSEEN PROTOCOL ---
         logger.info("\n" + "=" * 70)
-        logger.info("REVIEWER-PROOF ANALYSIS: HYPERPARAMETER SENSITIVITY (UNSEEN θ=60°)")
+        logger.info("ROBUSTNESS ANALYSIS: HYPERPARAMETER SENSITIVITY (UNSEEN θ=60°)")
         logger.info("=" * 70)
         sensitivity_df_u = run_hyperparam_sensitivity(train_df_u, val_df_u, scaler_disp_u, scaler_out_u, enc_u, params_u, "unseen", logger)
         fig_hyperparam_sensitivity(sensitivity_df_u, output_dir, logger, tag="unseen")
         
         logger.info("\n" + "=" * 70)
-        logger.info("REVIEWER-PROOF ANALYSIS: UNCERTAINTY CALIBRATION")
+        logger.info("ROBUSTNESS ANALYSIS: UNCERTAINTY CALIBRATION")
         logger.info("=" * 70)
         # calibration already computed before figure generation; reuse it
         fig_reliability_diagram(calibration, output_dir, logger)
 
     else:
-        logger.info("\n  Skipping reviewer-proof analyses (--no_reviewer_proof flag set)")
+        logger.info("\n  Skipping robustness analyses (--no_robustness flag set)")
 
     # [CHANGE E] Generate feasible inverse design targets
     logger.info("\n" + "=" * 70)
@@ -8918,11 +8918,11 @@ def run_pipeline(data_dir: str, output_dir: str):
             logger.info(f"  Mean p_LC WITHOUT penalty: {np.mean(without_plc):.4f} (±{np.std(without_plc):.4f})")
     
     # =========================================================================
-    # REVIEWER-PROOF: MULTI-SEED INVERSE DESIGN ROBUSTNESS
+    # ROBUSTNESS: MULTI-SEED INVERSE DESIGN
     # =========================================================================
-    if CFG.run_reviewer_proof:
+    if CFG.run_robustness_analyses:
         logger.info("\n" + "=" * 70)
-        logger.info("REVIEWER-PROOF: INVERSE DESIGN ROBUSTNESS (MULTI-SEED)")
+        logger.info("ROBUSTNESS: INVERSE DESIGN MULTI-SEED (MULTI-SEED)")
         logger.info("=" * 70)
         robust_inverse_results = []
         for target in inverse_targets[:3]:  # First 3 targets for robustness analysis
@@ -8977,7 +8977,7 @@ def run_pipeline(data_dir: str, output_dir: str):
     # =========================================================================
     # Run inverse design on targets drawn from the actual Pareto front to
     # verify that GP-BO can recover known-feasible designs.
-    if CFG.run_reviewer_proof:
+    if CFG.run_robustness_analyses:
         pareto_dominance_df = pareto_df.attrs.get("pareto_dominance", pd.DataFrame())
         if not pareto_dominance_df.empty and len(pareto_dominance_df) >= 5:
             logger.info("\n" + "=" * 70)
@@ -9070,7 +9070,7 @@ def run_pipeline(data_dir: str, output_dir: str):
 # CLI ENTRY POINT
 # =============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="PINN Crashworthiness Framework - Version 5 (Reviewer-Proof Edition)")
+    parser = argparse.ArgumentParser(description="PINN Crashworthiness Framework - Version 5 (Extended Analyses Edition)")
     parser.add_argument("--data_dir", type=str, default=".", help="Directory containing data files")
     parser.add_argument("--output_dir", type=str, default="./results", help="Output directory")
     parser.add_argument("--n_ensemble", type=int, default=20, help="Ensemble size (default: 20)")
@@ -9078,7 +9078,7 @@ def main():
     parser.add_argument("--seed", type=int, default=2026, help="Random seed base")
     parser.add_argument("--no_ablation", action="store_true", help="Skip ablation study")
 
-    parser.add_argument("--no_reviewer_proof", action="store_true", help="Skip reviewer-proof analyses (baselines, sensitivity, robustness)")
+    parser.add_argument("--no_robustness", action="store_true", help="Skip robustness analyses (baselines, sensitivity, robustness)")
     parser.add_argument("--force_cpu", action="store_true", help="Use CPU even if CUDA is available")
     parser.add_argument(
         "--strict_paper",
@@ -9115,7 +9115,7 @@ def main():
     BO_CFG.seed = args.seed
     CFG.show_plots = args.show_plots
     CFG.run_ablation = not args.no_ablation
-    CFG.run_reviewer_proof = not args.no_reviewer_proof
+    CFG.run_robustness_analyses = not args.no_robustness
     CFG.strict_paper_deps = bool(args.strict_paper)
     CFG.force_cpu = args.force_cpu
     CFG.run_inverse_ablation = bool(args.inverse_ablation)

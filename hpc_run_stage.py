@@ -147,7 +147,7 @@ def _apply_cfg(args) -> None:
     cd.CFG.force_cpu = bool(getattr(args, "force_cpu", False))
     cd.CFG.strict_paper_deps = bool(getattr(args, "strict_paper", False))
     cd.CFG.show_plots = False
-    cd.CFG.run_reviewer_proof = True
+    cd.CFG.run_robustness_analyses = True
     cd.CFG.run_ablation = True
     cd.refresh_device()
     cd.set_publication_style()
@@ -297,8 +297,8 @@ def run_forward_analysis(args):
     cd.table_validation_errors_by_angle_bin(dual_results, out, logger)
     cd.fig_qq_load_residuals(dual_results, out, logger)
 
-    # Reviewer-proof
-    if cd.CFG.run_reviewer_proof:
+    # Robustness
+    if cd.CFG.run_robustness_analyses:
         s = u_split
         cd.fig_physics_verification(
             dual_results, s["val_df"], s["scaler_disp"], s["enc"], s["params"], out, logger)
@@ -432,7 +432,7 @@ def run_inverse_analysis(args):
         pd.DataFrame(rows).to_csv(os.path.join(out, "Table_classifier_ablation.csv"), index=False)
 
     # Multi-seed robustness
-    if cd.CFG.run_reviewer_proof:
+    if cd.CFG.run_robustness_analyses:
         robust_results = []
         for target in inverse_targets[:3]:
             rr = cd.run_inverse_design_robust(

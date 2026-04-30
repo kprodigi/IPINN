@@ -806,7 +806,7 @@ class TestMakeTorchGenerator:
 
 
 # =====================================================================
-# Other Reviewer-2 fix verifications
+# Additional regression-prevention tests
 # =====================================================================
 class TestMonotonicityLossSoft:
     """The HPO-tuned w_monotonicity is calibrated to the normalized-gradient form;

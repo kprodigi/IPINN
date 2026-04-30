@@ -68,7 +68,7 @@ See the [dependency graph](#hpc-parallel-pipeline) below.
 | `--strict_paper` | Require skopt; abort if missing |
 | `--force_cpu` | CPU even if CUDA is available |
 | `--show_plots` | Display plots on screen |
-| `--no_reviewer_proof` | Skip baselines, sensitivity, calibration |
+| `--no_robustness` | Skip baselines, sensitivity, calibration |
 | `--no_ablation` | Skip physics-weight ablation study |
 | `--inverse_ablation` | Run inverse ablation (no classifier penalty) on first targets |
 | `--no_inverse_stress` | Skip validation-row inverse stress targets |
