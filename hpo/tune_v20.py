@@ -91,6 +91,26 @@ import composite_design_v20 as cd  # noqa: E402
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 warnings.filterwarnings("ignore", category=UserWarning, module=r"matplotlib")
 
+# Optuna 4.x emits two classes of cosmetic warnings during HPO:
+#   1. ExperimentalWarning for the TPESampler's ``multivariate=True`` and
+#      ``group=True`` arguments — both widely used and stable; the warning
+#      fires once at study creation.
+#   2. UserWarning per-trial about categorical choices being a tuple or
+#      list of ints (rather than primitive types).  Affects display in
+#      Optuna's web UI only; the SQLite study DB persistence and
+#      resume-after-preemption are unaffected.
+# Both are noise in the SLURM run log; silence them narrowly so genuine
+# warnings (training divergence, NaN losses, etc.) still surface.
+warnings.filterwarnings(
+    "ignore",
+    category=optuna.exceptions.ExperimentalWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    message=r"Choices for a categorical distribution should be a tuple.*",
+)
+
 
 # =============================================================================
 # SEARCH SPACES — per approach, ranges set 1–2 orders of magnitude around the
