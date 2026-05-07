@@ -66,8 +66,9 @@ N_TRIALS=200 bash slurm/submit_hpo_hard.sh
 ```
 
 To resume after preemption simply rerun the same command — Optuna sees the
-already-completed trials in `${OUTPUT_DIR}/tune_v20_study.db` and only
-schedules the remainder up to `N_TRIALS`.
+already-completed trials in `${OUTPUT_DIR}/tune_v20_study_<approach>.db`
+and only schedules the remainder up to `N_TRIALS`.  Each approach owns
+its own SQLite file so concurrent SLURM jobs don't race on schema init.
 
 ## Outputs
 
@@ -75,7 +76,7 @@ Each approach writes the following to `--output_dir` (default `./hpo_v20`):
 
 ```
 <output_dir>/
-  tune_v20_study.db                # SQLite study (resumable, multi-worker safe)
+  tune_v20_study_<approach>.db     # per-approach SQLite study (resumable)
   best_params_<approach>.json      # copy-pasteable into composite_design_v20
   trial_history_<approach>.csv     # every trial's params + R² + duration
   hpo_log_<approach>.txt           # full Optuna log (per-trial reports)

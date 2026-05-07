@@ -111,9 +111,10 @@ enables deterministic cuBLAS algorithms.
   Resubmit failed jobs only — completed stages will be skipped because
   their downstream consumers find the cached pickles.
 - **HPO:** Optuna's SQLite study DB
-  (`<output_dir>/tune_v20_study.db`) survives any preemption.  Just rerun
-  the same `bash slurm/submit_hpo_*.sh` command — Optuna picks up where it
-  left off and only schedules the remainder up to `N_TRIALS`.
+  (`<output_dir>/tune_v20_study_<approach>.db` — one per approach to
+  avoid concurrent schema-init races) survives any preemption.  Just
+  rerun the same `bash slurm/submit_hpo_*.sh` command — Optuna picks up
+  where it left off and only schedules the remainder up to `N_TRIALS`.
 
 ## Logs
 

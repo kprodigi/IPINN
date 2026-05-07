@@ -17,7 +17,7 @@
 #   DATA_DIR=/path OUTPUT_DIR=/scratch/hpo bash slurm/submit_hpo_ddns.sh
 #
 # Resume after preemption: just rerun the same command — Optuna sees the
-# already-completed trials in $OUTPUT_DIR/tune_v20_study.db and only
+# already-completed trials in $OUTPUT_DIR/tune_v20_study_ddns.db and only
 # schedules the remainder up to N_TRIALS.
 # ==========================================================================
 

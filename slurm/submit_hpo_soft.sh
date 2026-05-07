@@ -14,7 +14,7 @@
 #   DATA_DIR=/path OUTPUT_DIR=/scratch/hpo bash slurm/submit_hpo_soft.sh
 #
 # Resume after preemption: just rerun the same command — Optuna sees the
-# already-completed trials in $OUTPUT_DIR/tune_v20_study.db and only
+# already-completed trials in $OUTPUT_DIR/tune_v20_study_soft.db and only
 # schedules the remainder up to N_TRIALS.
 # ==========================================================================
 
@@ -64,7 +64,7 @@ export PYTHONHASHSEED=${SEED}
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
-# Optuna stores the study DB at ${OUTPUT_DIR}/tune_v20_study.db; if your
+# Optuna stores the study DB at ${OUTPUT_DIR}/tune_v20_study_<approach>.db; if your
 # scratch is NFS, set OPTUNA_STORAGE_FILE_LOCK=true to avoid lock issues.
 export OPTUNA_STORAGE_FILE_LOCK="${OPTUNA_STORAGE_FILE_LOCK:-false}"
 

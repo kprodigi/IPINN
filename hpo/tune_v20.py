@@ -46,7 +46,7 @@ Usage
 Outputs
 -------
     <output_dir>/
-        ├── tune_v20_study.db                     ← SQLite study (resumable)
+        ├── tune_v20_study_<approach>.db          ← SQLite study (resumable, per-approach)
         ├── best_params_<approach>.json           ← copy-pasteable into v_20
         ├── trial_history_<approach>.csv          ← every trial's params + R²
         └── hpo_log_<approach>.txt                ← full Optuna log
@@ -333,7 +333,10 @@ def run_hpo(approach: str, output_dir: str, *,
 
     if study_name is None:
         study_name = f"v20_{approach}_unseen"
-    storage_path = os.path.join(output_dir, "tune_v20_study.db")
+    # Per-approach DB file so concurrent SLURM jobs don't race on
+    # alembic schema init in a single shared SQLite file.  Each approach
+    # owns its own DB; resume-after-preemption is unchanged.
+    storage_path = os.path.join(output_dir, f"tune_v20_study_{approach}.db")
     storage = f"sqlite:///{storage_path}"
 
     # TPE configuration tuned for our 10–17 dim mixed search:
