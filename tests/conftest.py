@@ -10,13 +10,18 @@ import pandas as pd
 import pytest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_MOD_NAME = "composite_design_v19_test"
+_MOD_NAME = "composite_design_v20_test"
 
 
 @pytest.fixture(scope="session")
 def m():
-    """Load the main module once per test session."""
-    path = os.path.join(ROOT, "composite_design_v19.py")
+    """Load the main module once per test session.
+
+    v_20 supersedes v_19 — every v_19 helper, training function, and physics
+    loss is carried forward verbatim, so tests written against v_19 internals
+    still pass when run against v_20's namespace.
+    """
+    path = os.path.join(ROOT, "composite_design_v20.py")
     spec = importlib.util.spec_from_file_location(_MOD_NAME, path)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)

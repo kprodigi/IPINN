@@ -4,14 +4,14 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Forward prediction and inverse design of hexagonal composite ring structures under quasi-static crushing using three PINN architectures (DDNS, Soft-PINN, Hard-PINN), dual validation protocols, multi-start GP-BO inverse design with ill-posedness characterisation, and weighted-sum multi-objective optimisation.
+Forward prediction and inverse design of hexagonal composite ring structures under quasi-static crushing using three PINN architectures (DDNS, Soft-PINN, Hard-PINN), dual validation protocols, multi-start GP-BO inverse design with ill-posedness characterization, and weighted-sum multi-objective optimization.
 
 ## Key Features
 
 - **Three-tier PINN hierarchy**: Data-driven (DDNS), soft physics constraint (Soft-PINN), and structurally enforced physics (Hard-PINN with F = dE/dd by construction)
 - **Inverse design**: multi-start GP-BO with LC plausibility classifier penalty
 - **Ill-posedness analysis**: Solution landscape mapping, multiplicity index, forward-map Jacobian with bifurcation detection, approximate inverse posterior with credible intervals
-- **Multi-objective optimisation**: Dense Pareto sweep with weighted-sum and Chebyshev scalarizations + dominance filtering
+- **Multi-objective optimization**: Dense Pareto sweep with weighted-sum and Chebyshev scalarizations + dominance filtering
 - **Dual validation**: Random 80/20 split + unseen-angle holdout
 - **HPC parallel pipeline**: SLURM workflow with parallel GPU training stages
 
@@ -42,20 +42,36 @@ pytest
 
 ```bash
 # Full paper run (requires skopt):
-python composite_design_v19.py --data_dir . --output_dir ./results_paper --strict_paper
+python composite_design_v20.py --data_dir ./data --output_dir ./results_paper --strict_paper
 
 # Quick smoke test:
-python composite_design_v19.py --dry_run --data_dir tests/fixtures --output_dir ./results_test --force_cpu
+python composite_design_v20.py --dry_run --data_dir tests/fixtures --output_dir ./results_test --force_cpu
 ```
 
 ### HPC Parallel Run (SLURM)
 
 ```bash
-# Submits parallel SLURM jobs: prep -> training stages -> analysis -> aggregate
-DATA_DIR=. OUTPUT_DIR=./results_paper CONDA_ENV=ipinn bash submit_pipeline.sh
+# Run from the repo root.  Submits parallel SLURM jobs:
+#   prep -> training stages -> analysis -> aggregate
+CONDA_ENV=ipinn bash slurm/submit_pipeline.sh
 ```
 
 See the [dependency graph](#hpc-parallel-pipeline) below.
+
+### Hyperparameter Optimization (Optuna TPE)
+
+Before running the full pipeline, retune the forward training hyperparameters
+on your hardware.  Three independent Optuna studies (one per approach) each
+write a SQLite study DB that survives SLURM preemption:
+
+```bash
+# From the repo root, on an HPC cluster with SLURM:
+bash slurm/submit_hpo_ddns.sh        # ~80 trials,  48h wall
+bash slurm/submit_hpo_soft.sh        # ~120 trials, 72h wall
+bash slurm/submit_hpo_hard.sh        # ~150 trials, 96h wall
+```
+
+See [`hpo/README.md`](hpo/README.md) for the full HPO workflow.
 
 ## CLI Options
 
@@ -154,20 +170,41 @@ The `submit_pipeline.sh` script splits the monolithic pipeline into SLURM jobs:
 
 ```
 IPINN/
-  composite_design_v19.py   # Main pipeline (~9500 lines)
-  hpc_run_stage.py          # HPC stage dispatcher for SLURM
-  submit_pipeline.sh        # SLURM job submission script
-  requirements.txt          # Pip dependencies
-  environment.yml           # Conda environment
-  pyproject.toml            # Package metadata
-  LC1.xlsx, LC2.xlsx        # Experimental data
+  composite_design_v20.py     # Main pipeline (single module — forward + inverse + analysis)
+  pyproject.toml              # Package metadata
+  environment.yml             # Conda environment
+  requirements.txt            # Pip dependencies
+  README.md
+  CONTRIBUTING.md
+  CITATION.cff
+  LICENSE
+
+  data/                       # Experimental dataset
+    LC1.xlsx, LC2.xlsx
+    README.md                 # dataset description and column schema
+
+  hpo/                        # Hyperparameter optimization (Optuna TPE)
+    tune_v20.py               # entry point: --approach {ddns,soft,hard}
+    README.md                 # HPO workflow and 4-stage pipeline
+
+  slurm/                      # HPC submission scripts (SDSU/SDSMT cluster)
+    submit_pipeline.sh        # full pipeline: 11-job dependency chain
+    submit_hpo_ddns.sh        # Optuna HPO: DDNS
+    submit_hpo_soft.sh        # Optuna HPO: Soft-PINN
+    submit_hpo_hard.sh        # Optuna HPO: Hard-PINN
+    hpc_run_stage.py          # per-stage CLI used by submit_pipeline.sh
+    README.md                 # HPC submission guide
+
+  docs/
+    ARCHITECTURE.md           # file/line map: paper sections → code
+
   tests/
-    conftest.py             # Shared test fixtures
-    test_core.py            # 80+ unit tests
-    test_smoke.py           # Smoke tests
-    test_helpers_manifest.py # Manifest and figure tests
+    conftest.py               # shared test fixtures
+    test_core.py              # unit tests (training, losses, classifier, GP-BO)
+    test_smoke.py             # CLI smoke tests
+    test_helpers_manifest.py  # manifest and figure tests
     fixtures/
-      tiny_crush.csv        # Minimal dataset for CI
+      tiny_crush.csv          # minimal dataset for CI dry runs
 ```
 
 ## Citation

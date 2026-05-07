@@ -481,8 +481,10 @@ class TestLCHelpers:
         assert m._lc_label_to_binary("lc2") == 1
 
     def test_val_checkpoint_score(self, m):
+        # v_20 reverted to v_17 semantics: load R² only for all approaches.
+        # Energy R² is ignored.
         score = m._val_checkpoint_score(0.8, 0.9)
-        assert score == pytest.approx(0.85)
+        assert score == pytest.approx(0.8)
 
 
 # =====================================================================
@@ -674,40 +676,46 @@ class TestR2Safe:
 
 
 # =====================================================================
-# _val_checkpoint_score(approach=...) — Hard-PINN checkpoints on load only
+# _val_checkpoint_score — load R² only for all approaches (v_17 semantics)
 # =====================================================================
+# v_20 reverted v_19's "0.5*(load+energy) for DDNS/Soft, load only for Hard"
+# back to v_17's uniform "load R² only" rule.  ``r2_energy`` and ``approach``
+# are kept in the signature for call-site compatibility but are unused.
+# These tests pin the new behaviour.
 class TestValCheckpointScore:
-    def test_default_is_soft_mean(self, m):
-        # Backward-compatible default: approach="soft" (= mean of two heads).
-        assert m._val_checkpoint_score(0.8, 0.9) == pytest.approx(0.85)
+    def test_default_returns_load_only(self, m):
+        # No-approach default still returns load R² only; energy is ignored.
+        assert m._val_checkpoint_score(0.8, 0.9) == pytest.approx(0.8)
 
-    def test_ddns_returns_mean_of_both_heads(self, m):
-        assert m._val_checkpoint_score(0.7, 0.95, approach="ddns") == pytest.approx(0.825)
+    def test_ddns_returns_load_only(self, m):
+        assert m._val_checkpoint_score(0.7, 0.95, approach="ddns") == pytest.approx(0.7)
 
-    def test_soft_returns_mean_of_both_heads(self, m):
-        assert m._val_checkpoint_score(0.7, 0.95, approach="soft") == pytest.approx(0.825)
+    def test_soft_returns_load_only(self, m):
+        assert m._val_checkpoint_score(0.7, 0.95, approach="soft") == pytest.approx(0.7)
 
-    def test_hard_uses_load_only(self, m):
+    def test_hard_returns_load_only(self, m):
         # Hard-PINN: F = dE/dd by construction, so energy R² is trivially ~1
-        # at every epoch and does not discriminate between checkpoints.
-        # The score must equal load R² regardless of energy.
+        # at every epoch and never discriminated between checkpoints.  Score
+        # is load R² regardless of energy — same rule as DDNS / Soft.
         assert m._val_checkpoint_score(0.7, 0.999, approach="hard") == pytest.approx(0.7)
-        assert m._val_checkpoint_score(0.7, 0.5, approach="hard") == pytest.approx(0.7)
+        assert m._val_checkpoint_score(0.7, 0.5,   approach="hard") == pytest.approx(0.7)
 
-    def test_nan_load_falls_back_to_energy_for_soft(self, m):
-        # When one head is NaN (flat-target slice), use the other.
-        assert m._val_checkpoint_score(float("nan"), 0.9, approach="soft") == pytest.approx(0.9)
-
-    def test_nan_energy_falls_back_to_load_for_soft(self, m):
+    def test_nan_energy_is_ignored(self, m):
+        # ``r2_energy`` is unused; a NaN there has no effect on the score.
         assert m._val_checkpoint_score(0.7, float("nan"), approach="soft") == pytest.approx(0.7)
+        assert m._val_checkpoint_score(0.7, float("nan"), approach="ddns") == pytest.approx(0.7)
+        assert m._val_checkpoint_score(0.7, float("nan"), approach="hard") == pytest.approx(0.7)
+
+    def test_nan_load_returns_minus_inf(self, m):
+        # NaN-safe: if load R² is NaN (flat-target slice) the checkpointer
+        # must skip — score is -inf so any ``best_score > -inf`` check fails.
+        assert m._val_checkpoint_score(float("nan"), 0.9, approach="soft") == -np.inf
+        assert m._val_checkpoint_score(float("nan"), 0.9, approach="ddns") == -np.inf
+        assert m._val_checkpoint_score(float("nan"), 0.9, approach="hard") == -np.inf
 
     def test_both_nan_returns_minus_inf(self, m):
-        # Both flat: checkpointer should skip (best_score > -inf comparisons fail).
         assert m._val_checkpoint_score(float("nan"), float("nan"), approach="soft") == -np.inf
-
-    def test_hard_with_nan_load_returns_minus_inf(self, m):
-        # Hard-PINN load is the only signal; if that is NaN nothing to checkpoint on.
-        assert m._val_checkpoint_score(float("nan"), 0.9, approach="hard") == -np.inf
+        assert m._val_checkpoint_score(float("nan"), float("nan"), approach="hard") == -np.inf
 
 
 # =====================================================================

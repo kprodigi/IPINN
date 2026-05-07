@@ -149,7 +149,7 @@ def _atomic_to_csv(self, path_or_buf=None, *args, **kwargs):
 pd.DataFrame.to_csv = _atomic_to_csv
 
 
-def setup_logging(output_dir: str) -> logging.Logger:
+def setup_logging(output_dir: str, tag: str = "") -> logging.Logger:
     """Configure logging to both file and console."""
     os.makedirs(output_dir, exist_ok=True)
 
@@ -157,7 +157,8 @@ def setup_logging(output_dir: str) -> logging.Logger:
     logger.setLevel(logging.INFO)
     logger.handlers = []
 
-    fh = logging.FileHandler(os.path.join(output_dir, "run_log.txt"), mode="w", encoding="utf-8")
+    fname = f"run_log_{tag}.txt" if tag else "run_log.txt"
+    fh = logging.FileHandler(os.path.join(output_dir, fname), mode="w", encoding="utf-8")
     fh.setLevel(logging.INFO)
     ch = _SafeUnicodeStreamHandler()
     ch.setLevel(logging.INFO)
@@ -217,56 +218,61 @@ ONE_AND_HALF_COL_IN = 5.51
 # and inserting at 100% scale into a Composite Structures full-page figure means
 # these point sizes are exactly the on-page sizes the reader sees.
 _BASE_FONT_AT_FULL_WIDTH = {
-    "label":     9.0,   # x/y axis labels
-    "title":     9.0,   # subplot titles
-    "tick":      8.0,   # tick labels
-    "legend":    8.0,   # legend entries
-    "panel":     9.5,   # panel labels (a)/(b)/(c)
-    "annot":     8.0,   # in-axes annotations
-    "suptitle":  10.0,  # figure-level suptitle
+    "label":     16.0,  # x/y axis labels (v_17 axes.labelsize)
+    "title":     16.0,  # subplot titles (v_17 axes.titlesize, bold)
+    "tick":      14.0,  # tick labels (v_17 xtick/ytick.labelsize)
+    "legend":    12.0,  # legend entries (v_17 legend.fontsize)
+    "panel":     14.0,  # panel labels (a)/(b)/(c), bold
+    "annot":     12.0,  # in-axes annotations
+    "suptitle":  16.0,  # figure-level suptitle, bold
 }
 
-# All figure text uses Arial Bold per journal style.
+# All figure text uses Arial in **bold** weight (per user request — every
+# axis label, tick, legend entry, suptitle, title, and annotation is bold).
 FIG_FONT_FAMILY = ["Arial", "Liberation Sans", "DejaVu Sans"]
 FIG_FONT_WEIGHT = "bold"
 
 
 def scaled_fonts(fig_width: float) -> dict:
-    """Font sizes (pt) for a figure of width ``fig_width`` (inches).
+    """Font sizes (pt) for figures (v_17 style — fixed sizes, no width scaling).
 
-    The scale is ``fig_width / PRINT_WIDTH_IN`` clamped to [0.65, 1.0].  Wider
-    figures saturate at the full-width sizes (so a 10" exploratory figure does
-    not balloon).  Narrow single-column figures down-scale slightly but are
-    floored so labels stay readable.
+    Returns the v_17 baseline sizes regardless of ``fig_width`` so every figure
+    uses the same Arial sizing (label=16, title=16, tick=14, legend=12).  The
+    ``fig_width`` argument is preserved for call-site compatibility but unused.
 
-    Returned floats are rounded to 0.1 pt.  Apply via ``apply_fig_style``.
+    Apply via ``apply_fig_style``.
     """
-    s = float(fig_width) / PRINT_WIDTH_IN
-    s = min(max(s, 0.65), 1.0)
+    del fig_width  # unused; retained for call-site compatibility
     return {
-        "label":      round(_BASE_FONT_AT_FULL_WIDTH["label"]    * s, 1),
-        "title":      round(_BASE_FONT_AT_FULL_WIDTH["title"]    * s, 1),
-        "tick":       round(_BASE_FONT_AT_FULL_WIDTH["tick"]     * s, 1),
-        "legend":     round(_BASE_FONT_AT_FULL_WIDTH["legend"]   * s, 1),
-        "panel":      round(_BASE_FONT_AT_FULL_WIDTH["panel"]    * s, 1),
-        "annot":      round(_BASE_FONT_AT_FULL_WIDTH["annot"]    * s, 1),
-        "suptitle":   round(_BASE_FONT_AT_FULL_WIDTH["suptitle"] * s, 1),
-        # Geometry (lines, ticks) — slightly thicker than default for print.
-        "linewidth":  round(1.1 * s, 2),
-        "markersize": round(4.5 * s, 1),
-        "axes_lw":    round(0.9 * s, 2),
-        "tick_major": round(4.0 * s, 1),
-        "tick_minor": round(2.5 * s, 1),
+        "label":      _BASE_FONT_AT_FULL_WIDTH["label"],
+        "title":      _BASE_FONT_AT_FULL_WIDTH["title"],
+        "tick":       _BASE_FONT_AT_FULL_WIDTH["tick"],
+        "legend":     _BASE_FONT_AT_FULL_WIDTH["legend"],
+        "panel":      _BASE_FONT_AT_FULL_WIDTH["panel"],
+        "annot":      _BASE_FONT_AT_FULL_WIDTH["annot"],
+        "suptitle":   _BASE_FONT_AT_FULL_WIDTH["suptitle"],
+        # Geometry — v_17 line/tick widths.
+        "linewidth":  1.8,
+        "markersize": 7.0,
+        "axes_lw":    1.2,
+        "tick_major": 6.0,
+        "tick_minor": 3.5,
     }
 
 
 def apply_fig_style(fig, axes=None, fig_width: float = None, logger: Optional[logging.Logger] = None):
-    """Enforce Arial Bold + journal-standard font sizes on every text element.
+    """Enforce v_17-style Arial figure look on every text element.
 
     Call AFTER creating subplots and setting labels/titles, BEFORE savefig.
     Sets x/y labels, titles, tick labels, legend entries, suptitle, figure-level
-    legends, and any colorbar text to Arial Bold at the size returned by
-    :func:`scaled_fonts` for the figure's saved width.
+    legends, and any colorbar text to Arial at the size returned by
+    :func:`scaled_fonts`.  Subplot titles, suptitle, and panel labels are bold;
+    body text (axis labels, ticks, legend entries) is regular weight, matching
+    the v_17 figure style.
+
+    Free-floating Text annotations preserve any explicit ``fontweight`` the
+    caller set (so e.g. an annotation passed with ``fontweight='bold'`` keeps
+    its bold styling rather than being reset to regular).
     """
     _log = logger if logger is not None else logging.getLogger(__name__)
     if fig_width is None:
@@ -278,12 +284,12 @@ def apply_fig_style(fig, axes=None, fig_width: float = None, logger: Optional[lo
 
     sf = scaled_fonts(fig_width)
     fam = FIG_FONT_FAMILY
-    fw = FIG_FONT_WEIGHT
 
-    def _bold(text_obj, size):
+    def _set(text_obj, size, weight=None):
         try:
             text_obj.set_fontfamily(fam)
-            text_obj.set_fontweight(fw)
+            if weight is not None:
+                text_obj.set_fontweight(weight)
             text_obj.set_fontsize(size)
         except Exception as ex:
             _log.debug("apply_fig_style: text styling skipped: %s", ex)
@@ -298,25 +304,23 @@ def apply_fig_style(fig, axes=None, fig_width: float = None, logger: Optional[lo
             for spine in ax.spines.values():
                 spine.set_linewidth(sf["axes_lw"])
 
-            # x / y / title / suptitle text — set family + weight + size.
-            for tobj, size_key in [
-                (ax.xaxis.label, "label"),
-                (ax.yaxis.label, "label"),
-                (ax.title,       "title"),
-            ]:
+            # Axis labels — regular weight (v_17 default).
+            for tobj in (ax.xaxis.label, ax.yaxis.label):
                 if tobj.get_text():
-                    _bold(tobj, sf[size_key])
+                    _set(tobj, sf["label"], weight="bold")
+            # Subplot title — bold (v_17 axes.titleweight='bold').
+            if ax.title.get_text():
+                _set(ax.title, sf["title"], weight="bold")
 
-            # Tick labels (each Text instance).
+            # Tick labels — regular.
             for tl in ax.get_xticklabels() + ax.get_yticklabels():
-                _bold(tl, sf["tick"])
+                _set(tl, sf["tick"], weight="bold")
 
-            # Legend entries (in-axes legends).
+            # In-axes legend — regular.
             legend = ax.get_legend()
             if legend is not None:
                 for text in legend.get_texts():
-                    _bold(text, sf["legend"])
-                # Frame line width matches axes lw.
+                    _set(text, sf["legend"], weight="bold")
                 try:
                     legend.get_frame().set_linewidth(sf["axes_lw"])
                 except Exception:
@@ -324,106 +328,98 @@ def apply_fig_style(fig, axes=None, fig_width: float = None, logger: Optional[lo
         except Exception as ex:
             _log.debug("apply_fig_style: axis styling skipped: %s", ex)
 
-    # Figure-level legends (fig.legend(...)).
+    # Figure-level legends — regular.
     for leg in getattr(fig, "legends", []) or []:
         try:
             for text in leg.get_texts():
-                _bold(text, sf["legend"])
+                _set(text, sf["legend"], weight="bold")
             leg.get_frame().set_linewidth(sf["axes_lw"])
         except Exception as ex:
             _log.debug("apply_fig_style: fig legend styling skipped: %s", ex)
 
-    # Suptitle.
+    # Suptitle — bold (matches v_17).
     if fig._suptitle is not None and fig._suptitle.get_text():
-        _bold(fig._suptitle, sf["suptitle"])
+        _set(fig._suptitle, sf["suptitle"], weight="bold")
 
-    # Any free-floating Text annotations (text() calls anchored to axes/figure).
+    # Free-floating Text annotations (text() / annotate() anchored to axes).
+    # Force bold weight on every annotation so the figure has uniform Arial
+    # bold typography end-to-end (per user request).  Family and size still
+    # follow the same panel-vs-annot heuristic as before.
     for ax in all_axes:
         for txt in ax.texts:
             if not txt.get_text():
                 continue
-            # Don't shrink user-specified large fonts (e.g. panel labels with explicit fontsize).
             try:
                 cur = float(txt.get_fontsize())
             except Exception:
                 cur = sf["annot"]
             target = sf["annot"] if cur < sf["panel"] else sf["panel"]
-            _bold(txt, target)
+            _set(txt, target, weight="bold")
 
 
 def set_publication_style():
-    """Set matplotlib defaults to Arial Bold + Composite Structures sizing.
+    """Set matplotlib defaults to v_17 figure style with Arial (sans-serif).
 
-    Individual figure routines must still call :func:`apply_fig_style` before
-    savefig to enforce per-element sizing (rcParams cannot scale with the
-    figure's width).  These rcParams are sensible defaults if a function forgets.
+    Mirrors v_17's rcParams (figure 8x6 in, font.size 14, axes.labelsize 16,
+    axes.titlesize 16 bold, tick labels 14, legend 12, lines 1.8 pt, markers
+    7 pt) but switches the family from serif (Times New Roman) to sans-serif
+    (Arial).  Individual figure routines should still call
+    :func:`apply_fig_style` before savefig to enforce per-element Arial sizing
+    on tick labels, suptitle, etc.
     """
-    sf = scaled_fonts(PRINT_WIDTH_IN)  # full-width baseline
     plt.rcParams.update({
-        # Output geometry
-        "figure.figsize": (PRINT_WIDTH_IN, 4.0),
+        # Output geometry — v_17 defaults.
+        "figure.figsize": (8, 6),
         "figure.dpi":     150,
         "figure.facecolor": "white",
         "savefig.dpi":    600,
         "savefig.bbox":   "tight",
-        "savefig.pad_inches": 0.06,
+        "savefig.pad_inches": 0.05,
         "savefig.facecolor": "white",
         "pdf.fonttype":   42,   # embed TrueType (editable in Illustrator/Acrobat)
         "ps.fonttype":    42,
-        # Fonts — Arial Bold throughout
+        # Fonts — Arial (sans-serif), **bold** weight at v_17 sizes.
         "font.family":    "sans-serif",
         "font.sans-serif": FIG_FONT_FAMILY,
-        "font.weight":    FIG_FONT_WEIGHT,
-        "font.size":      sf["tick"],
-        "mathtext.default": "regular",  # math integrates with sans-serif body
+        "font.weight":    "bold",
+        "font.size":      14,
+        "mathtext.default": "regular",
         "mathtext.fontset": "dejavusans",
-        # Axes
-        "axes.labelsize":   sf["label"],
-        "axes.labelweight": FIG_FONT_WEIGHT,
-        "axes.titlesize":   sf["title"],
-        "axes.titleweight": FIG_FONT_WEIGHT,
-        "axes.linewidth":   sf["axes_lw"],
+        # Axes — v_17 sizes; every text element is bold.
+        "axes.labelsize":   16,
+        "axes.labelweight": "bold",
+        "axes.titlesize":   16,
+        "axes.titleweight": "bold",
+        "axes.linewidth":   1.2,
         "axes.grid":        True,
         "axes.axisbelow":   True,
-        "axes.spines.top":   True,
-        "axes.spines.right": True,
-        # Ticks
-        "xtick.labelsize": sf["tick"],
-        "ytick.labelsize": sf["tick"],
+        # Ticks — v_17 sizes, in-pointing.
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
         "xtick.direction": "in",
         "ytick.direction": "in",
-        "xtick.major.size": sf["tick_major"],
-        "ytick.major.size": sf["tick_major"],
-        "xtick.minor.size": sf["tick_minor"],
-        "ytick.minor.size": sf["tick_minor"],
-        "xtick.major.width": sf["axes_lw"],
-        "ytick.major.width": sf["axes_lw"],
+        "xtick.major.size": 6,
+        "ytick.major.size": 6,
+        "xtick.minor.size": 3.5,
+        "ytick.minor.size": 3.5,
+        "xtick.major.width": 1.0,
+        "ytick.major.width": 1.0,
         "xtick.minor.visible": True,
         "ytick.minor.visible": True,
-        # Legend
-        "legend.fontsize": sf["legend"],
-        "legend.frameon": True,
+        # Legend — v_17 sizes.
+        "legend.fontsize":   12,
+        "legend.frameon":    True,
         "legend.framealpha": 0.95,
-        "legend.edgecolor": "0.2",
-        "legend.fancybox":  False,
-        # Lines
-        "lines.linewidth": sf["linewidth"],
-        "lines.markersize": sf["markersize"],
-        "lines.markeredgewidth": 0.6,
-        # Grid (subtle, behind data)
-        "grid.alpha":     0.30,
-        "grid.linewidth": 0.45,
+        # Lines — v_17 thickness.
+        "lines.linewidth":  1.8,
+        "lines.markersize": 7,
+        # Grid — v_17 styling (subtle, dashed).
+        "grid.alpha":     0.25,
+        "grid.linewidth": 0.5,
         "grid.linestyle": "--",
-        "grid.color":     "0.7",
-        "errorbar.capsize": 2.5,
-        # Colour cycle: Wong palette (B/W safe, colourblind safe)
-        "axes.prop_cycle": plt.cycler(
-            "color",
-            ["#000000", "#0072B2", "#D55E00", "#009E73",
-             "#CC79A7", "#56B4E9", "#E69F00", "#F0E442"],
-        ),
-        # Use viridis as default sequential (no rainbow).
-        "image.cmap": "viridis",
+        "errorbar.capsize": 3,
+        # Colour cycle and image.cmap left at matplotlib defaults (v_17 didn't
+        # set these explicitly).
     })
 
 
@@ -1138,6 +1134,7 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
         
         # Create and train model
         model = HardEnergyNet(X_full.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
+        model.configure_zero_bc(params)
 
         if cfg["optimizer"] == "adamw":
             optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
@@ -1392,8 +1389,15 @@ def split_unseen_angle(df: pd.DataFrame, theta_star: float, logger: logging.Logg
 # NEURAL NETWORK MODELS
 # =============================================================================
 class SoftPINNNet(nn.Module):
-    """MLP for DDNS and Soft-PINN (outputs both F and E)."""
-    
+    """MLP for DDNS and Soft-PINN (outputs both F and E).
+
+    Optionally enforces ``F(d=0) ≡ 0`` and ``E(d=0) ≡ 0`` in raw
+    (un-normalized) space via an architectural correction; activate by calling
+    :meth:`configure_zero_bc` after construction.  The correction is
+    autograd-safe and does not modify the d-derivative of E (so a downstream
+    ``F = dE/dd`` computation is unaffected).
+    """
+
     def __init__(self, in_d: int, hidden_layers: List[int], dropout: float, softplus_beta: float):
         super().__init__()
         layers = []
@@ -1407,23 +1411,66 @@ class SoftPINNNet(nn.Module):
         layers.append(nn.Linear(d, 2))
         self.net = nn.Sequential(*layers)
         self._init_weights()
-    
+        # Architectural F(d=0)=0, E(d=0)=0 correction (inactive by default).
+        # Activated via configure_zero_bc(params).
+        self._zero_bc_active = False
+        self.register_buffer("_d_scaled_at_zero", torch.zeros(1))
+        self.register_buffer("_c0_F", torch.zeros(1))
+        self.register_buffer("_c0_E", torch.zeros(1))
+
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-    
+
+    def configure_zero_bc(self, params: "ScalingParams", enabled: bool = True) -> None:
+        """Activate (or disable) the architectural F(d=0)=E(d=0)=0 correction.
+
+        After ``configure_zero_bc(params)`` returns, ``forward(x)`` produces
+        ``[F_n, E_n]`` whose un-normalized values are exactly zero whenever
+        the displacement column of ``x`` equals ``-mu_d/sig_d`` (i.e. raw
+        d = 0), for any (θ, LC).  Implementation: subtract the network's
+        prediction at d=0 and add the constant offset that maps normalized
+        zero to raw zero.
+        """
+        self._zero_bc_active = bool(enabled)
+        if not enabled:
+            return
+        self._d_scaled_at_zero.fill_(-params.mu_d / max(1e-12, params.sig_d))
+        self._c0_F.fill_(-params.mu_F / max(1e-12, params.sig_F))
+        self._c0_E.fill_(-params.mu_E / max(1e-12, params.sig_E))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-    
+        out = self.net(x)
+        if not self._zero_bc_active:
+            return out
+        # Build x|d=0 = same (θ, LC) but displacement column replaced by the
+        # scaled value of raw d=0.  No in-place ops — autograd-safe so the
+        # d-derivative of out remains intact.
+        d0 = self._d_scaled_at_zero.view(1, 1).expand(x.size(0), 1)
+        x0 = torch.cat([d0, x[:, U_COL + 1:]], dim=1)
+        out0 = self.net(x0)
+        F_corr = out[:, 0:1] - out0[:, 0:1] + self._c0_F
+        E_corr = out[:, 1:2] - out0[:, 1:2] + self._c0_E
+        return torch.cat([F_corr, E_corr], dim=1)
+
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
 class HardEnergyNet(nn.Module):
-    """MLP for Hard-PINN (outputs only E; F derived by differentiation)."""
+    """MLP for Hard-PINN (outputs only E; F derived by differentiation).
+
+    Optionally enforces ``E(d=0) ≡ 0`` in raw (un-normalized) space via an
+    architectural correction; activate by calling :meth:`configure_zero_bc`
+    after construction.  The correction subtracts a quantity that does NOT
+    depend on the displacement column of the input, so ``∂E_corrected/∂d ≡
+    ∂E_net/∂d`` everywhere — the ``F = dE/dd`` formulation is preserved
+    exactly.  Note: this does **not** make ``F(d=0) = 0`` architecturally
+    (that would require a different factoring such as ``E = d²·h``).
+    """
 
     def __init__(self, in_d: int, hidden_layers: List[int], dropout: float,
                  softplus_beta: float):
@@ -1439,6 +1486,10 @@ class HardEnergyNet(nn.Module):
         layers.append(nn.Linear(d, 1))
         self.net = nn.Sequential(*layers)
         self._init_weights()
+        # Architectural E(d=0)=0 correction (inactive by default).
+        self._zero_bc_active = False
+        self.register_buffer("_d_scaled_at_zero", torch.zeros(1))
+        self.register_buffer("_c0_E", torch.zeros(1))
 
     def _init_weights(self):
         for m in self.modules():
@@ -1447,8 +1498,29 @@ class HardEnergyNet(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
+    def configure_zero_bc(self, params: "ScalingParams", enabled: bool = True) -> None:
+        """Activate (or disable) the architectural E(d=0)=0 correction.
+
+        After this call, ``forward(x)`` produces a normalized energy whose
+        un-normalized value is exactly zero whenever the displacement column
+        of ``x`` equals ``-mu_d/sig_d`` (i.e. raw d = 0), for any (θ, LC).
+        ``F = dE/dd`` is unchanged because the subtracted terms do not depend
+        on d.
+        """
+        self._zero_bc_active = bool(enabled)
+        if not enabled:
+            return
+        self._d_scaled_at_zero.fill_(-params.mu_d / max(1e-12, params.sig_d))
+        self._c0_E.fill_(-params.mu_E / max(1e-12, params.sig_E))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        out = self.net(x)
+        if not self._zero_bc_active:
+            return out
+        d0 = self._d_scaled_at_zero.view(1, 1).expand(x.size(0), 1)
+        x0 = torch.cat([d0, x[:, U_COL + 1:]], dim=1)
+        out0 = self.net(x0)
+        return out - out0 + self._c0_E
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -1654,27 +1726,15 @@ def curvature_regularization_hard(Xin: torch.Tensor, model: nn.Module,
 def _val_checkpoint_score(r2_load: float, r2_energy: float, approach: str = "soft") -> float:
     """Validation score for checkpointing, LR schedule, and early stopping.
 
-    For Hard-PINN, force is the *gradient* of the energy network, so energy R²
-    is trivially near 1.0 at every epoch — averaging the two metrics dilutes
-    the signal that actually matters (load fit). For Hard-PINN we therefore
-    checkpoint on **load R² only**. DDNS and Soft-PINN use the mean as before
-    so both heads jointly drive selection.
-
-    Returns NaN-safe score; if either R² is NaN (flat-target slice) the other
-    is used, and if both are NaN we return -inf so the checkpointer skips.
+    Matches v_17 semantics: **load R² is the sole checkpointing metric** for
+    all three approaches (DDNS, Soft-PINN, Hard-PINN).  ``r2_energy`` and
+    ``approach`` are kept in the signature for call-site compatibility but
+    are unused.  NaN-safe: returns -inf if ``r2_load`` is NaN so the
+    checkpointer skips that epoch instead of marking it as best.
     """
-    r_l = float(r2_load) if np.isfinite(r2_load) else float("nan")
-    r_e = float(r2_energy) if np.isfinite(r2_energy) else float("nan")
-    if approach == "hard":
-        return r_l if np.isfinite(r_l) else float("-inf")
-    # DDNS / Soft: mean of the two heads, falling back to whichever is finite.
-    if np.isfinite(r_l) and np.isfinite(r_e):
-        return 0.5 * (r_l + r_e)
-    if np.isfinite(r_l):
-        return r_l
-    if np.isfinite(r_e):
-        return r_e
-    return float("-inf")
+    del r2_energy, approach  # unused; kept for call-site compatibility
+    r_l = float(r2_load)
+    return r_l if np.isfinite(r_l) else float("-inf")
 
 
 class EarlyStopping:
@@ -1757,6 +1817,7 @@ def train_ddns(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     y_val = val_df[["load_kN", "energy_J"]].values
     
     model = SoftPINNNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
+    model.configure_zero_bc(params)
     opt = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"]) if cfg.get("optimizer", "adamw").lower() == "adam" else optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     sched = optim.lr_scheduler.ReduceLROnPlateau(opt, patience=cfg["sched_patience"], factor=cfg["sched_factor"], mode='max')
     mse = nn.MSELoss()
@@ -1840,6 +1901,7 @@ def train_soft(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     y_val = val_df[["load_kN", "energy_J"]].values
     
     model = SoftPINNNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
+    model.configure_zero_bc(params)
     opt = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"]) if cfg.get("optimizer", "adamw").lower() == "adam" else optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     sched = optim.lr_scheduler.ReduceLROnPlateau(opt, patience=cfg["sched_patience"], factor=cfg["sched_factor"], mode='max')
     mse = nn.MSELoss()
@@ -1971,6 +2033,7 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     y_val = val_df[["load_kN", "energy_J"]].values
     
     model = HardEnergyNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
+    model.configure_zero_bc(params)
     opt = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"]) if cfg.get("optimizer", "adamw").lower() == "adam" else optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     
     # [V8] Scheduler selection: stabilized (unseen) vs reactive (random)
@@ -2932,7 +2995,7 @@ def fig_classifier_decision_boundary(
     X_grid_scaled = feat_scaler.transform(X_grid)
     P_lc2 = cal_ens.predict_proba(X_grid_scaled)[:, 1].reshape(EA_grid.shape)
 
-    fig, axes = plt.subplots(1, 2, figsize=(7.48, 3.5))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
 
     # Panel (a): P(LC2 | indicators) heatmap (cividis is colourblind- and B/W-safe)
     ax = axes[0]
@@ -3886,8 +3949,7 @@ def fig_solution_landscape(all_inverse_results, output_dir, logger):
     if not targets_with_landscape:
         return
     n = len(targets_with_landscape)
-    fig_w = min(PRINT_WIDTH_IN, 3.5 * n)
-    fig, axes = plt.subplots(1, n, figsize=(fig_w, 3.0), squeeze=False)
+    fig, axes = plt.subplots(1, n, figsize=(5.5 * n, 4.5), squeeze=False)
     lc_color = {"LC1": COLORS["LC1"], "LC2": COLORS["LC2"]}
     lc_ls = {"LC1": LINESTYLES["LC1"], "LC2": LINESTYLES["LC2"]}
     for i, res in enumerate(targets_with_landscape):
@@ -3920,8 +3982,7 @@ def fig_forward_map_jacobian(jacobian_results, output_dir, logger):
     lcs = sorted(k.replace("dEA_dtheta_", "") for k in jacobian_results if k.startswith("dEA_dtheta_"))
     if not lcs:
         return
-    fig_w = PRINT_WIDTH_IN
-    fig, axes = plt.subplots(2, len(lcs), figsize=(fig_w, 4.5), squeeze=False, sharex=True)
+    fig, axes = plt.subplots(2, len(lcs), figsize=(5.5 * len(lcs), 8), squeeze=False, sharex=True)
     bif_color = COLORS["gpbo"]
     for j, lc in enumerate(lcs):
         dea = jacobian_results[f"dEA_dtheta_{lc}"]
@@ -3953,8 +4014,7 @@ def fig_inverse_posterior(all_inverse_results, output_dir, logger):
     if not targets_with_post:
         return
     n = len(targets_with_post)
-    fig_w = min(PRINT_WIDTH_IN, 3.5 * n)
-    fig, axes = plt.subplots(1, n, figsize=(fig_w, 2.8), squeeze=False)
+    fig, axes = plt.subplots(1, n, figsize=(5.5 * n, 4.5), squeeze=False)
     for i, res in enumerate(targets_with_post):
         ax = axes[0, i]
         post = res["inverse_posterior"]
@@ -4264,9 +4324,8 @@ def fig_inverse_posterior_likelihood(all_inverse: List[Dict], output_dir: str, l
     if not targets:
         return
     n = len(targets)
-    fig_w = min(PRINT_WIDTH_IN, 3.5 * n)
-    fonts = scaled_fonts(fig_w)
-    fig, axes = plt.subplots(2, n, figsize=(fig_w, 4.2), squeeze=False, sharex="col")
+    fonts = scaled_fonts(8.0)
+    fig, axes = plt.subplots(2, n, figsize=(5.5 * n, 8), squeeze=False, sharex="col")
     for i, res in enumerate(targets):
         tid = res.get("target_info", {}).get("id", f"T{i+1}")
         post_j = res.get("inverse_posterior", {})
@@ -4909,7 +4968,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
     scaled by the conformal factor from the random protocol Hard-PINN
     (best available proxy for the full-data inverse model).
     """
-    fig = plt.figure(figsize=(7.48, 10.5))
+    fig = plt.figure(figsize=(16, 12))
     gs = fig.add_gridspec(2, 3, hspace=0.52, wspace=0.42, left=0.07, right=0.98, top=0.90, bottom=0.06)
     
     # Retrieve conformal factors for Hard-PINN.  We pull the **2σ-coverage**
@@ -5056,14 +5115,14 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
         low_alpha = pareto_df[pareto_df["alpha"] == pareto_df["alpha"].min()].iloc[0]
         ax5.annotate("α=0 (Stable)", (low_alpha["EA"], low_alpha["IPF"]),
                     xytext=(-40, 24), textcoords='offset points',
-                    fontsize=7.5, ha='center',
+                    fontsize=12, ha='center',
                     arrowprops=dict(arrowstyle='->', color='gray', lw=0.6))
         
         # High alpha (EA priority)
         high_alpha = pareto_df[pareto_df["alpha"] == pareto_df["alpha"].max()].iloc[0]
         ax5.annotate("α=1 (Max EA)", (high_alpha["EA"], high_alpha["IPF"]),
                     xytext=(36, -28), textcoords='offset points',
-                    fontsize=7.5, ha='center',
+                    fontsize=12, ha='center',
                     arrowprops=dict(arrowstyle='->', color='gray', lw=0.6))
     
     ax5.set_xlabel("Energy Absorption EA (J)")
@@ -5409,7 +5468,7 @@ def fig_random_grid_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir:
     lcs = sorted(df_all["LC"].unique())
     
     # Create figure at print width (190mm = 7.48in for Composite Structures full-page)
-    fig, axes = plt.subplots(len(lcs), len(angles), figsize=(7.48, 2.5 * len(lcs) + 0.5))
+    fig, axes = plt.subplots(len(lcs), len(angles), figsize=(3.0 * len(angles), 3.0 * len(lcs) + 0.6))
     
     for i, lc in enumerate(lcs):
         disp_end = disp_end_mm(lc)  # [CHANGE B] Define for this LC
@@ -5426,12 +5485,12 @@ def fig_random_grid_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir:
                     models = dual_results["random"][approach]["models"]
                     Fm, _, _, _ = predict_curve_ensemble(models, approach, ang, lc, disps, scaler_disp, enc, params)
                     ax.plot(disps, Fm, color=COLORS[approach], linestyle=LINESTYLES[approach], linewidth=0.8, alpha=0.85)
-            ax.set_title(f"{lc}, {ang}°", fontsize=8, pad=2)
-            ax.tick_params(labelsize=7)
+            ax.set_title(f"{lc}, {ang}°", fontsize=12, pad=2)
+            ax.tick_params(labelsize=12)
             if j == 0:
-                ax.set_ylabel("Load (kN)", fontsize=8)
+                ax.set_ylabel("Load (kN)", fontsize=12)
             if i == len(lcs) - 1:
-                ax.set_xlabel("Disp. (mm)", fontsize=8)
+                ax.set_xlabel("Disp. (mm)", fontsize=12)
             ax.set_xlim(0, disp_end)  # [CHANGE A] LC-specific
     
     # Create legend elements
@@ -5549,7 +5608,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
         snapshot_indices = [min(idx, n_iters - 1) for idx in snapshot_indices]
         
         # Create 2x4 figure (extra height for multi-line subplot titles + bottom legend)
-        fig, axes = plt.subplots(2, 4, figsize=(7.48, 5.35))
+        fig, axes = plt.subplots(2, 4, figsize=(16, 8))
         axes = axes.flatten()
         
         for ax_idx, snap_idx in enumerate(snapshot_indices[:8]):
@@ -5602,7 +5661,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
             
             ax.set_xlabel(r"Angle $\theta$ (deg.)")
             ax.set_ylabel("Objective")
-            ax.set_title(f"Iter {iter_num}/{total_evals}\n({obs_str})", fontsize=7)
+            ax.set_title(f"Iter {iter_num}/{total_evals}\n({obs_str})", fontsize=12)
             ax.set_xlim(45, 70)
             ax.xaxis.set_minor_locator(AutoMinorLocator())
             ax.yaxis.set_minor_locator(AutoMinorLocator())
@@ -5617,7 +5676,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
         apply_fig_style(fig)
         for _ax in axes:
             if _ax.get_title():
-                _ax.title.set_fontsize(min(float(_ax.title.get_fontsize()), 7.2))
+                _ax.title.set_fontsize(min(float(_ax.title.get_fontsize()), 12.0))
         plt.tight_layout(rect=[0.02, 0.10, 0.98, 0.94])
         suffix = f"_{tag}" if tag else ""
         out_name = f"Fig_gpbo_posterior_evaluation{suffix}.png"
@@ -5661,7 +5720,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
     
     snapshot_indices = [min(idx, min_iters - 1) for idx in snapshot_indices]
     
-    fig, axes = plt.subplots(2, 4, figsize=(7.48, 5.35))
+    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
     axes = axes.flatten()
     
     for ax_idx, snap_idx in enumerate(snapshot_indices[:8]):
@@ -5695,7 +5754,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
         total_iters = min_iters
         ax.set_xlabel(r"Angle $\theta$ (deg.)")
         ax.set_ylabel("Objective")
-        ax.set_title(f"Iter {snap_idx + 1}/{total_iters}", fontsize=7)
+        ax.set_title(f"Iter {snap_idx + 1}/{total_iters}", fontsize=12)
         ax.set_xlim(45, 70)
         ax.xaxis.set_minor_locator(AutoMinorLocator())
         ax.yaxis.set_minor_locator(AutoMinorLocator())
@@ -5709,7 +5768,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
     apply_fig_style(fig)
     for _ax in axes:
         if _ax.get_title():
-            _ax.title.set_fontsize(min(float(_ax.title.get_fontsize()), 7.2))
+            _ax.title.set_fontsize(min(float(_ax.title.get_fontsize()), 12.0))
     plt.tight_layout(rect=[0.02, 0.10, 0.98, 0.94])
     suffix = f"_{tag}" if tag else ""
     out_name = f"Fig_gpbo_posterior_evaluation{suffix}.png"
@@ -5857,14 +5916,14 @@ def fig_optimizer_comparison(all_inverse_results: List[Dict], output_dir: str, l
                             bars[i].get_x() + bars[i].get_width() / 2,
                             bars[i].get_height() + 0.08 * max(y_max, 1e-6),
                             "[best]", ha='center', va='bottom',
-                            fontsize=8.5, fontweight='bold', color='#DAA520'
+                            fontsize=12, fontweight='bold', color='#DAA520'
                         )
 
             for bar, val in zip(bars, objs):
                 ax.text(bar.get_x() + bar.get_width() / 2,
                         bar.get_height() + 0.03 * max(y_max, 1e-6),
                         f'{val:.1e}', ha='center', va='bottom',
-                        fontsize=8, fontweight='bold', color="black")
+                        fontsize=12, fontweight='bold', color="black")
             ax.set_ylim(0, y_max * 1.3 if y_max > 0 else 0.001)
 
             add_subplot_label(ax, chr(ord('a') + ncols + col))
@@ -6271,7 +6330,7 @@ def fig_physics_verification(dual_results: Dict, val_df: pd.DataFrame, scaler_di
     """Generate physics constraint verification figure showing dE/dd = F satisfaction."""
     logger.info("  Generating physics verification figure...")
     
-    fig, axes = plt.subplots(1, 3, figsize=(7.48, 2.8))
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     
     residual_data = {}
     colors = {"ddns": COLORS["ddns"], "soft": COLORS["soft"], "hard": COLORS["hard"]}
@@ -6626,7 +6685,7 @@ def fig_baseline_comparison(baseline_results: Dict, dual_results: Dict, output_d
             }
     
     # Create figure
-    fig, axes = plt.subplots(1, 3, figsize=(7.48, 3.0))
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
     
     # Baseline ML models use Wong-palette auxiliaries (B/W-safe via lightness).
     # PINN families keep their canonical COLORS assignments.
@@ -6732,6 +6791,7 @@ def run_hyperparam_sensitivity(train_df: pd.DataFrame, val_df: pd.DataFrame,
                 y_val = val_df[["load_kN", "energy_J"]].values
                 
                 model = SoftPINNNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
+                model.configure_zero_bc(params)
                 opt = optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
                 mse = nn.MSELoss()
                 sl1 = nn.SmoothL1Loss(beta=cfg["smoothl1_beta"])
@@ -6826,7 +6886,7 @@ def fig_hyperparam_sensitivity(sensitivity_df: pd.DataFrame, output_dir: str, lo
             for j in range(len(lr_vals)):
                 val = matrix[i, j]
                 color = 'white' if val < 0.75 else 'black'
-                ax.text(j, i, f'{val:.2f}', ha='center', va='center', fontsize=7.5, color=color)
+                ax.text(j, i, f'{val:.2f}', ha='center', va='center', fontsize=12, color=color)
         
         plt.colorbar(im, ax=ax, shrink=0.8)
         add_subplot_label(ax, chr(ord('a') + idx))
@@ -7158,7 +7218,7 @@ def fig_reliability_diagram(calibration: Dict, output_dir: str, logger: logging.
         ax.set_aspect('equal')
         ax.legend(loc='lower right', framealpha=0.95, ncol=1,
                   borderpad=0.35, labelspacing=0.35, handletextpad=0.45,
-                  fontsize=7.5)
+                  fontsize=12)
         ax.grid(True, alpha=0.3)
         add_subplot_label(ax, chr(ord('a') + ax_idx))
         ax_idx += 1
@@ -7227,6 +7287,7 @@ def run_same_capacity_experiment(train_df: pd.DataFrame, val_df: pd.DataFrame,
             model = SoftPINNNet(Xtr.shape[1], architecture, cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
         else:
             model = HardEnergyNet(Xtr.shape[1], architecture, cfg.get("dropout", 0.0), cfg["softplus_beta"]).to(DEVICE)
+        model.configure_zero_bc(params)
         
         n_params = model.count_parameters()
         
@@ -7369,7 +7430,7 @@ def fig_same_capacity_comparison(same_cap_results: Dict, dual_results: Dict, out
         va = 'bottom' if m["load_r2"] >= 0 else 'top'
         offset = 0.02 if m["load_r2"] >= 0 else -0.02
         ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + offset, 
-               f'{m["load_r2"]:.3f}', ha='center', va=va, fontsize=8.5, fontweight='bold')
+               f'{m["load_r2"]:.3f}', ha='center', va=va, fontsize=12, fontweight='bold')
     
     # Panel (b): Energy R²
     ax = axes[1]
@@ -7391,7 +7452,7 @@ def fig_same_capacity_comparison(same_cap_results: Dict, dual_results: Dict, out
         va = 'bottom' if m["energy_r2"] >= 0 else 'top'
         offset = 0.02 if m["energy_r2"] >= 0 else -0.02
         ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + offset, 
-               f'{m["energy_r2"]:.3f}', ha='center', va=va, fontsize=8.5, fontweight='bold')
+               f'{m["energy_r2"]:.3f}', ha='center', va=va, fontsize=12, fontweight='bold')
     
     fig.suptitle("Same-Capacity Experiment: Hard-PINN vs Soft-PINN with Identical Architecture", 
                  fontweight='bold', y=0.98)
@@ -7451,10 +7512,11 @@ def run_extended_ablation(train_df: pd.DataFrame, val_df: pd.DataFrame,
             y_val = val_df[["load_kN", "energy_J"]].values
             
             model = SoftPINNNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
+            model.configure_zero_bc(params)
             opt = optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
             mse = nn.MSELoss()
             sl1 = nn.SmoothL1Loss(beta=cfg["smoothl1_beta"])
-            
+
             colloc_sampler = create_collocation_sampler(train_df, scaler_disp, enc) if cfg.get("colloc_ratio", 0) > 0 else None
             rng = np.random.default_rng(CFG.seed)
 
@@ -7741,6 +7803,159 @@ def save_reproducibility_artifacts(output_dir: str, protocol: str, train_df: pd.
     logger.info(f"  Saved reproducibility artifacts to {artifact_dir}")
 
 
+# =============================================================================
+# PIPELINE STATE SAVE / REPLOT
+# =============================================================================
+# After a full run, the trained models, scalers, and analysis results are
+# pickled to ``pipeline_state.pkl`` in the output directory.  Reload via
+# ``load_pipeline_state`` and pass to ``replot_figures_from_state`` (or run
+# the CLI with ``--replot_from <path>``) to re-render every figure with a
+# different style or layout, without retraining anything.
+_PIPELINE_STATE_FILENAME = "pipeline_state.pkl"
+
+
+def save_pipeline_state(state: Dict, output_dir: str, logger: logging.Logger) -> str:
+    """Pickle figure-relevant state to ``pipeline_state.pkl`` (atomic write).
+
+    Uses ``torch.save`` so tensors are device-aware on load: a state pickled
+    from a CUDA run can be reloaded on CPU via ``map_location='cpu'``.  Trained
+    ensembles are pickled in full; this works because every model class is
+    defined in this module and the file is loaded against the same module
+    version.
+    """
+    path = os.path.join(output_dir, _PIPELINE_STATE_FILENAME)
+    tmp = path + ".tmp"
+    torch.save(state, tmp, pickle_protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(tmp, path)
+    size_mb = os.path.getsize(path) / (1024.0 * 1024.0)
+    logger.info(f"  Saved pipeline state ({size_mb:.1f} MB): {path}")
+    return path
+
+
+def load_pipeline_state(path: str, logger: Optional[logging.Logger] = None) -> Dict:
+    """Inverse of :func:`save_pipeline_state` — returns the saved state dict.
+
+    Loads tensors onto CPU regardless of the original device, so figure
+    regeneration is portable between machines.  Pass the result to
+    :func:`replot_figures_from_state`.
+    """
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    if logger is not None:
+        size_mb = os.path.getsize(path) / (1024.0 * 1024.0)
+        logger.info(f"  Loaded pipeline state ({size_mb:.1f} MB): {path}")
+    return state
+
+
+def replot_figures_from_state(state: Dict, output_dir: str, logger: logging.Logger) -> None:
+    """Re-run every figure routine from a saved pipeline state.
+
+    Mirrors the figure sequence in :func:`run_pipeline` and skips all training
+    and heavy compute.  Figures whose inputs are absent from ``state`` (e.g.
+    baseline_results when --no_robustness was used in the original run) are
+    skipped silently.  Apply :func:`set_publication_style` so any figure-style
+    edits in this module take effect.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    set_publication_style()
+
+    dual_results        = state.get("dual_results")
+    df_all              = state.get("df_all")
+    df_metrics          = state.get("df_metrics")
+    df_ablation         = state.get("df_ablation")
+    calibration         = state.get("calibration", {}) or {}
+    val_df_u            = state.get("val_df_u")
+    scaler_disp_u       = state.get("scaler_disp_u")
+    enc_u               = state.get("enc_u")
+    params_u            = state.get("params_u")
+    inv_models          = state.get("inv_models")
+    inv_scaler_disp     = state.get("inv_scaler_disp")
+    inv_enc             = state.get("inv_enc")
+    inv_params          = state.get("inv_params")
+    cal_ens             = state.get("cal_ens")
+    clf_feat_scaler     = state.get("clf_feat_scaler")
+    clf_diag            = state.get("clf_diag")
+    all_inverse_results = state.get("all_inverse_results", []) or []
+    jacobian_results    = state.get("jacobian_results")
+    pareto_df           = state.get("pareto_df")
+    landscape_df        = state.get("landscape_df")
+    baseline_results_u  = state.get("baseline_results_u")
+    sensitivity_df_u    = state.get("sensitivity_df_u")
+
+    # ---- Forward model figures ----
+    if dual_results is not None:
+        logger.info("\n[REPLOT] Forward-model figures")
+        fig_parity_plots(dual_results, output_dir, logger)
+        fig_residual_histograms(dual_results, output_dir, logger)
+        fig_boxplot_comparison(dual_results, output_dir, logger)
+        fig_training_curves(dual_results, output_dir, logger)
+        fig_cross_protocol_comparison(dual_results, output_dir, logger)
+        if df_all is not None:
+            fig_unseen_curves(dual_results, df_all, output_dir, logger, calibration=calibration)
+            fig_random_grid_curves(dual_results, df_all, output_dir, logger)
+        fig_validation_error_maps(dual_results, output_dir, logger)
+        fig_qq_load_residuals(dual_results, output_dir, logger)
+
+    # ---- Robustness / extended-analysis figures ----
+    if (dual_results is not None and val_df_u is not None
+            and scaler_disp_u is not None and enc_u is not None and params_u is not None):
+        logger.info("[REPLOT] Physics verification")
+        try:
+            fig_physics_verification(dual_results, val_df_u, scaler_disp_u, enc_u, params_u, output_dir, logger)
+        except Exception as e:
+            logger.warning(f"  fig_physics_verification skipped: {e}")
+    if baseline_results_u is not None and dual_results is not None:
+        fig_baseline_comparison(baseline_results_u, dual_results, output_dir, logger, protocol="unseen")
+    if sensitivity_df_u is not None:
+        fig_hyperparam_sensitivity(sensitivity_df_u, output_dir, logger, tag="unseen")
+    if calibration:
+        fig_reliability_diagram(calibration, output_dir, logger)
+
+    # ---- Inverse-design figures ----
+    if clf_diag:
+        logger.info("[REPLOT] Classifier diagnostics")
+        fig_lc_classifier_diagnostics(clf_diag, output_dir, logger)
+        if cal_ens is not None and clf_feat_scaler is not None and df_metrics is not None:
+            fig_classifier_decision_boundary(cal_ens, clf_feat_scaler, df_metrics, output_dir, logger)
+
+    if all_inverse_results:
+        logger.info("[REPLOT] Inverse-design figures")
+        for res in all_inverse_results:
+            tid = res.get("target_info", {}).get("id", "")
+            fig_inverse_optimizer_convergence(res, output_dir, logger, tag=tid)
+            fig_bo_posterior_evaluation(res, output_dir, logger, tag=tid)
+        fig_inverse_parity_uncertainty(all_inverse_results, output_dir, logger)
+        if df_all is not None and inv_models is not None:
+            fig_inverse_vs_nearest_experimental_curve(
+                df_all, all_inverse_results, inv_models,
+                inv_scaler_disp, inv_enc, inv_params, output_dir, logger,
+            )
+        fig_solution_landscape(all_inverse_results, output_dir, logger)
+        fig_inverse_posterior(all_inverse_results, output_dir, logger)
+        fig_inverse_posterior_likelihood(all_inverse_results, output_dir, logger)
+
+    if inv_models is not None:
+        fig_design_space(inv_models, "hard", inv_scaler_disp, inv_enc, inv_params, output_dir, logger)
+
+    if jacobian_results is not None:
+        fig_forward_map_jacobian(jacobian_results, output_dir, logger)
+
+    # ---- Multi-objective figures ----
+    if pareto_df is not None and not pareto_df.empty:
+        logger.info("[REPLOT] Multi-objective figures")
+        fig_pareto_tradeoff(pareto_df, output_dir, logger)
+        if landscape_df is not None and not landscape_df.empty:
+            fig_multiobjective_heatmaps(pareto_df, landscape_df, output_dir, logger, calibration=calibration)
+    if landscape_df is not None and not landscape_df.empty:
+        fig_landscape_ensemble_disagreement(landscape_df, output_dir, logger)
+        if inv_models is not None:
+            fig_d_common_sensitivity_ea(
+                inv_models, "hard", inv_scaler_disp, inv_enc, inv_params,
+                landscape_df, output_dir, logger,
+            )
+
+    logger.info("\n[REPLOT] Figure regeneration complete.")
+
+
 def generate_optimizer_comparison_table(all_inverse_results: List[Dict], output_dir: str, logger: logging.Logger):
     """Summarize GP-BO inverse runs per target (single optimizer; dual *criteria*).
     
@@ -7820,7 +8035,8 @@ def generate_optimizer_comparison_table(all_inverse_results: List[Dict], output_
 # =============================================================================
 # REPRODUCIBILITY & Q1 PUBLICATION HELPERS
 # =============================================================================
-def log_runtime_environment(output_dir: str, logger: logging.Logger) -> Dict[str, Any]:
+def log_runtime_environment(output_dir: str, logger: logging.Logger,
+                              tag: str = "") -> Dict[str, Any]:
     """Record library versions and flags for reproducibility (supplementary / Zenodo)."""
     import platform
 
@@ -7867,10 +8083,11 @@ def log_runtime_environment(output_dir: str, logger: logging.Logger) -> Dict[str
         "CFG_n_ensemble": CFG.n_ensemble,
         "D_COMMON_mm": D_COMMON,
     }
-    path = os.path.join(output_dir, "runtime_environment.json")
+    fname = f"runtime_environment_{tag}.json" if tag else "runtime_environment.json"
+    path = os.path.join(output_dir, fname)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(info, f, indent=2, default=str)
-    logger.info("  Saved: runtime_environment.json")
+    logger.info(f"  Saved: {fname}")
     logger.info("  Runtime stack (see JSON for full strings):")
     logger.info(f"    Python {info['python_short']} | numpy {info['numpy']} | torch {info['torch']}")
     logger.info(f"    sklearn {info.get('sklearn')} | skopt={HAS_SKOPT}")
@@ -8038,7 +8255,7 @@ def fig_inverse_parity_uncertainty(
     if not t_ea:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(9.2, 4.4))
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
     for ax, tt, pp, ss, xlab, ylab in [
         (axes[0], t_ea, p_ea, s_ea, f"Target EA (J) @ {D_COMMON:.0f} mm", f"Predicted EA (J) @ {D_COMMON:.0f} mm"),
         (axes[1], t_ipf, p_ipf, s_ipf, "Target IPF (kN)", "Predicted IPF (kN)"),
@@ -8053,7 +8270,7 @@ def fig_inverse_parity_uncertainty(
         for i, lab in enumerate(labels):
             xi, yi = float(tt[i]), float(pp[i])
             if np.isfinite(xi) and np.isfinite(yi):
-                ax.annotate(lab, (xi, yi), textcoords="offset points", xytext=(4, 4), fontsize=7)
+                ax.annotate(lab, (xi, yi), textcoords="offset points", xytext=(4, 4), fontsize=12)
         ax.set_xlabel(xlab)
         ax.set_ylabel(ylab)
         ax.grid(True, alpha=0.28, linestyle="--")
@@ -8071,7 +8288,7 @@ def fig_inverse_parity_uncertainty(
     logger.info("  Saved: Fig_inverse_parity_uncertainty.png")
 
     # Second small figure: error vs recovered angle (interpolation stress)
-    fig2, ax2 = plt.subplots(figsize=(5.2, 4.0))
+    fig2, ax2 = plt.subplots(figsize=(8, 6))
     ang_a = np.asarray(ang, dtype=np.float64)
     err_pct = np.abs(np.asarray(p_ea, dtype=np.float64) - np.asarray(t_ea, dtype=np.float64)) / (
         np.asarray(t_ea, dtype=np.float64) + 1e-12
@@ -8082,7 +8299,7 @@ def fig_inverse_parity_uncertainty(
     for i, lab in enumerate(labels):
         if ok[i]:
             ax2.annotate(lab, (float(ang_a[i]), float(err_pct[i])),
-                         textcoords="offset points", xytext=(3, 3), fontsize=7)
+                         textcoords="offset points", xytext=(3, 3), fontsize=12)
     ax2.set_xlabel(r"Recovered angle $\theta$ (°)")
     ax2.set_ylabel("Relative EA error (%)")
     ax2.set_title("Inverse error vs optimised angle")
@@ -8105,7 +8322,7 @@ def fig_validation_error_maps(
     protocols = [p for p in ("random", "unseen") if p in dual_results and approach in dual_results[p]]
     if not protocols:
         return
-    fig, axes = plt.subplots(2, len(protocols), figsize=(5.2 * len(protocols), 7.2), squeeze=False)
+    fig, axes = plt.subplots(2, len(protocols), figsize=(5.5 * len(protocols), 8), squeeze=False)
     for j, protocol in enumerate(protocols):
         dr = dual_results[protocol]
         ens = evaluate_ensemble(
@@ -8189,7 +8406,7 @@ def fig_qq_load_residuals(
     r = r[np.isfinite(r)]
     if len(r) < 8:
         return
-    fig, ax = plt.subplots(figsize=(4.8, 4.6))
+    fig, ax = plt.subplots(figsize=(8, 6))
     if HAS_SCIPY:
         stats.probplot(r, dist="norm", plot=ax)
     else:
@@ -8203,7 +8420,7 @@ def fig_qq_load_residuals(
     ax.set_title(
         f"Q–Q (load residuals): unseen θ*={CFG.theta_star}°, "
         f"{MODEL_LABELS.get(approach, approach)}",
-        fontsize=10,
+        fontsize=14,
     )
     ax.grid(True, alpha=0.28, linestyle="--")
     add_subplot_label(ax, "a")
@@ -8229,7 +8446,7 @@ def fig_lc_classifier_diagnostics(
     if len(y) < 4 or len(np.unique(y)) < 2:
         logger.warning("  LC classifier diagnostics skipped: need both classes in CV labels.")
         return
-    fig, axes = plt.subplots(2, 2, figsize=(9.0, 7.2))
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
     ax00, ax01, ax10, ax11 = axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
     cm = confusion_matrix(y, pred, labels=[0, 1])
     im = ax00.imshow(cm, cmap="Blues")
@@ -8238,7 +8455,7 @@ def fig_lc_classifier_diagnostics(
     ax00.set_xticklabels(["Pred LC1", "Pred LC2"])
     ax00.set_yticklabels(["True LC1", "True LC2"])
     for (i, j), v in np.ndenumerate(cm):
-        ax00.text(j, i, int(v), ha="center", va="center", color="black", fontsize=11)
+        ax00.text(j, i, int(v), ha="center", va="center", color="black", fontsize=14)
     plt.colorbar(im, ax=ax00, fraction=0.046)
     ax00.set_title("CV confusion")
     fpr, tpr, _ = roc_curve(y, pr)
@@ -8247,7 +8464,7 @@ def fig_lc_classifier_diagnostics(
     ax01.set_xlabel("FPR")
     ax01.set_ylabel("TPR")
     ax01.set_title("ROC (score = P(LC2))")
-    ax01.legend(loc="lower right", fontsize=8)
+    ax01.legend(loc="lower right", fontsize=12)
     ax01.grid(True, alpha=0.25)
     prec, rec, _ = precision_recall_curve(y, pr)
     ap = average_precision_score(y, pr)
@@ -8257,7 +8474,7 @@ def fig_lc_classifier_diagnostics(
     ax10.set_title("Precision–recall (CV)")
     ax10.set_xlim(0, 1.02)
     ax10.set_ylim(0, 1.02)
-    ax10.legend(loc="upper right", fontsize=8)
+    ax10.legend(loc="upper right", fontsize=12)
     ax10.grid(True, alpha=0.25)
     n_bins = max(3, min(8, len(y) // 3))
     prob_true, prob_pred = calibration_curve(y, pr, n_bins=n_bins, strategy="uniform")
@@ -8301,7 +8518,7 @@ def fig_landscape_ensemble_disagreement(
     """EA_std and IPF_std across the dense surrogate landscape (ensemble disagreement)."""
     if landscape_df is None or len(landscape_df) < 10:
         return
-    fig, axes = plt.subplots(1, 2, figsize=(9.0, 4.2))
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
     for ax, col, ylab in zip(
         axes,
         ("EA_std", "IPF_std"),
@@ -8315,7 +8532,7 @@ def fig_landscape_ensemble_disagreement(
         ax.set_xlabel(r"Angle $\theta$ (°)")
         ax.set_ylabel(ylab)
         ax.set_title(f"Ensemble disagreement: {col.replace('_', ' ')}")
-        ax.legend(title="LC", fontsize=8)
+        ax.legend(title="LC", fontsize=12)
         ax.grid(True, alpha=0.26, linestyle="--")
     add_subplot_label(axes[0], "a")
     add_subplot_label(axes[1], "b")
@@ -8339,7 +8556,7 @@ def fig_d_common_sensitivity_ea(
         return
     lc_list = sorted(landscape_df["lc"].unique())
     sens_rows = []
-    fig, axes = plt.subplots(1, len(lc_list), figsize=(5.0 * len(lc_list), 4.2), squeeze=False)
+    fig, axes = plt.subplots(1, len(lc_list), figsize=(5.5 * len(lc_list), 4.5), squeeze=False)
     axes = axes.flatten()
     for ax, lc in zip(axes, lc_list):
         d_end = disp_end_mm(str(lc))
@@ -8363,7 +8580,7 @@ def fig_d_common_sensitivity_ea(
         ax.set_xlabel(r"Displacement endpoint $d$ (mm) for EA")
         ax.set_ylabel(r"EA (J) to $d$")
         ax.set_title(f"{lc} (d_end={d_end:.0f} mm)")
-        ax.legend(fontsize=7, loc="best")
+        ax.legend(fontsize=12, loc="best")
         ax.grid(True, alpha=0.26, linestyle="--")
     for ax, lab in zip(axes, "ab"):
         add_subplot_label(ax, lab)
@@ -8417,7 +8634,7 @@ def fig_inverse_vs_nearest_experimental_curve(
     n = len(panels)
     ncols = min(3, n)
     nrows = int(np.ceil(n / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(3.9 * ncols, 3.5 * nrows), squeeze=False)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.0 * ncols, 3.5 * nrows + 0.6), squeeze=False)
     axes_flat = axes.flatten()
     for idx, (tid, pred_angle, pred_lc) in enumerate(panels):
         ax = axes_flat[idx]
@@ -8435,7 +8652,7 @@ def fig_inverse_vs_nearest_experimental_curve(
         ax.set_xlabel("Displacement (mm)")
         ax.set_ylabel("Load (kN)")
         ax.set_title(f"Target {tid} ({pred_lc})")
-        ax.legend(fontsize=7)
+        ax.legend(fontsize=12)
         ax.grid(True, alpha=0.26, linestyle="--")
         add_subplot_label(ax, chr(ord("a") + idx))
     for j in range(len(panels), len(axes_flat)):
@@ -9057,11 +9274,54 @@ def run_pipeline(data_dir: str, output_dir: str):
     generate_compute_budget_summary(dual_results, all_inverse_results, output_dir, logger)
     generate_output_manifest(output_dir, logger)
 
+    # =========================================================================
+    # SAVE PIPELINE STATE (for offline figure regeneration via --replot_from)
+    # =========================================================================
+    logger.info("\n" + "=" * 70)
+    logger.info("SAVING PIPELINE STATE")
+    logger.info("=" * 70)
+    _local = locals()
+    pipeline_state = {
+        "dual_results":           dual_results,
+        "df_all":                 df_all,
+        "df_metrics":             df_metrics,
+        "df_ablation":            df_ablation,
+        "stat_tests":             stat_tests,
+        "calibration":            calibration,
+        "val_df_u":               val_df_u,
+        "scaler_disp_u":          scaler_disp_u,
+        "scaler_out_u":           scaler_out_u,
+        "enc_u":                  enc_u,
+        "params_u":               params_u,
+        "inv_models":             inv_models,
+        "inv_scaler_disp":        inv_scaler_disp,
+        "inv_scaler_out":         inv_scaler_out,
+        "inv_enc":                inv_enc,
+        "inv_params":             inv_params,
+        "inverse_targets":        inverse_targets,
+        "cal_ens":                cal_ens,
+        "clf_feat_scaler":        clf_feat_scaler,
+        "clf_diag":               clf_diag,
+        "all_inverse_results":    all_inverse_results,
+        "jacobian_results":       jacobian_results,
+        "pareto_df":              pareto_df,
+        "landscape_df":           landscape_df,
+        # The following are scoped inside `if CFG.run_robustness_analyses:`
+        # blocks and may not be defined; pull them via locals().get to avoid
+        # NameError when those blocks were skipped.
+        "baseline_results_u":     _local.get("baseline_results_u"),
+        "sensitivity_df_u":       _local.get("sensitivity_df_u"),
+        "physics_residuals":      _local.get("physics_residuals"),
+        "robust_inverse_results": _local.get("robust_inverse_results"),
+        "pareto_inverse_results": _local.get("pareto_inverse_results"),
+    }
+    save_pipeline_state(pipeline_state, output_dir, logger)
+
     logger.info("\n" + "=" * 80)
     logger.info("PIPELINE COMPLETE")
     logger.info(f"All results saved to: {output_dir}")
     logger.info("=" * 80)
-    
+
     return dual_results, all_inverse_results, pareto_df, stat_tests, df_ablation
 
 
@@ -9105,6 +9365,14 @@ def main():
         action="store_true",
         help="Skip Table_inverse_theta_member_spread.csv.",
     )
+    parser.add_argument(
+        "--replot_from",
+        type=str,
+        default=None,
+        help="Path to a pipeline_state.pkl saved by a previous run.  Skips all "
+             "training and analyses and only regenerates figures from the saved "
+             "state.  Use to iterate on figure styling/layout without retraining.",
+    )
     args = parser.parse_args()
 
     CFG.dry_run = bool(args.dry_run)
@@ -9117,14 +9385,1711 @@ def main():
     CFG.run_ablation = not args.no_ablation
     CFG.run_robustness_analyses = not args.no_robustness
     CFG.strict_paper_deps = bool(args.strict_paper)
-    CFG.force_cpu = args.force_cpu
+    # Replot mode: figures don't need GPU; pin to CPU so a state pickled from
+    # a CUDA run loads cleanly on a CPU-only box.
+    CFG.force_cpu = bool(args.force_cpu) or bool(args.replot_from)
     CFG.run_inverse_ablation = bool(args.inverse_ablation)
     CFG.run_inverse_stress_validation = not args.no_inverse_stress
     CFG.run_inverse_member_spread = not args.no_inverse_member_spread
     refresh_device()
-    
+
+    if args.replot_from:
+        os.makedirs(args.output_dir, exist_ok=True)
+        logger = setup_logging(args.output_dir)
+        logger.info("=" * 80)
+        logger.info("REPLOT MODE: regenerating figures from saved state")
+        logger.info(f"Source: {args.replot_from}")
+        logger.info(f"Output: {args.output_dir}")
+        logger.info("=" * 80)
+        state = load_pipeline_state(args.replot_from, logger)
+        replot_figures_from_state(state, args.output_dir, logger)
+        return
+
     run_pipeline(args.data_dir, args.output_dir)
 
 
+# =============================================================================
+# V_20 — FINAL PIPELINE: MULTI-PANEL FIGURES + THREE-BUNDLE STATE
+# =============================================================================
+# Everything below this divider is new for v_20.  The training, physics-loss,
+# classifier, GP-BO, and Pareto-sweep machinery above is reused verbatim from
+# v_19 — that code is regression-sensitive and well-validated.  v_20 changes:
+#   * Figure layer: 10 multi-panel manuscript figures (Fig01–Fig10) and 7
+#     single-panel appendix figures (FigA1–FigA7), each with no overlapping
+#     labels/legends/titles.
+#   * Pipeline orchestration: inverse + multi-objective focused.
+#   * State save/load: three independent torch.save bundles so forward (slow,
+#     hours) and analysis (fast, minutes) iterations can be uncoupled.
+#   * CLI: a smaller flag set with ``--replot_from <dir>`` that reads any
+#     subset of bundles that happen to be present.
+#
+# v_19's ``main()`` and ``run_pipeline()`` are preserved above but no longer
+# reachable via ``__main__``.  v_20's entry point is ``main_v20()``.
+# =============================================================================
+
+# Bundle filenames
+_V20_FORWARD_BUNDLE  = "forward_models.pt"
+_V20_INVERSE_BUNDLE  = "inverse_models.pt"
+_V20_ANALYSIS_BUNDLE = "analysis_results.pt"
+
+
+def _v20_save_bundle(state: Dict, output_dir: str, filename: str, logger: logging.Logger) -> str:
+    """Atomic ``torch.save`` (tmp + os.replace) — SLURM-preempt safe."""
+    path = os.path.join(output_dir, filename)
+    tmp = path + ".tmp"
+    torch.save(state, tmp, pickle_protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(tmp, path)
+    size_mb = os.path.getsize(path) / (1024.0 * 1024.0)
+    logger.info(f"  Saved {filename} ({size_mb:.1f} MB)")
+    return path
+
+
+def save_forward_bundle(state: Dict, output_dir: str, logger: logging.Logger) -> str:
+    """Trained forward ensembles + scalers + calibration."""
+    return _v20_save_bundle(state, output_dir, _V20_FORWARD_BUNDLE, logger)
+
+
+def save_inverse_bundle(state: Dict, output_dir: str, logger: logging.Logger) -> str:
+    """Full-data Hard-PINN + classifier ensemble + diagnostics."""
+    return _v20_save_bundle(state, output_dir, _V20_INVERSE_BUNDLE, logger)
+
+
+def save_analysis_bundle(state: Dict, output_dir: str, logger: logging.Logger) -> str:
+    """All non-NN analysis outputs (BO, Pareto, robustness, sensitivity)."""
+    return _v20_save_bundle(state, output_dir, _V20_ANALYSIS_BUNDLE, logger)
+
+
+def _v20_load_bundle(path: str, logger: Optional[logging.Logger] = None) -> Optional[Dict]:
+    """``torch.load`` with ``map_location='cpu'`` so CUDA-trained pickles
+    reload on CPU-only machines for figure regeneration.
+
+    Returns None if the bundle is missing OR fails to deserialize (rare but
+    possible if a writer was killed mid-write before ``os.replace`` completed,
+    leaving a corrupt ``.tmp`` that somehow ended up at the final path).
+    Replot mode degrades gracefully — corrupt bundles produce placeholders,
+    not stack traces.
+    """
+    if not os.path.exists(path):
+        return None
+    try:
+        state = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as e:
+        if logger is not None:
+            logger.warning(f"  Bundle load failed: {os.path.basename(path)} → {type(e).__name__}: {e}")
+        return None
+    if logger is not None:
+        size_mb = os.path.getsize(path) / (1024.0 * 1024.0)
+        logger.info(f"  Loaded {os.path.basename(path)} ({size_mb:.1f} MB)")
+    return state
+
+
+def load_forward_bundle(output_dir: str, logger: Optional[logging.Logger] = None) -> Optional[Dict]:
+    return _v20_load_bundle(os.path.join(output_dir, _V20_FORWARD_BUNDLE), logger)
+
+
+def load_inverse_bundle(output_dir: str, logger: Optional[logging.Logger] = None) -> Optional[Dict]:
+    return _v20_load_bundle(os.path.join(output_dir, _V20_INVERSE_BUNDLE), logger)
+
+
+def load_analysis_bundle(output_dir: str, logger: Optional[logging.Logger] = None) -> Optional[Dict]:
+    return _v20_load_bundle(os.path.join(output_dir, _V20_ANALYSIS_BUNDLE), logger)
+
+
+# -----------------------------------------------------------------------------
+# Figure helpers
+# -----------------------------------------------------------------------------
+def _v20_savefig(fig, output_dir: str, name: str, logger: logging.Logger, *, dpi: int = 600) -> str:
+    """Save and close ``fig``; log and return the absolute path."""
+    path = os.path.join(output_dir, name)
+    fig.savefig(path, dpi=dpi, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    logger.info(f"  Saved: {name}")
+    return path
+
+
+def _v20_panel_label(ax, label: str, *, x: float = -0.16, y: float = 1.06,
+                     fontsize: float = 16.0) -> None:
+    """Place a bold panel label '(a)' at axes-fraction coordinates.
+
+    Default ``x = -0.16`` keeps the label clear of the y-tick labels;
+    override per axes when needed (e.g. for axes without a y-axis label).
+    """
+    ax.text(x, y, f"({label})", transform=ax.transAxes,
+            fontsize=fontsize, fontweight='bold', va='top', ha='left',
+            clip_on=False)
+
+
+# =============================================================================
+# FIGURE 1 — Dataset overview (3 panels)
+# =============================================================================
+def figv20_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
+                               logger: logging.Logger) -> str:
+    """Fig. 1: representative experimental curves and target distributions."""
+    set_publication_style()
+    fig = plt.figure(figsize=(16, 5.2))
+    gs = fig.add_gridspec(1, 3, wspace=0.34, left=0.06, right=0.99,
+                          top=0.88, bottom=0.16)
+    ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
+
+    angles = sorted(df_all["Angle"].unique())
+    lcs    = sorted(df_all["LC"].unique())
+    cmap   = plt.get_cmap("viridis", max(1, len(angles)))
+
+    # (a) sample load–displacement curves
+    seen_lc = set()
+    for i, ang in enumerate(angles):
+        for lc in lcs:
+            sub = df_all[(df_all["Angle"] == ang) & (df_all["LC"] == lc)].sort_values("disp_mm")
+            if sub.empty:
+                continue
+            label = lc if lc not in seen_lc else None
+            seen_lc.add(lc)
+            ax_a.plot(sub["disp_mm"], sub["load_kN"], color=cmap(i),
+                      linestyle=LINESTYLES.get(lc, "-"), lw=1.4, alpha=0.85,
+                      label=label)
+    sm = matplotlib.cm.ScalarMappable(
+        norm=Normalize(vmin=min(angles), vmax=max(angles)), cmap=cmap)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax_a, fraction=0.05, pad=0.03)
+    cbar.set_label("Angle θ (°)")
+    ax_a.set_xlabel("Displacement d (mm)")
+    ax_a.set_ylabel("Load F (kN)")
+    ax_a.set_title("Experimental curves")
+    ax_a.grid(True, alpha=0.3)
+    ax_a.legend(loc="upper right", title="LC")
+    _v20_panel_label(ax_a, "a")
+
+    # (b, c) EA / IPF per (angle, LC)
+    df_metrics = compute_design_space_metrics(df_all, logger)
+    if "Angle" not in df_metrics.columns and df_metrics.index.name == "Angle":
+        df_metrics = df_metrics.reset_index()
+
+    # Color each LC distinctly; group boxes by angle so the x-axis has one
+    # readable tick per angle instead of 12 cramped (angle, LC) pairs at 45°.
+    _LC_BOX_COLORS = {"LC1": "#a8d5f7", "LC2": "#ffc999"}
+
+    def _grouped_box(ax, value_col: str, ylabel: str, title: str) -> None:
+        n_lc = max(1, len(lcs))
+        bw = 0.8 / n_lc                       # box width per LC
+        any_data = False
+        for i, ang in enumerate(angles):
+            for j, lc in enumerate(lcs):
+                sub = df_metrics[(df_metrics["Angle"] == ang) & (df_metrics["LC"] == lc)]
+                if sub.empty or value_col not in sub.columns:
+                    continue
+                data = sub[value_col].dropna().values
+                if data.size == 0:
+                    continue
+                pos = i + (j - (n_lc - 1) / 2.0) * bw
+                bp = ax.boxplot([data], positions=[pos], widths=bw * 0.85,
+                                patch_artist=True,
+                                medianprops=dict(color="red", lw=1.4))
+                for patch in bp["boxes"]:
+                    patch.set_facecolor(_LC_BOX_COLORS.get(lc, "#cccccc"))
+                    patch.set_edgecolor("black")
+                any_data = True
+        if not any_data:
+            ax.text(0.5, 0.5, "no data", ha="center", va="center",
+                    transform=ax.transAxes)
+            return
+        ax.set_xticks(np.arange(len(angles)),
+                      [f"{a:.0f}°" for a in angles])
+        ax.set_xlim(-0.5, len(angles) - 0.5)
+        ax.set_xlabel(r"Angle $\theta$ (°)")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True, axis="y", alpha=0.3)
+        # LC proxy legend
+        handles = [mpatches.Patch(facecolor=_LC_BOX_COLORS[lc],
+                                   edgecolor="black", label=lc)
+                   for lc in lcs if lc in _LC_BOX_COLORS]
+        if handles:
+            ax.legend(handles=handles, title="LC", loc="upper left",
+                      fontsize=10, framealpha=0.92)
+
+    _grouped_box(ax_b, "EA",  "Energy absorbed EA (J)",     "EA distribution")
+    _grouped_box(ax_c, "IPF", "Initial peak force IPF (kN)", "IPF distribution")
+    _v20_panel_label(ax_b, "b")
+    _v20_panel_label(ax_c, "c")
+
+    fig.suptitle("Dataset overview", fontweight="bold", y=0.99)
+    apply_fig_style(fig)
+    return _v20_savefig(fig, output_dir, "Fig01_dataset_overview.png", logger)
+
+
+# =============================================================================
+# FIGURE 2 — Forward parity across protocols (4 panels)
+# =============================================================================
+def figv20_02_forward_parity(dual_results: Dict, output_dir: str,
+                             logger: logging.Logger) -> str:
+    """Fig. 2: predicted vs ground-truth scatter for load and energy under
+    both evaluation protocols (random 80/20 and unseen θ=60°)."""
+    set_publication_style()
+    fig = plt.figure(figsize=(13, 11))
+    gs  = fig.add_gridspec(2, 2, wspace=0.28, hspace=0.36,
+                           left=0.08, right=0.98, top=0.92, bottom=0.10)
+    axes = [[fig.add_subplot(gs[r, c]) for c in range(2)] for r in range(2)]
+
+    PROTOS    = [("random", "Random 80/20"), ("unseen", r"Unseen θ=60°")]
+    APPROACHES = ["ddns", "soft", "hard"]
+    CHANNELS   = [("load", "Load (kN)"), ("energy", "Energy (J)")]
+
+    legend_handles: List = []
+    for r, (proto, plabel) in enumerate(PROTOS):
+        if proto not in dual_results:
+            continue
+        for c, (ch_key, ch_label) in enumerate(CHANNELS):
+            ax = axes[r][c]
+            for app in APPROACHES:
+                if app not in dual_results[proto]:
+                    continue
+                m = dual_results[proto][app].get("metrics", {})
+                preds = m.get("predictions", {})
+                trues = m.get("true_values", {})
+                yt = np.asarray(trues.get(ch_key, []))
+                yp = np.asarray(preds.get(ch_key, []))
+                if yt.size == 0 or yp.size == 0:
+                    continue
+                r2 = r2_safe(yt, yp)
+                h = ax.scatter(yt, yp, s=12, alpha=0.5, color=COLORS[app],
+                               edgecolors="none",
+                               label=f"{MODEL_LABELS[app]}  R²={r2:.3f}")
+                if r == 0 and c == 0:
+                    legend_handles.append(h)
+            # parity line
+            lo = min(ax.get_xlim()[0], ax.get_ylim()[0])
+            hi = max(ax.get_xlim()[1], ax.get_ylim()[1])
+            ax.plot([lo, hi], [lo, hi], "k--", lw=0.9, alpha=0.6, zorder=0)
+            ax.set_xlim(lo, hi)
+            ax.set_ylim(lo, hi)
+            ax.set_aspect("equal", adjustable="box")
+            ax.set_xlabel(f"True {ch_label}")
+            ax.set_ylabel(f"Predicted {ch_label}")
+            ax.set_title(f"{plabel} — {ch_label.split(' ')[0]}")
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="upper left", framealpha=0.95)
+            _v20_panel_label(ax, "abcd"[2 * r + c])
+
+    fig.suptitle("Forward-model accuracy across evaluation protocols",
+                 fontweight="bold", y=0.97)
+    apply_fig_style(fig)
+    return _v20_savefig(fig, output_dir, "Fig02_forward_parity.png", logger)
+
+
+# =============================================================================
+# FIGURE 3 — Unseen-angle generalization with conformal bands (4 panels)
+# =============================================================================
+def figv20_03_unseen_generalization(dual_results: Dict, df_all: pd.DataFrame,
+                                    output_dir: str, logger: logging.Logger,
+                                    calibration: Optional[Dict] = None) -> str:
+    """Fig. 3: predicted load and energy curves at unseen θ=60° for both LCs,
+    ensemble mean ± 2σ (conformally calibrated)."""
+    set_publication_style()
+    proto = "unseen"
+    if proto not in dual_results:
+        logger.warning("  Fig. 3 skipped — no unseen-protocol results.")
+        return ""
+    res = dual_results[proto]
+
+    fig = plt.figure(figsize=(14, 9))
+    gs  = fig.add_gridspec(2, 2, wspace=0.26, hspace=0.34,
+                           left=0.08, right=0.98, top=0.91, bottom=0.12)
+    axes = [[fig.add_subplot(gs[r, c]) for c in range(2)] for r in range(2)]
+    CHANNELS = [("load_kN", "Load (kN)"), ("energy_J", "Energy (J)")]
+    lcs = sorted(df_all["LC"].unique())[:2]
+
+    legend_handles, legend_labels = [], []
+    seen_legend = False
+    for r, lc in enumerate(lcs):
+        d_end = disp_end_mm(lc)
+        n_steps = get_n_steps_curve(lc)
+        disps = np.linspace(0.0, d_end, n_steps)
+        exp = df_all[(df_all["Angle"] == CFG.theta_star) & (df_all["LC"] == lc)].sort_values("disp_mm")
+        for c, (col, ylab) in enumerate(CHANNELS):
+            ax = axes[r][c]
+            if not exp.empty:
+                h_exp, = ax.plot(exp["disp_mm"], exp[col], color="black", lw=2.0,
+                                 label="Experiment")
+                if not seen_legend:
+                    legend_handles.append(h_exp); legend_labels.append("Experiment")
+            for app in ["ddns", "soft", "hard"]:
+                if app not in res:
+                    continue
+                models = res[app].get("models")
+                params = res.get("params")
+                scaler_disp = res.get("scaler_disp")
+                enc = res.get("enc")
+                if models is None or params is None or scaler_disp is None or enc is None:
+                    continue
+                Fm, Em, Fs, Es = predict_curve_ensemble(
+                    models, app, CFG.theta_star, lc, disps, scaler_disp, enc, params)
+                cf_F, cf_E = 1.0, 1.0
+                if calibration and proto in calibration and app in calibration[proto]:
+                    cf_F = float(calibration[proto][app].get("conformal_factor", 1.0))
+                    cf_E = float(calibration[proto][app].get("energy_conformal_factor", 1.0))
+                y_mean = Fm if c == 0 else Em
+                y_std  = (Fs if c == 0 else Es) * (cf_F if c == 0 else cf_E)
+                line, = ax.plot(disps, y_mean, color=COLORS[app],
+                                linestyle=LINESTYLES[app], lw=1.4,
+                                label=MODEL_LABELS[app])
+                ax.fill_between(disps, y_mean - 2 * y_std, y_mean + 2 * y_std,
+                                color=COLORS[app], alpha=0.18)
+                if not seen_legend:
+                    legend_handles.append(line); legend_labels.append(MODEL_LABELS[app])
+            seen_legend = True
+            ax.set_xlim(0, d_end)
+            ax.set_xlabel("Displacement d (mm)")
+            ax.set_ylabel(ylab)
+            ax.set_title(f"{lc} — {ylab.split(' ')[0]} (θ=60°)")
+            ax.grid(True, alpha=0.3)
+            _v20_panel_label(ax, "abcd"[2 * r + c])
+
+    # shared figure-level legend (avoids per-axes legend overlap)
+    fig.legend(legend_handles, legend_labels, loc="lower center", ncol=4,
+               bbox_to_anchor=(0.5, 0.01), frameon=True, framealpha=0.95)
+    fig.suptitle(r"Generalization to unseen angle $\theta=60°$  (ensemble mean ± conformal 2σ)",
+                 fontweight="bold", y=0.97)
+    apply_fig_style(fig)
+    return _v20_savefig(fig, output_dir, "Fig03_unseen_generalization.png", logger)
+
+
+# =============================================================================
+# FIGURE 4 — Physics consistency + uncertainty calibration (3 panels)
+# =============================================================================
+def figv20_04_physics_calibration(dual_results: Dict, calibration: Dict,
+                                  val_df_u: pd.DataFrame, scaler_disp_u,
+                                  enc_u, params_u: ScalingParams,
+                                  output_dir: str,
+                                  logger: logging.Logger) -> str:
+    """Fig. 4: (a) |dE/dd − F| residual histogram per approach,
+    (b) reliability diagram raw vs conformal coverage,
+    (c) Q–Q plot of standardized load residuals.
+    """
+    set_publication_style()
+    fig = plt.figure(figsize=(16, 5.2))
+    gs  = fig.add_gridspec(1, 3, wspace=0.32, left=0.06, right=0.99,
+                           top=0.88, bottom=0.16)
+    ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
+
+    # (a) residual histogram |dE/dd - F| per approach (unseen protocol)
+    proto = "unseen"
+    res = dual_results.get(proto, {})
+    bins = np.logspace(-4, 2, 50)
+    for app in ["ddns", "soft", "hard"]:
+        if app not in res:
+            continue
+        models = res[app].get("models")
+        if models is None:
+            continue
+        Xv = to_tensor(build_features(val_df_u, scaler_disp_u, enc_u))
+        residuals = []
+        for m in models:
+            Xv_g = Xv.detach().clone().requires_grad_(True)
+            with torch.enable_grad():
+                pv = m(Xv_g)
+                if app == "hard":
+                    E_n = pv[:, 0:1]
+                    dE = torch.autograd.grad(E_n.sum(), Xv_g, create_graph=False)[0]
+                    F_phys = (dE[:, U_COL:U_COL+1] * params_u.grad_factor).detach().cpu().numpy().reshape(-1)
+                    residuals.append(np.zeros_like(F_phys))  # by construction
+                else:
+                    F_n = pv[:, 0:1]; E_n = pv[:, 1:2]
+                    res_t = compute_physics_residual(Xv_g, F_n, E_n, params_u)
+                    residuals.append(np.abs(res_t.detach().cpu().numpy().reshape(-1)))
+        if not residuals:
+            continue
+        all_res = np.concatenate(residuals)
+        all_res = np.clip(all_res, 1e-4, None)
+        ax_a.hist(all_res, bins=bins, alpha=0.55, color=COLORS[app],
+                  label=MODEL_LABELS[app], log=True, edgecolor="black", lw=0.4)
+    ax_a.set_xscale("log")
+    ax_a.set_xlabel(r"$|\,\partial E/\partial d - F\,|$ (kN)")
+    ax_a.set_ylabel("Count (log)")
+    ax_a.set_title("Physics residual")
+    ax_a.legend(loc="upper right")
+    ax_a.grid(True, alpha=0.3)
+    _v20_panel_label(ax_a, "a")
+
+    # (b) reliability diagram: raw vs conformal-corrected coverage at fixed
+    # sigma levels (compute_uncertainty_calibration stores arrays for
+    # σ ∈ {0.5, 1.0, 1.5, 2.0} → nominal coverage from N(0,1).
+    sigma_levels = np.array([0.5, 1.0, 1.5, 2.0])
+    if HAS_SCIPY:
+        from scipy.stats import norm as _norm
+        nominal = 2 * _norm.cdf(sigma_levels) - 1
+    else:
+        nominal = np.array([0.383, 0.683, 0.866, 0.954])
+    drew_b_data = False
+    if calibration and proto in calibration:
+        for app in ["ddns", "soft", "hard"]:
+            cal = calibration[proto].get(app, {})
+            cov_raw = cal.get("observed_coverage")
+            cov_cal = cal.get("corrected_coverage")
+            if cov_raw is None or cov_cal is None:
+                continue
+            cov_raw = np.asarray(cov_raw); cov_cal = np.asarray(cov_cal)
+            n = min(nominal.size, cov_raw.size, cov_cal.size)
+            if n == 0:
+                continue
+            # No per-line label — a custom 5-entry legend (3 colors + 2 linestyles)
+            # is built below; cleaner than 6 verbose "Model (raw)/(conformal)" entries.
+            ax_b.plot(nominal[:n], cov_raw[:n], marker="o", linestyle="--",
+                      color=COLORS[app], lw=1.0, ms=6)
+            ax_b.plot(nominal[:n], cov_cal[:n], marker="s", linestyle="-",
+                      color=COLORS[app], lw=1.4, ms=6)
+            drew_b_data = True
+    ax_b.plot([0, 1], [0, 1], "k:", lw=0.8, alpha=0.7)
+    ax_b.set_xlim(0, 1); ax_b.set_ylim(0, 1)
+    ax_b.set_aspect("equal", adjustable="box")
+    ax_b.set_xlabel("Nominal coverage")
+    ax_b.set_ylabel("Empirical coverage")
+    ax_b.set_title("Reliability diagram")
+    # Drop the x-axis "0.0" tick so it doesn't collide with the y-axis "0.0"
+    # at the origin under bold-Arial sizing.  Keep the rest of the grid intact.
+    ax_b.set_xticks([0.2, 0.4, 0.6, 0.8, 1.0])
+    ax_b.set_yticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    if drew_b_data:
+        # Compact 5-entry legend: 3 model colors + 2 linestyle markers.
+        legend_items = [
+            Line2D([0], [0], color=COLORS[a], lw=2.0, label=MODEL_LABELS[a])
+            for a in ["ddns", "soft", "hard"]
+        ]
+        legend_items.append(Line2D([0], [0], color="0.4", linestyle="--",
+                                   marker="o", lw=1.0, ms=6, label="raw"))
+        legend_items.append(Line2D([0], [0], color="0.4", linestyle="-",
+                                   marker="s", lw=1.4, ms=6, label="conformal"))
+        ax_b.legend(handles=legend_items, loc="upper left", fontsize=10,
+                    ncol=1, framealpha=0.92, borderpad=0.5,
+                    handlelength=1.6, labelspacing=0.35)
+    ax_b.grid(True, alpha=0.3)
+    _v20_panel_label(ax_b, "b")
+
+    # (c) Q–Q plot of standardized load residuals (Hard-PINN, unseen)
+    if "hard" in res:
+        m = res["hard"].get("metrics", {})
+        yt = np.asarray(m.get("true_values", {}).get("load", []))
+        yp = np.asarray(m.get("predictions", {}).get("load", []))
+        if yt.size > 0 and yp.size > 0:
+            r = yt - yp
+            r_std = (r - r.mean()) / max(r.std(), 1e-9)
+            r_sorted = np.sort(r_std)
+            qs = np.linspace(0, 1, len(r_sorted) + 2)[1:-1]
+            theo = np.sqrt(2) * np.array([
+                stats.norm.ppf(q) if HAS_SCIPY else (
+                    -1.96 if q < 0.025 else (1.96 if q > 0.975 else 0)
+                )
+                for q in qs
+            ]) if HAS_SCIPY else np.zeros_like(r_sorted)
+            if HAS_SCIPY:
+                from scipy.stats import norm as _norm
+                theo = _norm.ppf(qs)
+            ax_c.scatter(theo, r_sorted, s=14, color=COLORS["hard"], alpha=0.7,
+                         label="Hard-PINN")
+            mn, mx = float(np.min(theo)), float(np.max(theo))
+            ax_c.plot([mn, mx], [mn, mx], "k--", lw=0.9, alpha=0.6,
+                      label="N(0,1)")
+    ax_c.set_xlabel("Theoretical quantiles")
+    ax_c.set_ylabel("Standardized residual")
+    ax_c.set_title("Q–Q load residuals (unseen)")
+    ax_c.legend(loc="upper left")
+    ax_c.grid(True, alpha=0.3)
+    _v20_panel_label(ax_c, "c")
+
+    fig.suptitle("Physics consistency and uncertainty calibration",
+                 fontweight="bold", y=0.99)
+    apply_fig_style(fig)
+    return _v20_savefig(fig, output_dir, "Fig04_physics_calibration.png", logger)
+
+
+# =============================================================================
+# FIGURE 5 — Inverse-problem ill-posedness (3 panels)
+# =============================================================================
+def figv20_05_ill_posedness(jacobian_results: Optional[Dict],
+                            all_inverse_results: Optional[List[Dict]],
+                            landscape_df: Optional[pd.DataFrame],
+                            output_dir: str, logger: logging.Logger) -> str:
+    """Fig. 5: (a) forward-map Jacobian ∂{EA, IPF}/∂θ per LC,
+    (b) GP-BO objective landscape J(θ, LC) for one inverse target
+        showing local minima,
+    (c) ensemble-disagreement σ(θ, LC) heat-map.
+    """
+    set_publication_style()
+    fig = plt.figure(figsize=(16, 5.4))
+    gs  = fig.add_gridspec(1, 3, wspace=0.32, left=0.06, right=0.99,
+                           top=0.88, bottom=0.16)
+    ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
+
+    # (a) Forward Jacobian — dEA/dθ + dIPF/dθ per LC
+    if jacobian_results:
+        theta = np.asarray(jacobian_results.get("theta_grid", []))
+        for lc in sorted({k.split("_")[-1] for k in jacobian_results
+                          if k.startswith("dEA_dtheta_")}):
+            dea = np.asarray(jacobian_results.get(f"dEA_dtheta_{lc}", []))
+            if theta.size == 0 or dea.size == 0:
+                continue
+            ax_a.plot(theta, dea, color=COLORS.get(lc, "gray"),
+                      linestyle=LINESTYLES.get(lc, "-"), lw=1.6,
+                      label=f"dEA/dθ ({lc})")
+    ax_a.axhline(0, color="0.4", lw=0.6, linestyle="--")
+    ax_a.set_xlabel(r"Angle $\theta$ (°)")
+    ax_a.set_ylabel(r"$\partial$EA / $\partial\theta$  (J/°)")
+    ax_a.set_title("Forward Jacobian sensitivity")
+    ax_a.legend(loc="best")
+    ax_a.grid(True, alpha=0.3)
+    _v20_panel_label(ax_a, "a")
+
+    # (b) GP-BO objective landscape for one target — pick first with landscape
+    drew_b = False
+    if all_inverse_results:
+        for res in all_inverse_results:
+            sl = res.get("solution_landscape")
+            if sl is None:
+                continue
+            tid = res.get("target_info", {}).get("id", "T?")
+            t = np.asarray(sl.get("theta_grid", []))
+            if t.size == 0:
+                continue
+            # Derive LC list from keys: "J_LC1", "J_LC2", ...
+            lcs_in = [k[2:] for k in sl.keys() if k.startswith("J_")]
+            for lc in lcs_in:
+                j = np.asarray(sl[f"J_{lc}"])
+                if j.size != t.size:
+                    continue
+                ax_b.plot(t, j, color=COLORS.get(lc, "gray"),
+                          linestyle=LINESTYLES.get(lc, "-"), lw=1.4,
+                          label=f"{tid} • {lc}")
+                # mark stored local minima (compute_solution_landscape persists them)
+                local_minima = sl.get(f"local_minima_{lc}", []) or []
+                if local_minima:
+                    lm_t = [m["theta"] for m in local_minima]
+                    lm_j = [m["J"] for m in local_minima]
+                    ax_b.scatter(lm_t, lm_j, color=COLORS.get(lc, "gray"),
+                                 marker="v", s=44, edgecolors="black", lw=0.5,
+                                 zorder=5)
+            drew_b = True
+            break
+    if not drew_b:
+        ax_b.text(0.5, 0.5, "no landscape data", ha="center", va="center",
+                  transform=ax_b.transAxes, fontsize=12)
+    ax_b.set_xlabel(r"Angle $\theta$ (°)")
+    ax_b.set_ylabel(r"BO objective $J(\theta, LC)$")
+    ax_b.set_title("Objective landscape (one target)")
+    if ax_b.get_legend_handles_labels()[0]:
+        ax_b.legend(loc="best", fontsize=10)
+    ax_b.grid(True, alpha=0.3)
+    _v20_panel_label(ax_b, "b")
+
+    # (c) Ensemble disagreement σ(θ, LC) — std across members from landscape_df
+    if landscape_df is not None and not landscape_df.empty:
+        for lc in sorted(landscape_df["lc"].unique()):
+            sub = landscape_df[landscape_df["lc"] == lc].sort_values("angle")
+            for col, ylab in [("EA_std", "σ(EA)"), ("IPF_std", "σ(IPF)")]:
+                if col not in sub.columns:
+                    continue
+                ax_c.plot(sub["angle"], sub[col], color=COLORS.get(lc, "gray"),
+                          linestyle="-" if "EA" in col else "--", lw=1.4,
+                          label=f"{ylab} {lc}")
+    ax_c.set_xlabel(r"Angle $\theta$ (°)")
+    ax_c.set_ylabel("Ensemble disagreement (std)")
+    ax_c.set_title("Forward ensemble σ across (θ, LC)")
+    ax_c.legend(loc="best", fontsize=10)
+    ax_c.grid(True, alpha=0.3)
+    _v20_panel_label(ax_c, "c")
+
+    fig.suptitle("Inverse problem is ill-posed — forward sensitivity, multimodal landscape, ensemble disagreement",
+                 fontweight="bold", y=0.99)
+    apply_fig_style(fig)
+    return _v20_savefig(fig, output_dir, "Fig05_ill_posedness.png", logger)
+
+
+# =============================================================================
+# FIGURE 6 — LC plausibility classifier diagnostics (4 panels)
+# =============================================================================
+def figv20_06_classifier(clf_diag: Dict, output_dir: str,
+                         logger: logging.Logger) -> str:
+    """Fig. 6: confusion matrix, ROC, PR, and reliability for the calibrated
+    soft-voting LC classifier (LOO cross-validation)."""
+    set_publication_style()
+    if not clf_diag or "cv_y" not in clf_diag:
+        logger.warning("  Fig. 6 skipped — classifier diagnostics absent.")
+        return ""
+    y    = np.asarray(clf_diag["cv_y"], dtype=int)
+    pred = np.asarray(clf_diag["cv_pred"], dtype=int)
+    pr   = np.asarray(clf_diag["cv_prob_lc2"], dtype=np.float64)
+    if len(y) < 4 or np.unique(y).size < 2:
+        logger.warning("  Fig. 6 skipped — need both classes in CV labels.")
+        return ""
+
+    fig = plt.figure(figsize=(13, 11))
+    gs  = fig.add_gridspec(2, 2, wspace=0.28, hspace=0.34,
+                           left=0.08, right=0.98, top=0.92, bottom=0.08)
+    ax_a = fig.add_subplot(gs[0, 0])
+    ax_b = fig.add_subplot(gs[0, 1])
+    ax_c = fig.add_subplot(gs[1, 0])
+    ax_d = fig.add_subplot(gs[1, 1])
+
+    # (a) confusion matrix
+    cm = confusion_matrix(y, pred, labels=[0, 1])
+    im = ax_a.imshow(cm, cmap="Blues")
+    ax_a.set_xticks([0, 1], ["Pred LC1", "Pred LC2"])
+    ax_a.set_yticks([0, 1], ["True LC1", "True LC2"])
+    for (i, j), v in np.ndenumerate(cm):
+        ax_a.text(j, i, int(v), ha="center", va="center",
+                  color="black" if cm[i, j] < cm.max() * 0.6 else "white",
+                  fontsize=14)
+    plt.colorbar(im, ax=ax_a, fraction=0.046)
+    ax_a.set_title("Confusion matrix (LOO)")
+    _v20_panel_label(ax_a, "a")
+
+    # (b) ROC
+    fpr, tpr, _ = roc_curve(y, pr)
+    auc_v = auc(fpr, tpr)
+    ax_b.plot(fpr, tpr, color=COLORS.get("hard", "#0072B2"), lw=2.0,
+              label=f"AUC = {auc_v:.3f}")
+    ax_b.plot([0, 1], [0, 1], "k--", alpha=0.6)
+    ax_b.set_xlabel("False positive rate")
+    ax_b.set_ylabel("True positive rate")
+    ax_b.set_title("ROC")
+    ax_b.legend(loc="lower right")
+    ax_b.grid(True, alpha=0.3)
+    _v20_panel_label(ax_b, "b")
+
+    # (c) PR
+    prec, rec, _ = precision_recall_curve(y, pr)
+    ap = average_precision_score(y, pr)
+    ax_c.plot(rec, prec, color=COLORS.get("soft", "#4DBBD5"), lw=2.0,
+              label=f"AP = {ap:.3f}")
+    ax_c.set_xlim(0, 1.02); ax_c.set_ylim(0, 1.02)
+    ax_c.set_xlabel("Recall (LC2)")
+    ax_c.set_ylabel("Precision (LC2)")
+    ax_c.set_title("Precision–recall")
+    ax_c.legend(loc="lower left")
+    ax_c.grid(True, alpha=0.3)
+    _v20_panel_label(ax_c, "c")
+
+    # (d) calibration / reliability
+    n_bins = max(3, min(8, len(y) // 3))
+    prob_true, prob_pred = calibration_curve(y, pr, n_bins=n_bins, strategy="uniform")
+    ax_d.plot(prob_pred, prob_true, "s-",
+              color=COLORS.get("ddns", "#E69F00"), lw=1.6, ms=7,
+              label="Soft-voting")
+    ax_d.plot([0, 1], [0, 1], "k--", alpha=0.6, label="Perfect")
+    ax_d.set_xlabel("Mean predicted P(LC2)")
+    ax_d.set_ylabel("Empirical fraction LC2")
+    ax_d.set_title("Calibration")
+    ax_d.legend(loc="upper left")
+    ax_d.grid(True, alpha=0.3)
+    _v20_panel_label(ax_d, "d")
+
+    fig.suptitle("Loading-condition plausibility classifier (LOO diagnostics)",
+                 fontweight="bold", y=0.97)
+    apply_fig_style(fig)
+    return _v20_savefig(fig, output_dir, "Fig06_classifier_diagnostics.png", logger)
+
+
+# =============================================================================
+# FIGURE 7 — GP-BO inverse design (4 panels)
+# =============================================================================
+def figv20_07_inverse_design(all_inverse_results: List[Dict],
+                             df_all: pd.DataFrame,
+                             inv_models: List[nn.Module],
+                             inv_scaler_disp, inv_enc, inv_params,
+                             robust_inverse_results: Optional[List[Dict]],
+                             output_dir: str, logger: logging.Logger) -> str:
+    """Fig. 7: (a) GP-BO best-objective convergence per target,
+    (b) predicted vs target EA/IPF parity with uncertainty,
+    (c) recovered design's load curve vs nearest experimental curve,
+    (d) multi-seed θ stability boxplot.
+    """
+    set_publication_style()
+    if not all_inverse_results:
+        logger.warning("  Fig. 7 skipped — no inverse results.")
+        return ""
+
+    fig = plt.figure(figsize=(14.5, 10.5))
+    gs  = fig.add_gridspec(2, 2, wspace=0.30, hspace=0.36,
+                           left=0.08, right=0.98, top=0.92, bottom=0.10)
+    ax_a = fig.add_subplot(gs[0, 0])
+    ax_b = fig.add_subplot(gs[0, 1])
+    ax_c = fig.add_subplot(gs[1, 0])
+    ax_d = fig.add_subplot(gs[1, 1])
+
+    cmap = plt.get_cmap("tab10", max(2, len(all_inverse_results)))
+
+    # (a) convergence traces.  ``run_inverse_design`` stores per-LC GP-BO
+    # results under ``res["gpbo"][lc]``; each contains a ``func_vals`` array
+    # of objective values per evaluation.  We plot the running-min trace.
+    for i, res in enumerate(all_inverse_results):
+        tid = res.get("target_info", {}).get("id", f"T{i+1}")
+        gp_per_lc = res.get("gpbo", {})
+        if not isinstance(gp_per_lc, dict):
+            continue
+        first_for_target = True
+        for lc_key, lc_res in gp_per_lc.items():
+            if not isinstance(lc_res, dict):
+                continue
+            y = np.asarray(lc_res.get("func_vals", []), dtype=float)
+            if y.size == 0:
+                continue
+            best = np.minimum.accumulate(y)
+            ax_a.plot(np.arange(1, best.size + 1), best,
+                      color=cmap(i),
+                      linestyle="-" if lc_key == "LC1" else "--",
+                      lw=1.2, alpha=0.85,
+                      label=tid if first_for_target else None)
+            first_for_target = False
+    ax_a.set_xlabel("Evaluation #")
+    ax_a.set_ylabel("Best objective J")
+    ax_a.set_title("GP-BO convergence per target")
+    ax_a.set_yscale("log")
+    ax_a.legend(loc="upper right", fontsize=10, ncol=2)
+    ax_a.grid(True, which="both", alpha=0.3)
+    _v20_panel_label(ax_a, "a")
+
+    # (b) predicted vs target parity (EA, IPF)
+    tgt_EA, pred_EA, std_EA = [], [], []
+    tgt_IPF, pred_IPF, std_IPF = [], [], []
+    for res in all_inverse_results:
+        info = res.get("target_info", {})
+        best = res.get("gpbo_best", {})
+        if not best:
+            continue
+        tgt_EA.append(info.get("EA", float("nan")))
+        tgt_IPF.append(info.get("IPF", float("nan")))
+        pred_EA.append(best.get("pred_ea", float("nan")))
+        pred_IPF.append(best.get("pred_ipf", float("nan")))
+        std_EA.append(best.get("pred_ea_std", 0.0))
+        std_IPF.append(best.get("pred_ipf_std", 0.0))
+    if tgt_EA:
+        ax_b.errorbar(tgt_EA, pred_EA, yerr=2*np.array(std_EA),
+                      fmt="o", color="#0072B2", capsize=3, label="EA (J)",
+                      ms=8, alpha=0.85)
+        ax_b.errorbar(tgt_IPF, pred_IPF, yerr=2*np.array(std_IPF),
+                      fmt="s", color="#D55E00", capsize=3, label="IPF (kN)",
+                      ms=8, alpha=0.85)
+        all_v = np.concatenate([np.asarray(tgt_EA + pred_EA + tgt_IPF + pred_IPF, dtype=float)])
+        all_v = all_v[np.isfinite(all_v)]
+        if all_v.size:
+            mn, mx = float(all_v.min()), float(all_v.max())
+            pad = 0.05 * (mx - mn + 1e-9)
+            ax_b.plot([mn - pad, mx + pad], [mn - pad, mx + pad], "k--",
+                      lw=0.9, alpha=0.6)
+            ax_b.set_xlim(mn - pad, mx + pad)
+            ax_b.set_ylim(mn - pad, mx + pad)
+    ax_b.set_xlabel("Target value")
+    ax_b.set_ylabel("Recovered value (mean ± 2σ)")
+    ax_b.set_title("Inverse parity (EA, IPF)")
+    ax_b.legend(loc="upper left")
+    ax_b.grid(True, alpha=0.3)
+    _v20_panel_label(ax_b, "b")
+
+    # (c) recovered curve vs nearest experimental
+    drew_c = False
+    for i, res in enumerate(all_inverse_results[:3]):  # limit to 3 for legibility
+        info = res.get("target_info", {})
+        best = res.get("gpbo_best", {})
+        if not best:
+            continue
+        ang  = float(best.get("x_best", float("nan")))
+        lc   = best.get("lc", best.get("best_lc", ""))
+        if not lc or not np.isfinite(ang):
+            continue
+        d_end = disp_end_mm(lc)
+        disps = np.linspace(0.0, d_end, get_n_steps_curve(lc))
+        Fm, _, _, _ = predict_curve_ensemble(
+            inv_models, "hard", ang, lc, disps, inv_scaler_disp, inv_enc, inv_params)
+        ax_c.plot(disps, Fm, color=cmap(i), lw=1.6,
+                  label=f"{info.get('id', f'T{i+1}')}: pred θ={ang:.1f}° {lc}")
+        # nearest experimental angle for the same LC
+        exp_ang = sorted(df_all[df_all["LC"] == lc]["Angle"].unique())
+        if exp_ang:
+            nearest = exp_ang[int(np.argmin([abs(a - ang) for a in exp_ang]))]
+            sub = df_all[(df_all["LC"] == lc) & (df_all["Angle"] == nearest)].sort_values("disp_mm")
+            if not sub.empty:
+                ax_c.plot(sub["disp_mm"], sub["load_kN"],
+                          color=cmap(i), linestyle="--", lw=1.0, alpha=0.6,
+                          label=f"  exp θ={nearest:.0f}° {lc}")
+        drew_c = True
+    if not drew_c:
+        ax_c.text(0.5, 0.5, "no recovered curves", ha="center", va="center",
+                  transform=ax_c.transAxes, fontsize=12)
+    ax_c.set_xlabel("Displacement d (mm)")
+    ax_c.set_ylabel("Load F (kN)")
+    ax_c.set_title("Recovered curves vs nearest experiment")
+    ax_c.legend(loc="best", fontsize=9, ncol=1)
+    ax_c.grid(True, alpha=0.3)
+    _v20_panel_label(ax_c, "c")
+
+    # (d) multi-seed θ stability — ``run_inverse_design_robust`` returns
+    # aggregates (``gpbo_x_mean``, ``gpbo_x_std``, plus min/max in
+    # ``gpbo_restart_summary``).  We plot mean ± std as error bars and shade
+    # the [min, max] envelope so a single chart shows central tendency and
+    # extremes simultaneously.
+    if robust_inverse_results:
+        labels, means, stds, mins, maxs = [], [], [], [], []
+        for r in robust_inverse_results:
+            tid = r.get("target_info", {}).get("id", "T?")
+            mu  = r.get("gpbo_x_mean", float("nan"))
+            sd  = r.get("gpbo_x_std",  float("nan"))
+            rs  = r.get("gpbo_restart_summary", {}) or {}
+            lo  = rs.get("theta_best_min", mu - sd)
+            hi  = rs.get("theta_best_max", mu + sd)
+            if np.isfinite(mu):
+                labels.append(tid); means.append(mu); stds.append(sd)
+                mins.append(lo);    maxs.append(hi)
+        if labels:
+            x = np.arange(len(labels))
+            arr_means = np.asarray(means); arr_stds = np.asarray(stds)
+            arr_mins  = np.asarray(mins);  arr_maxs = np.asarray(maxs)
+            ax_d.fill_between(x, arr_mins, arr_maxs, alpha=0.18,
+                              color="#0072B2", label="[min, max]")
+            ax_d.errorbar(x, arr_means, yerr=arr_stds, fmt="o", color="#0072B2",
+                          ms=10, capsize=5, lw=1.4, label=r"mean ± 1σ")
+            ax_d.set_xticks(x, labels)
+        else:
+            ax_d.text(0.5, 0.5, "no multi-seed data", ha="center", va="center",
+                      transform=ax_d.transAxes, fontsize=12)
+    else:
+        ax_d.text(0.5, 0.5, "no multi-seed data", ha="center", va="center",
+                  transform=ax_d.transAxes, fontsize=12)
+    ax_d.set_xlabel("Target")
+    ax_d.set_ylabel(r"Recovered angle $\theta$ (°)")
+    ax_d.set_title(r"Multi-seed θ stability ($n_{seeds}=5$)")
+    if ax_d.get_legend_handles_labels()[0]:
+        ax_d.legend(loc="best", fontsize=10)
+    ax_d.grid(True, axis="y", alpha=0.3)
+    _v20_panel_label(ax_d, "d")
+
+    fig.suptitle("Inverse design via GP-Bayesian optimisation",
+                 fontweight="bold", y=0.97)
+    apply_fig_style(fig)
+    return _v20_savefig(fig, output_dir, "Fig07_inverse_design.png", logger)
+
+
+# =============================================================================
+# FIGURE 8 — Multi-objective Pareto sweep (3 panels)
+# =============================================================================
+def figv20_08_pareto(pareto_df: pd.DataFrame, landscape_df: pd.DataFrame,
+                     output_dir: str, logger: logging.Logger) -> str:
+    """Fig. 8: (a) EA vs IPF Pareto front coloured by α,
+    (b) optimal θ vs α with LC transitions,
+    (c) J(θ, α) heat-map (LC1 and LC2 stacked).
+    """
+    set_publication_style()
+    fig = plt.figure(figsize=(16, 5.6))
+    gs  = fig.add_gridspec(1, 3, wspace=0.32, left=0.06, right=0.99,
+                           top=0.86, bottom=0.16)
+    ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
+
+    if pareto_df is not None and not pareto_df.empty and {"EA", "IPF", "alpha"} <= set(pareto_df.columns):
+        sc = ax_a.scatter(pareto_df["EA"], pareto_df["IPF"],
+                          c=pareto_df["alpha"], cmap="viridis", s=44,
+                          edgecolors="black", lw=0.4)
+        cb = plt.colorbar(sc, ax=ax_a, fraction=0.05, pad=0.03)
+        cb.set_label(r"weight $\alpha$ (EA priority)")
+        ax_a.set_xlabel(f"EA@{int(D_COMMON)}mm (J)")
+        ax_a.set_ylabel("IPF (kN)")
+        ax_a.set_title("Pareto front EA–IPF")
+    ax_a.grid(True, alpha=0.3)
+    _v20_panel_label(ax_a, "a")
+
+    # (b) optimal θ vs α   (pareto_df column is 'angle', not 'theta')
+    if pareto_df is not None and not pareto_df.empty and {"alpha", "angle"} <= set(pareto_df.columns):
+        lcs_unique = sorted(pareto_df["lc"].unique()) if "lc" in pareto_df.columns else [None]
+        for lc in lcs_unique:
+            if lc is None:
+                sub = pareto_df.sort_values("alpha")
+            else:
+                sub = pareto_df[pareto_df["lc"] == lc].sort_values("alpha")
+            if sub.empty:
+                continue
+            ax_b.plot(sub["alpha"], sub["angle"],
+                      color=COLORS.get(lc, "black"),
+                      marker=MARKERS.get(lc, "o"),
+                      linestyle=LINESTYLES.get(lc, "-"),
+                      lw=1.4, ms=6, label=str(lc) if lc else "Pareto")
+    ax_b.set_xlabel(r"weight $\alpha$ (EA priority)")
+    ax_b.set_ylabel(r"Optimal $\theta^\ast$ (°)")
+    ax_b.set_title(r"Optimal θ vs α")
+    ax_b.legend(loc="best", title="LC")
+    ax_b.grid(True, alpha=0.3)
+    _v20_panel_label(ax_b, "b")
+
+    # (c) J(θ, α) heat-map — combined LC1+LC2 (best per α, θ).  ``pareto_df``
+    # carries one row per (α, candidate-angle, lc); pivoting by (α, angle) and
+    # taking the minimum J across LCs gives the achievable objective surface.
+    # ``landscape_df`` lacks both ``alpha`` and ``J`` columns by construction,
+    # so we read only from ``pareto_df`` here.
+    if pareto_df is not None and not pareto_df.empty and {"alpha", "angle", "J"} <= set(pareto_df.columns):
+        piv = pareto_df.pivot_table(index="alpha", columns="angle",
+                                    values="J", aggfunc="min")
+        if not piv.empty:
+            im = ax_c.imshow(piv.values, aspect="auto", origin="lower",
+                             cmap="viridis_r",
+                             extent=[float(piv.columns.min()), float(piv.columns.max()),
+                                     float(piv.index.min()),   float(piv.index.max())])
+            cb = plt.colorbar(im, ax=ax_c, fraction=0.05, pad=0.03)
+            cb.set_label("min objective J")
+            ax_c.set_xlabel(r"angle $\theta$ (°)")
+            ax_c.set_ylabel(r"weight $\alpha$")
+            ax_c.set_title(r"J(θ, α) min over LC")
+    else:
+        ax_c.text(0.5, 0.5, "no landscape data", ha="center", va="center",
+                  transform=ax_c.transAxes, fontsize=12)
+    _v20_panel_label(ax_c, "c")
+
+    fig.suptitle(f"Multi-objective design space — EA@{int(D_COMMON)}mm vs IPF",
+                 fontweight="bold", y=0.99)
+    apply_fig_style(fig)
+    return _v20_savefig(fig, output_dir, "Fig08_pareto.png", logger)
+
+
+# =============================================================================
+# FIGURE 9 — Pareto-target recovery (2 panels)
+# =============================================================================
+def figv20_09_pareto_recovery(pareto_inverse_results: Optional[List[Dict]],
+                              pareto_targets: Optional[List[Dict]],
+                              output_dir: str, logger: logging.Logger) -> str:
+    """Fig. 9: GP-BO recovery on Pareto-optimal targets — recovered θ vs reference
+    (parity) and per-target angle error with LC-match indicator."""
+    set_publication_style()
+    if not pareto_inverse_results or not pareto_targets:
+        logger.info("  Fig. 9 skipped — no Pareto-target recovery results.")
+        return ""
+
+    fig = plt.figure(figsize=(13, 5.4))
+    gs  = fig.add_gridspec(1, 2, wspace=0.30, left=0.08, right=0.98,
+                           top=0.88, bottom=0.16)
+    ax_a, ax_b = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])
+
+    ref_theta, rec_theta, lc_match, ids = [], [], [], []
+    for tgt, res in zip(pareto_targets, pareto_inverse_results):
+        ref_theta.append(float(tgt.get("angle_hint", float("nan"))))
+        rec_theta.append(float(res.get("gpbo_best", {}).get("x_best", float("nan"))))
+        lc_match.append(res.get("gpbo_best", {}).get("lc", "") == tgt.get("lc_hint", ""))
+        ids.append(str(tgt.get("id", "")))
+
+    # (a) parity θ_recovered vs θ_reference
+    ref = np.asarray(ref_theta); rec = np.asarray(rec_theta)
+    colors = ["#009E73" if m else "#D55E00" for m in lc_match]
+    ax_a.scatter(ref, rec, c=colors, s=80, edgecolors="black", lw=0.6, zorder=4)
+    for i, txt in enumerate(ids):
+        ax_a.annotate(txt, (ref[i], rec[i]), textcoords="offset points",
+                      xytext=(6, 6), fontsize=12)
+    if np.isfinite(ref).any() and np.isfinite(rec).any():
+        mn = float(np.nanmin([ref.min(), rec.min()])) - 1.0
+        mx = float(np.nanmax([ref.max(), rec.max()])) + 1.0
+        ax_a.plot([mn, mx], [mn, mx], "k--", lw=0.9, alpha=0.6)
+        ax_a.set_xlim(mn, mx); ax_a.set_ylim(mn, mx)
+    ax_a.set_aspect("equal", adjustable="box")
+    ax_a.set_xlabel(r"Pareto reference $\theta$ (°)")
+    ax_a.set_ylabel(r"GP-BO recovered $\theta$ (°)")
+    ax_a.set_title("Pareto-target recovery (parity)")
+    legend_h = [plt.Line2D([0], [0], marker="o", color="w",
+                           markerfacecolor="#009E73", markeredgecolor="black",
+                           markersize=10, label="LC matches reference"),
+                plt.Line2D([0], [0], marker="o", color="w",
+                           markerfacecolor="#D55E00", markeredgecolor="black",
+                           markersize=10, label="LC mismatch")]
+    ax_a.legend(handles=legend_h, loc="upper left")
+    ax_a.grid(True, alpha=0.3)
+    _v20_panel_label(ax_a, "a")
+
+    # (b) per-target angle error
+    err = np.abs(rec - ref)
+    bars = ax_b.bar(ids, err, color=colors, edgecolor="black", lw=0.6)
+    for b, e in zip(bars, err):
+        if np.isfinite(e):
+            ax_b.text(b.get_x() + b.get_width()/2, e + 0.05,
+                      f"{e:.1f}°", ha="center", va="bottom", fontsize=12)
+    ax_b.set_xlabel("Pareto target")
+    ax_b.set_ylabel(r"$|\theta_{\mathrm{rec}} - \theta_{\mathrm{ref}}|$ (°)")
+    ax_b.set_title("Recovery angle error")
+    ax_b.grid(True, axis="y", alpha=0.3)
+    _v20_panel_label(ax_b, "b")
+
+    fig.suptitle("Pareto-optimal target recovery — known-feasible inverse-design test",
+                 fontweight="bold", y=0.99)
+    apply_fig_style(fig)
+    return _v20_savefig(fig, output_dir, "Fig09_pareto_recovery.png", logger)
+
+
+# =============================================================================
+# FIGURE 10 — Robustness & sensitivity (3 panels)
+# =============================================================================
+def figv20_10_robustness(lambda_diag: Optional[pd.DataFrame],
+                         dcommon_diag: Optional[pd.DataFrame],
+                         classifier_ablation_diag: Optional[pd.DataFrame],
+                         output_dir: str, logger: logging.Logger) -> str:
+    """Fig. 10: (a) λ-sensitivity of the classifier penalty,
+    (b) D_COMMON sensitivity of the EA metric,
+    (c) classifier ablation (with vs without penalty).
+    """
+    set_publication_style()
+    fig = plt.figure(figsize=(16, 5.4))
+    gs  = fig.add_gridspec(1, 3, wspace=0.34, left=0.06, right=0.99,
+                           top=0.88, bottom=0.16)
+    ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
+
+    # (a) λ-sensitivity
+    if lambda_diag is not None and not lambda_diag.empty and "lambda" in lambda_diag.columns:
+        x = lambda_diag["lambda"].values
+        if "ea_err_pct" in lambda_diag.columns:
+            ax_a.plot(x, lambda_diag["ea_err_pct"], "o-",
+                      color="#0072B2", label="EA error (%)")
+        if "ipf_err_pct" in lambda_diag.columns:
+            ax_a.plot(x, lambda_diag["ipf_err_pct"], "s--",
+                      color="#D55E00", label="IPF error (%)")
+        ax_a.set_xscale("log")
+        ax_a.set_xlabel(r"classifier penalty $\lambda$")
+        ax_a.set_ylabel("Inverse-design error (%)")
+        ax_a.set_title(r"$\lambda$-sensitivity")
+        ax_a.legend(loc="best")
+    else:
+        ax_a.text(0.5, 0.5, "no λ-sensitivity data", ha="center", va="center",
+                  transform=ax_a.transAxes, fontsize=12)
+    ax_a.grid(True, which="both", alpha=0.3)
+    _v20_panel_label(ax_a, "a")
+
+    # (b) D_COMMON sensitivity
+    if dcommon_diag is not None and not dcommon_diag.empty and "d_common" in dcommon_diag.columns:
+        for lc in sorted(dcommon_diag.get("lc", pd.Series(["all"])).unique()):
+            sub = dcommon_diag[dcommon_diag["lc"] == lc] if "lc" in dcommon_diag.columns else dcommon_diag
+            if "EA_mean" in sub.columns and "EA_std" in sub.columns:
+                ax_b.errorbar(sub["d_common"], sub["EA_mean"],
+                              yerr=2*sub["EA_std"],
+                              marker=MARKERS.get(lc, "o"),
+                              color=COLORS.get(lc, "black"), lw=1.4, capsize=3,
+                              label=str(lc))
+    else:
+        ax_b.text(0.5, 0.5, "no D_COMMON sweep data", ha="center", va="center",
+                  transform=ax_b.transAxes, fontsize=12)
+    ax_b.axvline(D_COMMON, color="0.4", linestyle=":", lw=0.9,
+                 label=f"adopted d*={int(D_COMMON)}mm")
+    ax_b.set_xlabel(r"common displacement $d^\ast$ (mm)")
+    ax_b.set_ylabel(r"EA at $d^\ast$ (J)")
+    ax_b.set_title(r"$D_{\mathrm{common}}$ sensitivity")
+    ax_b.legend(loc="best", title="LC")
+    ax_b.grid(True, alpha=0.3)
+    _v20_panel_label(ax_b, "b")
+
+    # (c) classifier ablation
+    if classifier_ablation_diag is not None and not classifier_ablation_diag.empty:
+        df = classifier_ablation_diag
+        if {"Target", "With_Penalty_p_LC", "No_Penalty_p_LC"} <= set(df.columns):
+            x = np.arange(len(df))
+            with_p = pd.to_numeric(df["With_Penalty_p_LC"], errors="coerce")
+            no_p   = pd.to_numeric(df["No_Penalty_p_LC"],   errors="coerce")
+            w = 0.35
+            ax_c.bar(x - w/2, with_p, width=w, color="#009E73",
+                     edgecolor="black", lw=0.5, label="with penalty")
+            ax_c.bar(x + w/2, no_p,   width=w, color="#D55E00",
+                     edgecolor="black", lw=0.5, label="no penalty")
+            ax_c.set_xticks(x, df["Target"].astype(str))
+            ax_c.set_xlabel("Target")
+            ax_c.set_ylabel(r"$P(\mathrm{LC}\,|\,\mathrm{recovered\ design})$")
+            ax_c.set_title("Classifier ablation")
+            ax_c.legend(loc="best")
+        else:
+            ax_c.text(0.5, 0.5, "incompatible ablation table",
+                      ha="center", va="center", transform=ax_c.transAxes)
+    else:
+        ax_c.text(0.5, 0.5, "no classifier-ablation data",
+                  ha="center", va="center", transform=ax_c.transAxes, fontsize=12)
+    ax_c.grid(True, axis="y", alpha=0.3)
+    _v20_panel_label(ax_c, "c")
+
+    fig.suptitle("Robustness and sensitivity of the inverse-design framework",
+                 fontweight="bold", y=0.99)
+    apply_fig_style(fig)
+    return _v20_savefig(fig, output_dir, "Fig10_robustness.png", logger)
+
+
+# =============================================================================
+# APPENDIX FIGURES — single-panel wrappers around v_19 routines (already styled)
+# =============================================================================
+def figv20_appendix_all(forward_state: Optional[Dict],
+                        inverse_state: Optional[Dict],
+                        analysis_state: Optional[Dict],
+                        output_dir: str, logger: logging.Logger) -> None:
+    """Generate the 7 appendix figures by reusing v_19's existing routines.
+
+    These are already styled with apply_fig_style(); they go to the same
+    output directory but with FigAx_*.png filenames.
+    """
+    if forward_state is None:
+        return
+    dual_results = forward_state.get("dual_results")
+    df_all       = forward_state.get("df_all")
+    val_df_u     = forward_state.get("val_df_u")
+    scaler_disp_u = forward_state.get("scaler_disp_u")
+    enc_u        = forward_state.get("enc_u")
+    params_u     = forward_state.get("params_u")
+    baseline     = forward_state.get("baseline_results_u")
+    sensitivity  = forward_state.get("sensitivity_df_u")
+    calibration  = forward_state.get("calibration", {})
+
+    if dual_results is not None:
+        try: fig_training_curves(dual_results, output_dir, logger)
+        except Exception as e: logger.debug(f"  FigA1 skipped: {e}")
+        try: fig_validation_error_maps(dual_results, output_dir, logger)
+        except Exception as e: logger.debug(f"  FigA2 skipped: {e}")
+        try: fig_random_grid_curves(dual_results, df_all, output_dir, logger)
+        except Exception as e: logger.debug(f"  FigA6 skipped: {e}")
+        try: fig_model_complexity(dual_results, output_dir, logger)
+        except Exception as e: logger.debug(f"  FigA5 skipped: {e}")
+    if baseline is not None and dual_results is not None:
+        try: fig_baseline_comparison(baseline, dual_results, output_dir, logger, protocol="unseen")
+        except Exception as e: logger.debug(f"  FigA3 skipped: {e}")
+    if sensitivity is not None:
+        try: fig_hyperparam_sensitivity(sensitivity, output_dir, logger, tag="unseen")
+        except Exception as e: logger.debug(f"  FigA4 skipped: {e}")
+    if analysis_state is not None:
+        all_inv = analysis_state.get("all_inverse_results")
+        if all_inv:
+            try: fig_inverse_posterior_likelihood(all_inv, output_dir, logger)
+            except Exception as e: logger.debug(f"  FigA7 skipped: {e}")
+
+
+# =============================================================================
+# V_20 PIPELINE ORCHESTRATION
+# =============================================================================
+# =============================================================================
+# V_20 TRAINING HELPERS — splittable for parallel HPC submission
+# =============================================================================
+def _train_forward_only(data_dir: str, output_dir: str,
+                        logger: logging.Logger,
+                        df_all: Optional[pd.DataFrame] = None) -> Dict:
+    """Train all forward ensembles (DDNS, Soft, Hard × random + unseen) and
+    save ``forward_models.pt``.  Returns the forward-state dict.
+
+    Used both by ``run_pipeline_v20`` (mode='all') and directly by
+    ``main_v20`` when invoked with ``--mode forward`` for parallel HPC
+    submission.  ``df_all`` is loaded from disk if not provided.
+    """
+    if df_all is None:
+        df_all = load_data(data_dir, logger)
+    dual_results: Dict = {}
+
+    logger.info("\n[forward 1/3] Random 80/20 split — DDNS, Soft, Hard")
+    train_df_r, val_df_r = split_random_80_20(df_all, CFG.split_seed, logger)
+    sd_r, so_r, en_r, p_r = create_preprocessors(train_df_r, logger)
+    save_reproducibility_artifacts(output_dir, "random",
+                                   train_df_r, sd_r, so_r, en_r, p_r, logger)
+    dual_results["random"] = {a: train_ensemble(a, train_df_r, val_df_r,
+                                                sd_r, so_r, en_r, p_r,
+                                                "random", logger)
+                              for a in ["ddns", "soft", "hard"]}
+    dual_results["random"].update({"train_df": train_df_r, "val_df": val_df_r,
+                                   "scaler_disp": sd_r, "scaler_out": so_r,
+                                   "enc": en_r, "params": p_r})
+
+    logger.info(f"\n[forward 2/3] Unseen θ={CFG.theta_star}° — DDNS, Soft, Hard")
+    train_df_u, val_df_u = split_unseen_angle(df_all, CFG.theta_star, logger)
+    sd_u, so_u, en_u, p_u = create_preprocessors(train_df_u, logger)
+    save_reproducibility_artifacts(output_dir, "unseen",
+                                   train_df_u, sd_u, so_u, en_u, p_u, logger)
+    dual_results["unseen"] = {a: train_ensemble(a, train_df_u, val_df_u,
+                                                sd_u, so_u, en_u, p_u,
+                                                "unseen", logger)
+                              for a in ["ddns", "soft", "hard"]}
+    dual_results["unseen"].update({"train_df": train_df_u, "val_df": val_df_u,
+                                   "scaler_disp": sd_u, "scaler_out": so_u,
+                                   "enc": en_u, "params": p_u})
+
+    logger.info("\n[forward 3/3] Calibration + statistical tests")
+    calibration = compute_uncertainty_calibration(dual_results, logger)
+    stat_tests  = compute_statistical_tests(dual_results, logger)
+
+    baseline_results_u = None
+    sensitivity_df_u   = None
+    if CFG.run_robustness_analyses:
+        try:
+            baseline_results_u = train_baseline_models(train_df_u, val_df_u,
+                                                      sd_u, en_u, p_u, logger)
+        except Exception as e:
+            logger.warning(f"  baseline_results_u skipped: {e}")
+        try:
+            sensitivity_df_u = run_hyperparam_sensitivity(
+                train_df_u, val_df_u, sd_u, so_u, en_u, p_u, "unseen", logger)
+        except Exception as e:
+            logger.warning(f"  sensitivity_df_u skipped: {e}")
+
+    forward_state = {
+        "dual_results": dual_results, "df_all": df_all,
+        "calibration": calibration, "stat_tests": stat_tests,
+        "val_df_u": val_df_u, "scaler_disp_u": sd_u, "scaler_out_u": so_u,
+        "enc_u": en_u, "params_u": p_u,
+        "baseline_results_u": baseline_results_u,
+        "sensitivity_df_u": sensitivity_df_u,
+    }
+    save_forward_bundle(forward_state, output_dir, logger)
+    return forward_state
+
+
+def _train_inverse_and_analyze(data_dir: str, output_dir: str,
+                               logger: logging.Logger,
+                               df_all: Optional[pd.DataFrame] = None
+                               ) -> Tuple[Dict, Dict]:
+    """Train the full-data Hard-PINN inverse ensemble + LC plausibility
+    classifier, then run every inverse-design analysis (GP-BO target
+    matching, multi-seed robustness, forward Jacobian, multi-objective
+    Pareto sweep, Pareto-target recovery, λ-sensitivity, classifier
+    ablation, D_COMMON sensitivity).  Saves ``inverse_models.pt`` and
+    ``analysis_results.pt``.  Returns ``(inverse_state, analysis_state)``.
+
+    Used by ``run_pipeline_v20`` (mode='all') and directly by ``main_v20``
+    when invoked with ``--mode inverse`` for parallel HPC submission.
+    """
+    if df_all is None:
+        df_all = load_data(data_dir, logger)
+
+    logger.info("\n[inverse 1/4] Full-data Hard-PINN + LC plausibility classifier")
+    inv_models, inv_sd, inv_so, inv_en, inv_p = train_full_data_hard_pinn(df_all, logger)
+    # Persist the full-data preprocessor state on disk so the inverse model
+    # is fully reproducible from the artifacts directory (parity with the
+    # ``random`` and ``unseen`` artifacts saved in ``_train_forward_only``).
+    save_reproducibility_artifacts(output_dir, "full_data",
+                                   df_all, inv_sd, inv_so, inv_en, inv_p, logger)
+    df_metrics = compute_design_space_metrics(df_all, logger)
+    enrich_df_metrics_ea_common(df_metrics, df_all, logger)
+    cal_ens, clf_feat_scaler, clf_diag = train_lc_plausibility_classifier(df_metrics, logger)
+    lambda_opt, lambda_diag = auto_tune_lambda(cal_ens, clf_feat_scaler,
+                                               df_metrics, logger)
+    BO_CFG.prob_weight = lambda_opt
+
+    inverse_state = {
+        "inv_models": inv_models,
+        "inv_scaler_disp": inv_sd, "inv_scaler_out": inv_so,
+        "inv_enc": inv_en, "inv_params": inv_p,
+        "cal_ens": cal_ens, "clf_feat_scaler": clf_feat_scaler,
+        "clf_diag": clf_diag, "lambda_diag": lambda_diag,
+        "df_metrics": df_metrics,
+    }
+    save_inverse_bundle(inverse_state, output_dir, logger)
+
+    logger.info("\n[inverse 2/4] GP-BO target matching (5 targets)")
+    inverse_targets = generate_feasible_targets(df_metrics, logger, df_all=df_all)
+    all_inverse_results: List[Dict] = []
+    for t in inverse_targets:
+        res = run_inverse_design(inv_models, "hard", t["EA"], t["IPF"],
+                                 inv_sd, inv_en, inv_p, BO_CFG, logger,
+                                 cal_ens=cal_ens, feat_scaler=clf_feat_scaler)
+        res["target_info"] = t
+        all_inverse_results.append(res)
+
+    robust_inverse_results = None
+    if CFG.run_robustness_analyses:
+        robust_inverse_results = []
+        for t in inverse_targets[:3]:
+            r = run_inverse_design_robust(inv_models, "hard", t["EA"], t["IPF"],
+                                          inv_sd, inv_en, inv_p, BO_CFG, logger,
+                                          n_seeds=5, cal_ens=cal_ens,
+                                          feat_scaler=clf_feat_scaler)
+            r["target_info"] = t
+            robust_inverse_results.append(r)
+
+    logger.info("\n[inverse 3/4] Forward Jacobian + multi-objective Pareto sweep")
+    jacobian_results = None
+    try:
+        jacobian_results = compute_forward_map_jacobian(
+            inv_models, "hard", inv_sd, inv_en, inv_p,
+            (CFG.angle_opt_min, CFG.angle_opt_max), logger)
+    except Exception as e:
+        logger.warning(f"  jacobian skipped: {e}")
+
+    pareto_df, landscape_df = run_multiobjective_sweep(
+        inv_models, "hard", inv_sd, inv_en, inv_p, df_metrics, logger,
+        output_dir=output_dir, df_all=df_all)
+
+    pareto_targets, pareto_inverse_results = None, None
+    if CFG.run_robustness_analyses and not pareto_df.empty:
+        pdom = pareto_df.attrs.get("pareto_dominance", pd.DataFrame())
+        if not pdom.empty and len(pdom) >= 5:
+            pareto_targets = generate_pareto_targets(pdom, logger, n_targets=5)
+            if pareto_targets:
+                pareto_inverse_results = []
+                for t in pareto_targets:
+                    res = run_inverse_design(inv_models, "hard", t["EA"], t["IPF"],
+                                             inv_sd, inv_en, inv_p, BO_CFG, logger,
+                                             cal_ens=cal_ens, feat_scaler=clf_feat_scaler)
+                    res["target_info"] = t
+                    pareto_inverse_results.append(res)
+
+    logger.info("\n[inverse 4/4] Sensitivity sweeps (λ, D_COMMON, classifier ablation)")
+    lambda_sweep_df = None
+    if BO_CFG.lambda_sweep:
+        try:
+            run_lambda_sensitivity(inv_models, "hard", inverse_targets,
+                                   inv_sd, inv_en, inv_p, BO_CFG,
+                                   cal_ens, clf_feat_scaler, output_dir, logger)
+            p = os.path.join(output_dir, "Table_lambda_sensitivity.csv")
+            if os.path.exists(p):
+                lambda_sweep_df = pd.read_csv(p)
+        except Exception as e:
+            logger.warning(f"  λ sweep skipped: {e}")
+
+    classifier_ablation_diag = None
+    if BO_CFG.run_classifier_ablation:
+        all_no = []
+        for t in inverse_targets:
+            r = run_inverse_design(inv_models, "hard", t["EA"], t["IPF"],
+                                   inv_sd, inv_en, inv_p, BO_CFG, logger,
+                                   cal_ens=None, feat_scaler=None)
+            r["target_info"] = t
+            all_no.append(r)
+        rows = []
+        for i, t in enumerate(inverse_targets):
+            tid = t["id"]; w = all_inverse_results[i]; n = all_no[i]
+            wb, nb = w.get("gpbo_best", {}), n.get("gpbo_best", {})
+            def _plc(best):
+                if not best: return float("nan")
+                ang, lc = best.get("x_best"), best.get("lc", best.get("best_lc", ""))
+                if ang is None or not lc: return float("nan")
+                m = compute_ea_ipf_ensemble(inv_models, "hard", ang, lc,
+                                             inv_sd, inv_en, inv_p, d_eval=D_COMMON)
+                _, p_lc = compute_lc_penalty(cal_ens, clf_feat_scaler,
+                                             m["EA"], m["IPF"], lc,
+                                             prob_weight=0.0, angle_deg=float(ang))
+                return p_lc
+            rows.append({"Target": tid,
+                         "With_Penalty_p_LC": f"{_plc(wb):.4f}",
+                         "No_Penalty_p_LC":   f"{_plc(nb):.4f}"})
+        classifier_ablation_diag = pd.DataFrame(rows)
+        classifier_ablation_diag.to_csv(
+            os.path.join(output_dir, "Table_classifier_ablation.csv"), index=False)
+
+    dcommon_diag = None
+    try:
+        rows = []
+        for d_star in [60, 70, 80, 90, 100]:
+            for lc in sorted({t.get("lc_hint") for t in pareto_targets or []
+                              if t.get("lc_hint")}) or sorted(df_all["LC"].unique()):
+                ea_list = []
+                for ang in np.arange(CFG.angle_opt_min, CFG.angle_opt_max + 1, 5):
+                    try:
+                        m = compute_ea_ipf_ensemble(inv_models, "hard",
+                                                    float(ang), lc,
+                                                    inv_sd, inv_en, inv_p,
+                                                    d_eval=float(d_star))
+                        ea_list.append(m["EA"])
+                    except Exception:
+                        continue
+                if ea_list:
+                    rows.append({"d_common": d_star, "lc": lc,
+                                 "EA_mean": float(np.mean(ea_list)),
+                                 "EA_std":  float(np.std(ea_list))})
+        if rows:
+            dcommon_diag = pd.DataFrame(rows)
+            dcommon_diag.to_csv(os.path.join(output_dir,
+                                             "Table_d_common_sensitivity.csv"),
+                                index=False)
+    except Exception as e:
+        logger.warning(f"  D_common sweep skipped: {e}")
+
+    analysis_state = {
+        "all_inverse_results": all_inverse_results,
+        "robust_inverse_results": robust_inverse_results,
+        "jacobian_results": jacobian_results,
+        "pareto_df": pareto_df, "landscape_df": landscape_df,
+        "pareto_targets": pareto_targets,
+        "pareto_inverse_results": pareto_inverse_results,
+        "lambda_diag": lambda_diag,
+        "lambda_sweep_df": lambda_sweep_df,
+        "classifier_ablation_diag": classifier_ablation_diag,
+        "dcommon_diag": dcommon_diag,
+        "inverse_targets": inverse_targets,
+    }
+    save_analysis_bundle(analysis_state, output_dir, logger)
+    return inverse_state, analysis_state
+
+
+def _v20_render_all_tables(forward_state: Dict, inverse_state: Dict,
+                           analysis_state: Dict, output_dir: str,
+                           logger: logging.Logger) -> None:
+    """Render every v_20 table.  Most tables need both forward and inverse
+    bundles; missing inputs produce a warning rather than crash."""
+    F = forward_state or {}
+    I = inverse_state or {}
+    A = analysis_state or {}
+    dual_results = F.get("dual_results")
+    df_metrics   = I.get("df_metrics", pd.DataFrame())
+    calibration  = F.get("calibration", {}) or {}
+    stat_tests   = F.get("stat_tests")
+    all_inv      = A.get("all_inverse_results") or []
+    robust_inv   = A.get("robust_inverse_results")
+
+    if dual_results is not None:
+        try:
+            generate_summary_tables(dual_results, df_metrics, all_inv,
+                                    stat_tests or {}, output_dir, logger,
+                                    calibration=calibration)
+        except Exception as e:
+            logger.warning(f"  generate_summary_tables: {e}")
+    if all_inv:
+        try: generate_optimizer_comparison_table(all_inv, output_dir, logger)
+        except Exception as e: logger.debug(f"  optimizer_comparison: {e}")
+    if robust_inv:
+        try: generate_inverse_robustness_table(robust_inv, output_dir, logger)
+        except Exception as e: logger.debug(f"  inverse_robustness: {e}")
+    try: write_statistical_testing_policy(output_dir, logger)
+    except Exception as e: logger.debug(f"  stat_policy: {e}")
+    if dual_results is not None and all_inv:
+        try: generate_compute_budget_summary(dual_results, all_inv, output_dir, logger)
+        except Exception as e: logger.debug(f"  compute_budget: {e}")
+
+
+# =============================================================================
+# V_20 PIPELINE ORCHESTRATION
+# =============================================================================
+def run_pipeline_v20(data_dir: str, output_dir: str,
+                     logger: Optional[logging.Logger] = None) -> Dict:
+    """Inverse-design + multi-objective focused pipeline (mode='all').
+
+    Trains forward ensembles, the full-data Hard-PINN inverse model, the LC
+    plausibility classifier, runs every analysis, saves three torch.save
+    bundles in ``output_dir``, and renders 17 figures + 6+ tables.
+
+    For HPC parallel submission, run forward and inverse training as two
+    separate jobs with ``--mode forward`` / ``--mode inverse`` (each saves
+    its bundles into the same ``output_dir``), then run ``--mode replot``
+    to load every bundle and produce figures + tables.
+
+    If ``logger`` is provided (the typical path from ``main_v20``), the
+    function reuses it instead of calling ``setup_logging`` again — which
+    would truncate the existing ``run_log.txt`` and overwrite the banner
+    lines already written by ``main_v20``.
+    """
+    refresh_device()
+    os.makedirs(output_dir, exist_ok=True)
+    owned_logger = logger is None
+    if owned_logger:
+        logger = setup_logging(output_dir)
+        log_runtime_environment(output_dir, logger)
+    apply_dry_run_settings(logger)
+    set_publication_style()
+    check_publication_dependencies(logger)
+
+    logger.info("=" * 80)
+    logger.info("IPINN CRASHWORTHINESS FRAMEWORK — V_20 (mode=all)")
+    logger.info("=" * 80)
+    logger.info(f"Data: {data_dir}  Out: {output_dir}  M={CFG.n_ensemble}  seed={CFG.seed_base}")
+
+    df_all = load_data(data_dir, logger)
+    forward_state = _train_forward_only(data_dir, output_dir, logger, df_all=df_all)
+    inverse_state, analysis_state = _train_inverse_and_analyze(
+        data_dir, output_dir, logger, df_all=df_all)
+
+    logger.info("\n[tables]")
+    _v20_render_all_tables(forward_state, inverse_state, analysis_state,
+                           output_dir, logger)
+    logger.info("\n[figures]")
+    _v20_render_all_figures(forward_state, inverse_state, analysis_state,
+                            output_dir, logger)
+
+    logger.info("\n" + "=" * 80)
+    logger.info("V_20 PIPELINE COMPLETE")
+    logger.info(f"All results in: {output_dir}")
+    logger.info("=" * 80)
+    return {"forward": forward_state, "inverse": inverse_state,
+            "analysis": analysis_state}
+
+
+
+# =============================================================================
+# Render all v_20 figures from already-prepared bundle dicts
+# =============================================================================
+def _v20_render_all_figures(forward_state: Dict, inverse_state: Dict,
+                            analysis_state: Dict, output_dir: str,
+                            logger: logging.Logger) -> None:
+    """Produce the 10 manuscript figures + 7 appendix figures from bundles."""
+    set_publication_style()
+    F = forward_state or {}
+    I = inverse_state or {}
+    A = analysis_state or {}
+
+    df_all       = F.get("df_all")
+    dual_results = F.get("dual_results")
+    calibration  = F.get("calibration", {}) or {}
+    val_df_u     = F.get("val_df_u")
+    scaler_disp_u= F.get("scaler_disp_u")
+    enc_u        = F.get("enc_u")
+    params_u     = F.get("params_u")
+
+    inv_models   = I.get("inv_models")
+    inv_sd       = I.get("inv_scaler_disp")
+    inv_en       = I.get("inv_enc")
+    inv_p        = I.get("inv_params")
+    clf_diag     = I.get("clf_diag")
+
+    all_inv      = A.get("all_inverse_results")
+    robust_inv   = A.get("robust_inverse_results")
+    jacobian     = A.get("jacobian_results")
+    pareto_df    = A.get("pareto_df")
+    landscape_df = A.get("landscape_df")
+    pareto_tgts  = A.get("pareto_targets")
+    pareto_inv   = A.get("pareto_inverse_results")
+    lambda_diag  = A.get("lambda_sweep_df")
+    dcommon_diag = A.get("dcommon_diag")
+    clf_ab_diag  = A.get("classifier_ablation_diag")
+
+    # Manuscript figures
+    if df_all is not None:
+        figv20_01_dataset_overview(df_all, output_dir, logger)
+    if dual_results is not None:
+        figv20_02_forward_parity(dual_results, output_dir, logger)
+        if df_all is not None:
+            figv20_03_unseen_generalization(dual_results, df_all, output_dir,
+                                            logger, calibration=calibration)
+        if val_df_u is not None and scaler_disp_u is not None and enc_u is not None and params_u is not None:
+            figv20_04_physics_calibration(dual_results, calibration, val_df_u,
+                                          scaler_disp_u, enc_u, params_u,
+                                          output_dir, logger)
+    figv20_05_ill_posedness(jacobian, all_inv, landscape_df, output_dir, logger)
+    if clf_diag is not None:
+        figv20_06_classifier(clf_diag, output_dir, logger)
+    if all_inv and inv_models is not None and df_all is not None:
+        figv20_07_inverse_design(all_inv, df_all, inv_models, inv_sd, inv_en,
+                                 inv_p, robust_inv, output_dir, logger)
+    if pareto_df is not None and not pareto_df.empty:
+        figv20_08_pareto(pareto_df, landscape_df, output_dir, logger)
+    if pareto_inv and pareto_tgts:
+        figv20_09_pareto_recovery(pareto_inv, pareto_tgts, output_dir, logger)
+    figv20_10_robustness(lambda_diag, dcommon_diag, clf_ab_diag,
+                         output_dir, logger)
+
+    # Appendix figures (reuse v_19 routines, already styled)
+    figv20_appendix_all(forward_state, inverse_state, analysis_state,
+                        output_dir, logger)
+
+
+# =============================================================================
+# Replot mode: load whatever bundles are present and re-render figures
+# =============================================================================
+def replot_v20(source_dir: str, output_dir: str, logger: logging.Logger) -> None:
+    """Reload bundle(s) from ``source_dir`` and regenerate every figure +
+    table whose inputs are available.  Missing bundles are silently skipped.
+
+    Used after parallel ``--mode forward`` / ``--mode inverse`` jobs land
+    their bundles into a common directory: invoking ``--mode replot
+    --replot_from <dir>`` unifies them into the final figure + table set.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    F = load_forward_bundle(source_dir, logger) or {}
+    I = load_inverse_bundle(source_dir, logger) or {}
+    A = load_analysis_bundle(source_dir, logger) or {}
+    if not (F or I or A):
+        logger.warning(f"  No v_20 bundles found in: {source_dir}")
+        return
+    _v20_render_all_tables(F, I, A, output_dir, logger)
+    _v20_render_all_figures(F, I, A, output_dir, logger)
+
+
+# =============================================================================
+# CLI
+# =============================================================================
+def main_v20() -> None:
+    parser = argparse.ArgumentParser(
+        description="IPINN Crashworthiness Framework — v_20 (final).  Run modes "
+                    "let you split forward and inverse training across two "
+                    "parallel HPC jobs and merge the outputs in a third quick "
+                    "replot step.",
+    )
+    parser.add_argument("--data_dir",   type=str, default=".",
+                        help="Directory containing data files (LC1.xlsx, LC2.xlsx).")
+    parser.add_argument("--output_dir", type=str, default="./results_v20",
+                        help="Output directory for figures, tables, and bundles.")
+    parser.add_argument("--n_ensemble", type=int, default=20,
+                        help="Forward ensemble size (default: 20).")
+    parser.add_argument("--seed",       type=int, default=2026,
+                        help="Random seed base.")
+    parser.add_argument("--no_robustness", action="store_true",
+                        help="Skip baseline + sensitivity + robustness extras.")
+    parser.add_argument("--force_cpu",  action="store_true",
+                        help="Use CPU even if CUDA is available.")
+    parser.add_argument("--strict_paper", action="store_true",
+                        help="Abort if optional deps (skopt) are missing.")
+    parser.add_argument("--dry_run",    action="store_true",
+                        help="CI/smoke: tiny ensemble, short epochs.")
+    parser.add_argument(
+        "--mode", choices=["all", "forward", "inverse", "replot"],
+        default="all",
+        help=("'all' (default): full pipeline — train everything, then tables + "
+              "figures.  'forward': train only the forward ensembles and write "
+              "forward_models.pt; no figures or tables.  'inverse': train only "
+              "the full-data Hard-PINN + classifier and run all inverse-design "
+              "analyses (BO, Pareto, robustness, sensitivity); writes "
+              "inverse_models.pt + analysis_results.pt; no figures or tables.  "
+              "'replot': read whatever bundles are present in --replot_from and "
+              "regenerate figures + tables from them.  Forward and inverse "
+              "modes are independent — submit them as two parallel HPC jobs "
+              "into a shared output_dir, then run replot to merge."))
+    parser.add_argument(
+        "--replot_from", type=str, default=None,
+        help="Source directory for replot mode.  Defaults to --output_dir.")
+    args = parser.parse_args()
+
+    CFG.dry_run                = bool(args.dry_run)
+    CFG.n_ensemble             = args.n_ensemble
+    CFG.seed                   = args.seed
+    CFG.seed_base              = args.seed
+    CFG.split_seed             = args.seed
+    BO_CFG.seed                = args.seed
+    CFG.run_robustness_analyses = not args.no_robustness
+    CFG.strict_paper_deps       = bool(args.strict_paper)
+    # Replot mode never needs GPU: pin to CPU so a CUDA-trained bundle can
+    # be re-rendered on a CPU-only box.  (Forward and inverse training modes
+    # honour --force_cpu but otherwise prefer the GPU.)
+    CFG.force_cpu = bool(args.force_cpu) or args.mode == "replot"
+    refresh_device()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Mode-tagged log + runtime-env filenames so parallel forward + inverse
+    # SLURM jobs sharing one output_dir don't truncate each other's run_log
+    # or runtime_environment.  --mode all and --mode replot use untagged
+    # names (single-process; nothing to collide with).
+    log_tag = args.mode if args.mode in {"forward", "inverse"} else ""
+    logger = setup_logging(args.output_dir, tag=log_tag)
+    logger.info("=" * 80)
+    logger.info(f"IPINN — V_20 (mode={args.mode!r})")
+    logger.info(f"Output: {args.output_dir}")
+    logger.info("=" * 80)
+
+    # Apply dry-run + dependency guards BEFORE the mode dispatch so every
+    # mode (not just ``all``) honours ``--dry_run`` and ``--strict_paper``.
+    # Both are idempotent — ``run_pipeline_v20`` may call them again for
+    # ``--mode all`` with no effect.
+    apply_dry_run_settings(logger)
+    set_publication_style()
+    check_publication_dependencies(logger)
+
+    if args.mode == "replot":
+        src = args.replot_from or args.output_dir
+        logger.info(f"Replot source: {src}")
+        replot_v20(src, args.output_dir, logger)
+        return
+
+    if args.mode == "forward":
+        log_runtime_environment(args.output_dir, logger, tag=log_tag)
+        _train_forward_only(args.data_dir, args.output_dir, logger)
+        logger.info("\n[forward-only mode COMPLETE] forward_models.pt saved; "
+                    "run --mode replot to render figures + tables once "
+                    "inverse_models.pt and analysis_results.pt are also present.")
+        return
+
+    if args.mode == "inverse":
+        log_runtime_environment(args.output_dir, logger, tag=log_tag)
+        _train_inverse_and_analyze(args.data_dir, args.output_dir, logger)
+        logger.info("\n[inverse-only mode COMPLETE] inverse_models.pt + "
+                    "analysis_results.pt saved; run --mode replot to render "
+                    "figures + tables once forward_models.pt is also present.")
+        return
+
+    # mode == "all"
+    log_runtime_environment(args.output_dir, logger, tag=log_tag)
+    run_pipeline_v20(args.data_dir, args.output_dir, logger=logger)
+
+
 if __name__ == "__main__":
-    main()
+    main_v20()

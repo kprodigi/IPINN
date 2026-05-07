@@ -3,10 +3,10 @@
 # submit_pipeline.sh — SDSU HPC SLURM submission for IPINN parallel pipeline
 # ==========================================================================
 #
-# Usage:
-#   bash submit_pipeline.sh                          # defaults
-#   DATA_DIR=/path/to/data OUTPUT_DIR=/path/to/results bash submit_pipeline.sh
-#   bash submit_pipeline.sh --dry_run                # CI-scale test
+# Usage (run from the repo root so the relative defaults resolve):
+#   bash slurm/submit_pipeline.sh                    # defaults
+#   DATA_DIR=/path/to/data OUTPUT_DIR=/path/to/results bash slurm/submit_pipeline.sh
+#   bash slurm/submit_pipeline.sh --dry_run          # CI-scale test
 #
 # Submits 11 jobs with dependency chains:
 #   prep  →  7 parallel training jobs  →  forward_analysis + inverse_analysis  →  aggregate
@@ -18,7 +18,10 @@
 set -euo pipefail
 
 # ---- Configurable variables (override via environment or flags) ----
-DATA_DIR="${DATA_DIR:-.}"
+# DATA_DIR defaults to the repo's ``data/`` directory (LC1.xlsx, LC2.xlsx).
+# OUTPUT_DIR is where every artifact lands.  Both are repo-root-relative —
+# invoke this script from the repo root, or pass absolute paths.
+DATA_DIR="${DATA_DIR:-./data}"
 OUTPUT_DIR="${OUTPUT_DIR:-./results_paper}"
 PARTITION="${PARTITION:-gpu}"
 CONDA_ENV="${CONDA_ENV:-ipinn}"
