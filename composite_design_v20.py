@@ -10887,6 +10887,11 @@ def run_pipeline_v20(data_dir: str, output_dir: str,
     _v20_render_all_figures(forward_state, inverse_state, analysis_state,
                             output_dir, logger)
 
+    # Inventory every figure/table/sidecar written above into MANIFEST_outputs.csv.
+    # Must run after all writes so the listing is complete.  The legacy
+    # run_pipeline() called this; v_20's run_pipeline_v20() needs it too.
+    generate_output_manifest(output_dir, logger)
+
     logger.info("\n" + "=" * 80)
     logger.info("V_20 PIPELINE COMPLETE")
     logger.info(f"All results in: {output_dir}")
@@ -10983,6 +10988,9 @@ def replot_v20(source_dir: str, output_dir: str, logger: logging.Logger) -> None
         return
     _v20_render_all_tables(F, I, A, output_dir, logger)
     _v20_render_all_figures(F, I, A, output_dir, logger)
+    # Refresh the output manifest so MANIFEST_outputs.csv reflects the
+    # regenerated figures and tables.
+    generate_output_manifest(output_dir, logger)
 
 
 # =============================================================================
