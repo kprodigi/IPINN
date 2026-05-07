@@ -78,14 +78,7 @@ conda activate ${CONDA_ENV}
 echo "=== HPO Hard-PINN  Node: \$(hostname)  GPU: \${CUDA_VISIBLE_DEVICES:-none} ==="
 echo "=== Start: \$(date)  N_TRIALS=${N_TRIALS}  N_SEEDS=${N_SEEDS}  EPOCHS=${HPO_EPOCHS} ==="
 
-python ${TUNE} \\
-    --approach hard \\
-    --data_dir ${DATA_DIR} \\
-    --output_dir ${OUTPUT_DIR} \\
-    --n_trials ${N_TRIALS} \\
-    --n_seeds ${N_SEEDS} \\
-    --hpo_epochs ${HPO_EPOCHS} \\
-    --base_seed ${SEED}
+python ${TUNE} --approach hard --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_trials ${N_TRIALS} --n_seeds ${N_SEEDS} --hpo_epochs ${HPO_EPOCHS} --base_seed ${SEED}
 EXIT_CODE=\$?
 
 echo "=== End: \$(date)  Exit: \${EXIT_CODE} ==="
