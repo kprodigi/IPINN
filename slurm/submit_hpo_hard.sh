@@ -36,7 +36,7 @@ N_TRIALS="${N_TRIALS:-150}"         # Hard-PINN search adds hidden_layers + batc
 N_SEEDS="${N_SEEDS:-3}"             # ensemble members per trial (raised from 2 — reduces TPE seed noise)
 HPO_EPOCHS="${HPO_EPOCHS:-200}"
 SEED="${SEED:-2026}"
-WALL="${WALL:-96:00:00}"            # ~2× Soft-PINN per trial → more wall
+WALL="${WALL:-120:00:00}"           # uniform 120h wall across all three HPO scripts
 MEM="${MEM:-32G}"
 JOB_NAME="${JOB_NAME:-hpo_v20_hard}"
 

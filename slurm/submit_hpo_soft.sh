@@ -32,7 +32,7 @@ N_TRIALS="${N_TRIALS:-120}"         # target completed trials (search adds hidde
 N_SEEDS="${N_SEEDS:-3}"             # ensemble members per trial (raised from 2 — reduces TPE seed noise)
 HPO_EPOCHS="${HPO_EPOCHS:-200}"     # per-trial epoch cap
 SEED="${SEED:-2026}"
-WALL="${WALL:-72:00:00}"            # 80 trials × ~5–15 min/trial fits in <24h on a V100
+WALL="${WALL:-120:00:00}"           # uniform 120h wall across all three HPO scripts
 MEM="${MEM:-32G}"
 JOB_NAME="${JOB_NAME:-hpo_v20_soft}"
 
