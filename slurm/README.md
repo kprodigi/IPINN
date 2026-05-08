@@ -14,9 +14,9 @@ script (or override via the environment) for other clusters.
 | File | Purpose | Wall | Memory |
 |------|---------|------|--------|
 | `submit_pipeline.sh`  | Full forward + inverse + analysis pipeline (11 jobs in dependency chain) | up to 120h per stage | 16–64 G |
-| `submit_hpo_ddns.sh`  | Optuna HPO for DDNS                  | 48h | 32 G |
-| `submit_hpo_soft.sh`  | Optuna HPO for Soft-PINN             | 72h | 32 G |
-| `submit_hpo_hard.sh`  | Optuna HPO for Hard-PINN             | 96h | 32 G |
+| `submit_hpo_ddns.sh`  | Optuna HPO for DDNS                  | 120h | 32 G |
+| `submit_hpo_soft.sh`  | Optuna HPO for Soft-PINN             | 120h | 32 G |
+| `submit_hpo_hard.sh`  | Optuna HPO for Hard-PINN             | 120h | 32 G |
 | `hpc_run_stage.py`    | per-stage CLI used by `submit_pipeline.sh` (not invoked directly) | — | — |
 
 ## Run from the repo root

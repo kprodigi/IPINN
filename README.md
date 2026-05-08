@@ -66,9 +66,9 @@ write a SQLite study DB that survives SLURM preemption:
 
 ```bash
 # From the repo root, on an HPC cluster with SLURM:
-bash slurm/submit_hpo_ddns.sh        # ~80 trials,  48h wall
-bash slurm/submit_hpo_soft.sh        # ~120 trials, 72h wall
-bash slurm/submit_hpo_hard.sh        # ~150 trials, 96h wall
+bash slurm/submit_hpo_ddns.sh        # ~80 trials,  120h wall
+bash slurm/submit_hpo_soft.sh        # ~120 trials, 120h wall
+bash slurm/submit_hpo_hard.sh        # ~100 trials, 120h wall
 ```
 
 See [`hpo/README.md`](hpo/README.md) for the full HPO workflow.

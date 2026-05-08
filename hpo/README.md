@@ -29,7 +29,7 @@ and use the artifacts written here.
 | Knob | DDNS | Soft-PINN | Hard-PINN |
 |------|------|-----------|-----------|
 | `hidden_layers` | {64-32, 128-64, 128-64-32, 256-128, 256-128-64} | same as DDNS | {32-32, 64-32, 64-64, 128-64, 128-64-32} |
-| `batch_size` | {32, 64, 128} | {32, 64, 128} | {8, 16} |
+| `batch_size` | {32, 64, 128} | {32, 64, 128} | {16, 32} |
 | `lr`, `weight_decay`, `dropout` | log-scaled ranges | same | same |
 | `softplus_beta`, `smoothl1_beta`, `grad_clip` | — | tuned | tuned |
 | Physics weights | — | `w_phys` | `w_load`, `w_energy`, `w_monotonicity`, `w_angle_smooth`, `w_curvature` |
@@ -54,9 +54,9 @@ python hpo/tune_v20.py --approach soft --output_dir ./hpo_dry --dry_hpo
 
 ```bash
 # From the repo root.  Each call submits one SLURM job:
-bash slurm/submit_hpo_ddns.sh        # 80 trials,  48h wall
-bash slurm/submit_hpo_soft.sh        # 120 trials, 72h wall
-bash slurm/submit_hpo_hard.sh        # 150 trials, 96h wall
+bash slurm/submit_hpo_ddns.sh        # 80 trials,  120h wall
+bash slurm/submit_hpo_soft.sh        # 120 trials, 120h wall
+bash slurm/submit_hpo_hard.sh        # 100 trials, 120h wall, hpo_epochs=120
 ```
 
 To run more or fewer trials override `N_TRIALS`:

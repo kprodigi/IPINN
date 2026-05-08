@@ -186,10 +186,15 @@ def suggest_hard(trial: "optuna.Trial") -> Dict:
     # VRAM-bounded so big nets are risky.  ``warmup_epochs`` and ``swa_pct``
     # are searched in narrow ranges around v_19's stability-tuned values
     # (80 and 0.20) so we don't leave the regime where Hard-PINN converges.
+    #
+    # ``batch_size`` excludes 8: an empirical Hard trial 0 with batch_size=8
+    # took 5h 35m on a V100 (1102 minibatches/epoch × autograd-through-dE/dd
+    # × 3 seeds × 200 epochs).  16 and 32 stay in the modern-ML regime and
+    # cut per-trial wall by 2–4× without giving up meaningful generalization.
     hl_key = trial.suggest_categorical("hidden_layers", list(HL_HARD.keys()))
     return {
         "hidden_layers":   list(HL_HARD[hl_key]),
-        "batch_size":      trial.suggest_categorical("batch_size", [8, 16]),
+        "batch_size":      trial.suggest_categorical("batch_size", [16, 32]),
         "lr":              trial.suggest_float("lr",            1e-6, 5e-3, log=True),
         "weight_decay":    trial.suggest_float("weight_decay",  1e-5, 5e-2, log=True),
         "dropout":         trial.suggest_float("dropout",       0.0,  0.05),
