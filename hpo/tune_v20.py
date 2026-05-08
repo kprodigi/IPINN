@@ -352,17 +352,23 @@ class HPOContext:
 
 
 # =============================================================================
-# OBJECTIVE — train M=n_seeds members with sampled cfg, return mean load R²
+# OBJECTIVE — train M=n_seeds members with sampled cfg, return per-seed R²s
 # =============================================================================
 def evaluate_trial(approach: str, cfg: Dict, ctx: HPOContext,
-                   n_seeds: int, base_seed: int, logger: logging.Logger) -> float:
-    """Train n_seeds members with the given cfg and return mean validation
-    load R² (the metric v_20's checkpoint score uses).
+                   n_seeds: int, base_seed: int,
+                   logger: logging.Logger) -> Tuple[float, list]:
+    """Train n_seeds members with the given cfg and return ``(mean R², list
+    of per-seed R²s)``.  v_20 uses load R² as the checkpoint metric.
 
     Each member is trained independently; we don't apply the Tukey
     convergence filter here because the HPO budget is small and we want
     every trial's mean to reflect the cfg's *typical* behavior, not its
     best-of-N.
+
+    Returning the per-seed list (not just the mean) lets the objective
+    record std / min as trial user_attrs.  Low seed-to-seed std is a
+    desirable property for the production retrain (M=20 ensembles), and
+    a robust-mean objective (mean − α·std) is supported via CLI.
     """
     train_fn = TRAIN_FNS[approach]
     r2_list = []
@@ -385,15 +391,31 @@ def evaluate_trial(approach: str, cfg: Dict, ctx: HPOContext,
     if not r2_list:
         # Optuna treats this as a failed trial; TPE skips it for guidance.
         raise optuna.exceptions.TrialPruned("No finite R² across all seeds")
-    return float(np.mean(r2_list))
+    return float(np.mean(r2_list)), r2_list
 
 
 def make_objective(approach: str, ctx: HPOContext, n_seeds: int,
                    base_seed: int, hpo_epochs: int,
-                   logger: logging.Logger):
+                   logger: logging.Logger,
+                   objective_mode: str = "mean",
+                   robust_alpha: float = 1.0):
     """Closure-based objective; monkey-patches ``cd.get_model_config`` for
     the duration of each trial so v_20's training functions pick up the
-    sampled cfg without modifying their signatures."""
+    sampled cfg without modifying their signatures.
+
+    Parameters
+    ----------
+    objective_mode : {"mean", "robust_mean"}
+        ``"mean"`` (default): score = mean of per-seed R² — the same
+        metric v_20's checkpointer uses.
+        ``"robust_mean"``: score = mean − α·std.  Penalises seed-to-seed
+        instability so trials whose ensemble members agree on R² are
+        preferred over volatile ones.  Useful for picking a config that
+        will retrain stably at production M=20.
+    robust_alpha : float
+        Weight on std in robust-mean mode.  α=1.0 means a config with
+        mean=0.85, std=0.05 scores the same (0.80) as mean=0.80, std=0.0.
+    """
 
     suggester = SUGGESTERS[approach]
     original_get_model_config = cd.get_model_config
@@ -433,12 +455,31 @@ def make_objective(approach: str, ctx: HPOContext, n_seeds: int,
         cd.get_model_config = patched_factory(sampled)
         try:
             t0 = time.time()
-            r2 = evaluate_trial(approach, sampled, ctx, n_seeds, base_seed, logger)
+            r2_mean, r2_list = evaluate_trial(
+                approach, sampled, ctx, n_seeds, base_seed, logger)
             elapsed = time.time() - t0
-            logger.info(f"  trial {trial.number:3d}  load_R2={r2:.4f}  "
-                        f"({elapsed:.1f}s)  {sampled}")
-            # Optuna stores user attrs alongside the trial — useful for later analysis
+            r2_arr = np.asarray(r2_list, dtype=float)
+            r2_std = float(r2_arr.std(ddof=0)) if r2_arr.size > 1 else 0.0
+            r2_min = float(r2_arr.min())
+            # Always record ensemble-stability metrics for post-hoc analysis.
             trial.set_user_attr("seconds", elapsed)
+            trial.set_user_attr("r2_per_seed", r2_list)
+            trial.set_user_attr("r2_mean", r2_mean)
+            trial.set_user_attr("r2_std", r2_std)
+            trial.set_user_attr("r2_min", r2_min)
+            # Score depends on the configured objective mode.
+            if objective_mode == "robust_mean":
+                score = r2_mean - robust_alpha * r2_std
+                trial.set_user_attr("robust_score", score)
+            else:
+                score = r2_mean
+            r2 = score
+            seed_str = ", ".join(f"{x:.4f}" for x in r2_list)
+            logger.info(
+                f"  trial {trial.number:3d}  score={r2:.4f}  "
+                f"mean={r2_mean:.4f} std={r2_std:.4f} min={r2_min:.4f}  "
+                f"seeds=[{seed_str}]  ({elapsed:.1f}s)  {sampled}"
+            )
             return r2
         finally:
             cd.get_model_config = original_get_model_config
@@ -453,15 +494,28 @@ def run_hpo(approach: str, output_dir: str, *,
             n_trials: int = 80, n_seeds: int = 2,
             hpo_epochs: int = 200, base_seed: int = 2026,
             study_name: Optional[str] = None,
-            data_dir: str = ".") -> Dict:
+            data_dir: str = ".",
+            objective_mode: str = "mean",
+            robust_alpha: float = 1.0) -> Dict:
     """Execute one Optuna study for ``approach``.  Returns the best params
-    dict (already merged onto the v_19 base config so it's drop-in ready)."""
+    dict (already merged onto the v_19 base config so it's drop-in ready).
+
+    ``objective_mode='robust_mean'`` switches the objective from mean R²
+    to ``mean − α·std`` so trials with unstable seed-to-seed performance
+    are penalised.  Useful when the production retrain uses a large
+    ensemble (e.g. M=20) and ensemble stability matters as much as the
+    point estimate.
+    """
     os.makedirs(output_dir, exist_ok=True)
     log_path = os.path.join(output_dir, f"hpo_log_{approach}.txt")
     logger = _make_logger(approach, log_path)
     logger.info("=" * 80)
-    logger.info(f"HPO V_20  approach={approach}  n_trials={n_trials}  "
-                f"n_seeds={n_seeds}  epochs_cap={hpo_epochs}")
+    logger.info(
+        f"HPO V_20  approach={approach}  n_trials={n_trials}  "
+        f"n_seeds={n_seeds}  epochs_cap={hpo_epochs}  "
+        f"objective={objective_mode}"
+        + (f"  alpha={robust_alpha}" if objective_mode == "robust_mean" else "")
+    )
     logger.info("=" * 80)
 
     cd.refresh_device()
@@ -524,7 +578,9 @@ def run_hpo(approach: str, output_dir: str, *,
     else:
         logger.info(f"Running {todo} new trials (target {n_trials} total)...")
         objective = make_objective(approach, ctx, n_seeds, base_seed,
-                                   hpo_epochs, logger)
+                                   hpo_epochs, logger,
+                                   objective_mode=objective_mode,
+                                   robust_alpha=robust_alpha)
         study.optimize(objective, n_trials=todo, gc_after_trial=True,
                        show_progress_bar=False)
 
@@ -558,15 +614,26 @@ def run_hpo(approach: str, output_dir: str, *,
         }, f, indent=2, default=str)
     logger.info(f"Wrote: {out_json}")
 
-    # Also a CSV trial history for plotting / sanity checks
+    # Also a CSV trial history for plotting / sanity checks.  Includes
+    # ensemble-stability metrics (r2_mean, r2_std, r2_min) so post-hoc
+    # analysis can pick a low-std config near the top, not just the
+    # absolute best mean.  ``score`` is what TPE optimised (mean by
+    # default; mean − α·std under --objective robust_mean); ``r2_mean``
+    # is always the unpenalised mean for cross-mode comparison.
     rows = []
     for t in study.trials:
         if t.state != optuna.trial.TrialState.COMPLETE:
             continue
+        ua = t.user_attrs
+        seeds = ua.get("r2_per_seed", [])
         rows.append({
             "trial":      t.number,
-            "load_r2":    t.value,
-            "seconds":    t.user_attrs.get("seconds", float("nan")),
+            "score":      t.value,
+            "r2_mean":    ua.get("r2_mean", t.value),
+            "r2_std":     ua.get("r2_std", float("nan")),
+            "r2_min":     ua.get("r2_min", float("nan")),
+            "r2_per_seed": ";".join(f"{x:.6f}" for x in seeds) if seeds else "",
+            "seconds":    ua.get("seconds", float("nan")),
             **t.params,
         })
     if rows:
@@ -641,6 +708,19 @@ def main():
     parser.add_argument("--dry_hpo",    action="store_true",
                         help="Tiny smoke (5 trials × M=1 × 30 epochs).  Use to "
                              "validate the script locally before SLURM.")
+    parser.add_argument("--objective", choices=["mean", "robust_mean"],
+                        default="mean",
+                        help="'mean' (default) optimises mean load R² across "
+                             "seeds — the v_20 checkpoint metric.  "
+                             "'robust_mean' optimises mean − alpha*std so trials "
+                             "with unstable seed-to-seed performance are "
+                             "penalised.  Useful when the production retrain "
+                             "uses a large ensemble (e.g. M=20) and stability "
+                             "matters as much as the point estimate.")
+    parser.add_argument("--robust_alpha", type=float, default=1.0,
+                        help="Weight on std in --objective robust_mean.  "
+                             "Default 1.0 means a (mean=0.85, std=0.05) trial "
+                             "scores the same (0.80) as (mean=0.80, std=0.0).")
     args = parser.parse_args()
 
     if args.dry_hpo:
@@ -657,7 +737,9 @@ def main():
                 hpo_epochs=args.hpo_epochs,
                 base_seed=args.base_seed,
                 study_name=args.study_name,
-                data_dir=args.data_dir)
+                data_dir=args.data_dir,
+                objective_mode=args.objective,
+                robust_alpha=args.robust_alpha)
 
 
 if __name__ == "__main__":
