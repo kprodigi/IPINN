@@ -1817,12 +1817,18 @@ def train_ddns(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     y_val = val_df[["load_kN", "energy_J"]].values
     
     model = SoftPINNNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
-    model.configure_zero_bc(params)
+    # DDNS is the data-driven baseline — no architectural physics priors.
+    # The F(d=0)=E(d=0)=0 correction is enabled only for Soft- and Hard-PINN.
+    # Applying it to DDNS imposes a structural prior with no loss-side
+    # counterpart and cost ~0.07 R^2 vs the BC-free v_6 baseline in HPO.
+    # Calling configure_zero_bc(..., enabled=False) is explicit (the network
+    # default is also False, but this documents the choice for reviewers).
+    model.configure_zero_bc(params, enabled=False)
     opt = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"]) if cfg.get("optimizer", "adamw").lower() == "adam" else optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     sched = optim.lr_scheduler.ReduceLROnPlateau(opt, patience=cfg["sched_patience"], factor=cfg["sched_factor"], mode='max')
     mse = nn.MSELoss()
     sl1 = nn.SmoothL1Loss(beta=cfg["smoothl1_beta"])
-    
+
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, Xtr.shape[0], Xtr.shape[0]) if CFG.bootstrap else np.arange(Xtr.shape[0])
     loader = DataLoader(
