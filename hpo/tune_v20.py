@@ -91,38 +91,59 @@ import composite_design_v20 as cd  # noqa: E402
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 warnings.filterwarnings("ignore", category=UserWarning, module=r"matplotlib")
 
-# Optuna 4.x emits two classes of cosmetic warnings during HPO:
-#   1. ExperimentalWarning for the TPESampler's ``multivariate=True`` and
-#      ``group=True`` arguments — both widely used and stable; the warning
-#      fires once at study creation.
-#   2. UserWarning per-trial about categorical choices being a tuple or
-#      list of ints (rather than primitive types).  Affects display in
-#      Optuna's web UI only; the SQLite study DB persistence and
-#      resume-after-preemption are unaffected.
-# Both are noise in the SLURM run log; silence them narrowly so genuine
-# warnings (training divergence, NaN losses, etc.) still surface.
+# Suppress the one-time ExperimentalWarning for TPESampler's
+# ``multivariate=True`` / ``group=True`` arguments — both widely used and
+# stable, but Optuna marks them as experimental.
+#
+# DO NOT suppress the UserWarning about non-primitive categorical choices.
+# Optuna's SQLite layer round-trips str/int/float/bool/None losslessly,
+# but tuples become lists on reload, causing TPE's distribution-compatibility
+# check to raise ``CategoricalDistribution does not support dynamic value
+# space.`` after ``n_startup_trials``.  Earlier we silenced this warning
+# thinking it was cosmetic and the resulting crash burned ~10 GPU-hours.
+# Leave it loud so future tuple regressions surface immediately.
 warnings.filterwarnings(
     "ignore",
     category=optuna.exceptions.ExperimentalWarning,
-)
-warnings.filterwarnings(
-    "ignore",
-    category=UserWarning,
-    message=r"Choices for a categorical distribution should be a tuple.*",
+    message=r"Argument ``(multivariate|group)`` is an experimental feature.*",
 )
 
 
 # =============================================================================
 # SEARCH SPACES — per approach, ranges set 1–2 orders of magnitude around the
 # v_19 HPO-found values so the TPE has room to move but doesn't wander far.
+#
+# Architecture is encoded as a STRING key (e.g. ``"128-64-32"``) rather than a
+# tuple/list of ints.  Optuna's SQLite persistence layer round-trips str/int/
+# float/bool/None losslessly; tuples are silently converted to lists on
+# reload, which then trips ``CategoricalDistribution does not support dynamic
+# value space.`` once TPE's ``multivariate=True, group=True`` engages after
+# ``n_startup_trials`` (the persisted distribution's value type no longer
+# matches the new trial's choice type).  Strings sidestep this entirely.
 # =============================================================================
+HL_DDNS_SOFT = {
+    "64-32":      [64, 32],
+    "128-64":     [128, 64],
+    "128-64-32":  [128, 64, 32],
+    "256-128":    [256, 128],
+    "256-128-64": [256, 128, 64],
+}
+HL_HARD = {
+    "32-32":     [32, 32],
+    "64-32":     [64, 32],
+    "64-64":     [64, 64],
+    "128-64":    [128, 64],
+    "128-64-32": [128, 64, 32],
+}
+
+
 def suggest_ddns(trial: "optuna.Trial") -> Dict:
     # DDNS uses SoftPINNNet (same backbone as Soft-PINN) — same architecture
     # choices.  No physics weights to tune; just data weights, optimization
     # knobs, and architecture.
-    hl_choices = [(64, 32), (128, 64), (128, 64, 32), (256, 128), (256, 128, 64)]
+    hl_key = trial.suggest_categorical("hidden_layers", list(HL_DDNS_SOFT.keys()))
     return {
-        "hidden_layers":   list(trial.suggest_categorical("hidden_layers", hl_choices)),
+        "hidden_layers":   list(HL_DDNS_SOFT[hl_key]),
         "batch_size":      trial.suggest_categorical("batch_size", [32, 64, 128]),
         "lr":              trial.suggest_float("lr",            1e-6, 1e-3, log=True),
         "weight_decay":    trial.suggest_float("weight_decay",  1e-6, 1e-3, log=True),
@@ -137,12 +158,11 @@ def suggest_ddns(trial: "optuna.Trial") -> Dict:
 
 
 def suggest_soft(trial: "optuna.Trial") -> Dict:
-    # ``hidden_layers`` and ``batch_size`` are categorical (hashable tuples for
-    # the SQLite study DB).  v_19's HPO winner [256, 128] is included so the
-    # TPE can rediscover it if it remains optimal under v_20's architectural BC.
-    hl_choices = [(64, 32), (128, 64), (128, 64, 32), (256, 128), (256, 128, 64)]
+    # v_19's HPO winner [256, 128] is included so TPE can rediscover it if
+    # it remains optimal under v_20's architectural BC.
+    hl_key = trial.suggest_categorical("hidden_layers", list(HL_DDNS_SOFT.keys()))
     return {
-        "hidden_layers":   list(trial.suggest_categorical("hidden_layers", hl_choices)),
+        "hidden_layers":   list(HL_DDNS_SOFT[hl_key]),
         "batch_size":      trial.suggest_categorical("batch_size", [32, 64, 128]),
         "lr":              trial.suggest_float("lr",            1e-5, 5e-2, log=True),
         "weight_decay":    trial.suggest_float("weight_decay",  1e-6, 5e-3, log=True),
@@ -166,9 +186,9 @@ def suggest_hard(trial: "optuna.Trial") -> Dict:
     # VRAM-bounded so big nets are risky.  ``warmup_epochs`` and ``swa_pct``
     # are searched in narrow ranges around v_19's stability-tuned values
     # (80 and 0.20) so we don't leave the regime where Hard-PINN converges.
-    hl_choices = [(32, 32), (64, 32), (64, 64), (128, 64), (128, 64, 32)]
+    hl_key = trial.suggest_categorical("hidden_layers", list(HL_HARD.keys()))
     return {
-        "hidden_layers":   list(trial.suggest_categorical("hidden_layers", hl_choices)),
+        "hidden_layers":   list(HL_HARD[hl_key]),
         "batch_size":      trial.suggest_categorical("batch_size", [8, 16]),
         "lr":              trial.suggest_float("lr",            1e-6, 5e-3, log=True),
         "weight_decay":    trial.suggest_float("weight_decay",  1e-5, 5e-2, log=True),
