@@ -212,82 +212,116 @@ def suggest_hard(trial: "optuna.Trial") -> Dict:
         "w_curvature":     trial.suggest_float("w_curvature",   1e-5, 0.1, log=True),
         "smooth_delta_deg": trial.suggest_float("smooth_delta_deg", 1.0, 5.0),
         "colloc_ratio":    trial.suggest_float("colloc_ratio",  1.0,  6.0),
-        "grad_clip":       trial.suggest_float("grad_clip",     0.5,  2.0),
+        "grad_clip":       trial.suggest_float("grad_clip",     0.5,  3.0),
         "warmup_epochs":   trial.suggest_int  ("warmup_epochs", 40,   150),
         "swa_pct":         trial.suggest_float("swa_pct",       0.10, 0.35),
     }
 
 
 # =============================================================================
-# WARM-START SEEDS — best params from the prior (v_6 / v_16) HPO runs.
-# Enqueued as the very first trial per approach so TPE has a strong informed
-# prior instead of having to rediscover the good region from scratch.
+# WARM-START SEEDS — best params from the prior (v_6 / v_16 / hpo_v3) HPO runs.
+# Each approach gets one or more dicts that are enqueued as the FIRST trials
+# of a fresh study so TPE has strong informed priors instead of rediscovering
+# the good region from scratch.  Skipped on resume.
 #
-# These came from the SQLite study DBs and JSON snapshots in ``Old HPO Files/``:
-#   - DDNS: tune_ddns.db best  R2=0.7835
-#   - Soft: tune_soft.db best  R2=0.8012
-#   - Hard: tune_hard.db best  R2=0.8181  (chosen for completeness — has every
-#                                          v_20 hparam; an even higher 0.8401
-#                                          run from an older Hard variant
-#                                          lacked w_monotonicity/etc.)
+# Sources (from ``Old HPO Files/``):
+#   - DDNS: tune_ddns.db best                       R2=0.7835
+#   - Soft: tune_soft.db best                       R2=0.8012
+#   - Hard: TWO seeds —
+#       (a) v_16 production cfg ([32, 32], 800ep, M=20)            R2=0.849861
+#           This is the highest documented Hard val-load R^2 — full-budget
+#           production retrain of the v_16 hardcoded cfg.
+#       (b) hpo_hardpinn_v3 trial 186 ([32, 32], M=2 seeds)
+#           mean R2=0.8304 with std=0.0106 (lowest seed-to-seed std in the
+#           v_3 study; useful as a stability prior for ensemble members).
 #
-# Param NAMES must match the suggester keys exactly; categorical values must
-# match the choice strings (e.g. "128-64-32" not [128, 64, 32]).  Any param
-# missing from a warm-start dict is freely sampled by Optuna for that trial.
+# Param NAMES must match suggester keys exactly; categorical values must
+# match choice strings (e.g. "32-32" not [32, 32]).  Any param missing from
+# a warm-start dict is freely sampled by Optuna for that trial.
 # =============================================================================
 WARM_START = {
-    "ddns": {
-        "hidden_layers":   "128-64-32",
-        "batch_size":      64,
-        "lr":              4.21e-05,
-        "weight_decay":    3.16e-05,
-        "dropout":         0.016,
-        "softplus_beta":   18.90,
-        "smoothl1_beta":   1.08,
-        "w_data_load":     3.57,
-        "w_data_energy":   3.45,
-        "sched_patience":  58,
-        "sched_factor":    0.46,
-    },
-    "soft": {
-        "hidden_layers":   "256-128-64",
-        "batch_size":      32,
-        "lr":              4.24e-03,
-        "weight_decay":    1.57e-04,
-        "dropout":         1.4e-04,
-        "softplus_beta":   11.06,
-        "smoothl1_beta":   1.16,
-        "w_data_load":     3.61,
-        "w_data_energy":   1.70,
-        "w_phys":          3.69,
-        "w_monotonicity":  4.96,
-        "w_angle_smooth":  0.028,
-        "smooth_delta_deg": 2.0,
-        "colloc_ratio":    3.70,
-        "sched_patience":  71,
-        "sched_factor":    0.65,
-    },
-    "hard": {
-        "hidden_layers":   "128-64-32",
-        "batch_size":      32,
-        "lr":              4.41e-05,
-        "weight_decay":    6.87e-04,
-        "dropout":         0.0094,
-        "softplus_beta":   8.84,
-        "smoothl1_beta":   0.19,
-        "w_load":          11.99,
-        "w_energy":        13.08,
-        "grad_clip":       1.83,
-        "w_monotonicity":  0.094,
-        "w_angle_smooth":  0.019,
-        "w_curvature":     0.010,
-        "smooth_delta_deg": 2.59,
-        "colloc_ratio":    1.29,
-        "warmup_epochs":   80,    # v_19 default — not in old run
-        "swa_pct":         0.20,  # v_19 default — not in old run
-        "sched_patience":  58,
-        "sched_factor":    0.70,
-    },
+    "ddns": [
+        {
+            "hidden_layers":   "128-64-32",
+            "batch_size":      64,
+            "lr":              4.21e-05,
+            "weight_decay":    3.16e-05,
+            "dropout":         0.016,
+            "softplus_beta":   18.90,
+            "smoothl1_beta":   1.08,
+            "w_data_load":     3.57,
+            "w_data_energy":   3.45,
+            "sched_patience":  58,
+            "sched_factor":    0.46,
+        },
+    ],
+    "soft": [
+        {
+            "hidden_layers":   "256-128-64",
+            "batch_size":      32,
+            "lr":              4.24e-03,
+            "weight_decay":    1.57e-04,
+            "dropout":         1.4e-04,
+            "softplus_beta":   11.06,
+            "smoothl1_beta":   1.16,
+            "w_data_load":     3.61,
+            "w_data_energy":   1.70,
+            "w_phys":          3.69,
+            "w_monotonicity":  4.96,
+            "w_angle_smooth":  0.028,
+            "smooth_delta_deg": 2.0,
+            "colloc_ratio":    3.70,
+            "sched_patience":  71,
+            "sched_factor":    0.65,
+        },
+    ],
+    "hard": [
+        # (a) v_16 production cfg — highest documented Hard R^2 (0.849861).
+        {
+            "hidden_layers":    "32-32",
+            "batch_size":       16,
+            "lr":               4.0e-05,
+            "weight_decay":     5.27e-04,
+            "dropout":          0.0003,
+            "softplus_beta":    13.82,
+            "smoothl1_beta":    0.143,
+            "w_load":           6.0,
+            "w_energy":         7.0,
+            "grad_clip":        1.63,
+            "w_monotonicity":   5.0,
+            "w_angle_smooth":   0.03,
+            "w_curvature":      0.005,
+            "smooth_delta_deg": 1.38,
+            "colloc_ratio":     1.86,
+            "warmup_epochs":    80,    # v_19 default — not specified in v_16 source
+            "swa_pct":          0.20,  # v_19 default
+            "sched_patience":   73,
+            "sched_factor":     0.37,
+        },
+        # (b) hpo_hardpinn_v3 trial 186 — lowest seed-to-seed std (0.011) at
+        # mean R2=0.8304 across 2 seeds.  Acts as a stability prior.
+        {
+            "hidden_layers":    "32-32",
+            "batch_size":       32,
+            "lr":               1.34e-05,
+            "weight_decay":     0.00495,
+            "dropout":          0.00172,
+            "softplus_beta":    8.87,
+            "smoothl1_beta":    0.229,
+            "w_load":           4.58,
+            "w_energy":         6.56,
+            "grad_clip":        1.95,
+            "w_monotonicity":   2.74,
+            "w_angle_smooth":   0.0192,
+            "w_curvature":      0.00155,
+            "smooth_delta_deg": 2.50,
+            "colloc_ratio":     3.90,
+            "warmup_epochs":    80,
+            "swa_pct":          0.20,
+            "sched_patience":   60,
+            "sched_factor":     0.50,
+        },
+    ],
 }
 
 
@@ -464,22 +498,25 @@ def run_hpo(approach: str, output_dir: str, *,
     n_done = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
     logger.info(f"Existing completed trials: {n_done}")
 
-    # Warm-start: enqueue the prior-HPO best params as the very first trial
-    # of a fresh study.  Skipped on resume (study.trials non-empty) so we
-    # don't burn a duplicate trial after preemption.
+    # Warm-start: enqueue prior-HPO best params as the first N trials of a
+    # fresh study (one or more dicts per approach).  Skipped on resume
+    # (study.trials non-empty) so we don't burn duplicate trials after
+    # preemption.
     if not study.trials and approach in WARM_START:
-        seed_params = WARM_START[approach]
-        try:
-            study.enqueue_trial(seed_params, skip_if_exists=True)
-            logger.info(
-                f"Warm-start enqueued ({len(seed_params)} params from "
-                f"prior-HPO best, approach={approach}); will run as trial 0."
-            )
-        except Exception as ex:  # pragma: no cover
-            # If a warm-start key/value falls outside the current search
-            # space, Optuna raises at trial-run time, not at enqueue.  Log
-            # but don't abort — TPE will still produce trial 0 from scratch.
-            logger.warning(f"Warm-start enqueue failed: {ex}")
+        seeds = WARM_START[approach]
+        for i, seed_params in enumerate(seeds):
+            try:
+                study.enqueue_trial(seed_params, skip_if_exists=True)
+                logger.info(
+                    f"Warm-start #{i} enqueued ({len(seed_params)} params, "
+                    f"approach={approach}); will run as trial {i}."
+                )
+            except Exception as ex:  # pragma: no cover
+                # If a warm-start key/value falls outside the current search
+                # space, Optuna raises at trial-run time, not at enqueue.
+                # Log but don't abort — TPE will still produce trial i from
+                # scratch.
+                logger.warning(f"Warm-start #{i} enqueue failed: {ex}")
 
     todo = max(0, n_trials - n_done)
     if todo == 0:
