@@ -72,24 +72,25 @@ module purge
 module load ${CUDA_MODULE}
 module load ${CUDNN_MODULE}
 
-source \$HOME/miniconda3/etc/profile.d/conda.sh
-conda activate ${CONDA_ENV} || { echo "ERROR: conda activate ${CONDA_ENV} failed on \$(hostname)"; exit 1; }
+# Pin absolute path to the env's Python; bypass ``conda activate``
+# (silent activation failures on some SDSMT compute nodes — see ddns script).
+PYTHON_BIN="\$HOME/miniconda3/envs/${CONDA_ENV}/bin/python"
+if [[ ! -x "\$PYTHON_BIN" ]]; then
+    echo "ERROR: '\$PYTHON_BIN' not executable on \$(hostname)"
+    exit 1
+fi
 
-# Verify env activation actually picked up the right python + dependency.
-# (See comment block in submit_hpo_ddns.sh for why this matters.)
 echo "=== env check on \$(hostname) ==="
-echo "  python   : \$(which python)"
-python -c "import sys; print('  sys.executable =', sys.executable)"
-python -c "import optuna; print('  optuna', optuna.__version__, 'OK')" || {
-    echo "WARN: optuna missing in '${CONDA_ENV}' on \$(hostname); auto-installing..."
-    pip install --quiet 'optuna>=3.4,<5' || { echo "ERROR: pip install optuna failed"; exit 1; }
-    python -c "import optuna; print('  optuna', optuna.__version__, 'OK after install')"
+echo "  PYTHON_BIN: \$PYTHON_BIN"
+"\$PYTHON_BIN" -c "import sys, optuna; print(f'  python {sys.version.split()[0]}  optuna {optuna.__version__}  OK')" || {
+    echo "ERROR: python or optuna not loadable from \$PYTHON_BIN"
+    exit 1
 }
 
 echo "=== HPO Soft-PINN  Node: \$(hostname)  GPU: \${CUDA_VISIBLE_DEVICES:-none} ==="
 echo "=== Start: \$(date)  N_TRIALS=${N_TRIALS}  N_SEEDS=${N_SEEDS}  EPOCHS=${HPO_EPOCHS} ==="
 
-python ${TUNE} --approach soft --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_trials ${N_TRIALS} --n_seeds ${N_SEEDS} --hpo_epochs ${HPO_EPOCHS} --base_seed ${SEED}
+"\$PYTHON_BIN" ${TUNE} --approach soft --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_trials ${N_TRIALS} --n_seeds ${N_SEEDS} --hpo_epochs ${HPO_EPOCHS} --base_seed ${SEED}
 EXIT_CODE=\$?
 
 echo "=== End: \$(date)  Exit: \${EXIT_CODE} ==="

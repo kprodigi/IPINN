@@ -73,26 +73,28 @@ module purge
 module load ${CUDA_MODULE}
 module load ${CUDNN_MODULE}
 
-source \$HOME/miniconda3/etc/profile.d/conda.sh
-conda activate ${CONDA_ENV} || { echo "ERROR: conda activate ${CONDA_ENV} failed on \$(hostname)"; exit 1; }
+# Pin the absolute path to the env's Python.  Skipping ``conda activate``
+# entirely — it's been failing silently on some SDSMT compute nodes (PATH
+# falls back to base, then the script dies 5 s later with ModuleNotFoundError).
+# Calling the env's python directly bypasses every conda quirk.
+PYTHON_BIN="\$HOME/miniconda3/envs/${CONDA_ENV}/bin/python"
+if [[ ! -x "\$PYTHON_BIN" ]]; then
+    echo "ERROR: '\$PYTHON_BIN' not executable on \$(hostname)"
+    echo "  Check that conda env '${CONDA_ENV}' exists in \$HOME/miniconda3/envs/"
+    exit 1
+fi
 
-# Verify the env actually picked up the right python + dependency.  On rare
-# nodes (NFS hiccup, conda init race) ``conda activate`` succeeds but PATH
-# still resolves to (base); the silent fallback then fails 5 s later with a
-# ModuleNotFoundError.  Better to fail loudly with diagnostics, or auto-fix.
 echo "=== env check on \$(hostname) ==="
-echo "  python   : \$(which python)"
-python -c "import sys; print('  sys.executable =', sys.executable)"
-python -c "import optuna; print('  optuna', optuna.__version__, 'OK')" || {
-    echo "WARN: optuna missing in '${CONDA_ENV}' on \$(hostname); auto-installing..."
-    pip install --quiet 'optuna>=3.4,<5' || { echo "ERROR: pip install optuna failed"; exit 1; }
-    python -c "import optuna; print('  optuna', optuna.__version__, 'OK after install')"
+echo "  PYTHON_BIN: \$PYTHON_BIN"
+"\$PYTHON_BIN" -c "import sys, optuna; print(f'  python {sys.version.split()[0]}  optuna {optuna.__version__}  OK')" || {
+    echo "ERROR: python or optuna not loadable from \$PYTHON_BIN"
+    exit 1
 }
 
 echo "=== HPO DDNS  Node: \$(hostname)  GPU: \${CUDA_VISIBLE_DEVICES:-none} ==="
 echo "=== Start: \$(date)  N_TRIALS=${N_TRIALS}  N_SEEDS=${N_SEEDS}  EPOCHS=${HPO_EPOCHS} ==="
 
-python ${TUNE} --approach ddns --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_trials ${N_TRIALS} --n_seeds ${N_SEEDS} --hpo_epochs ${HPO_EPOCHS} --base_seed ${SEED}
+"\$PYTHON_BIN" ${TUNE} --approach ddns --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_trials ${N_TRIALS} --n_seeds ${N_SEEDS} --hpo_epochs ${HPO_EPOCHS} --base_seed ${SEED}
 EXIT_CODE=\$?
 
 echo "=== End: \$(date)  Exit: \${EXIT_CODE} ==="
