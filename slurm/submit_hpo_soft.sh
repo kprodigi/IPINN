@@ -73,7 +73,18 @@ module load ${CUDA_MODULE}
 module load ${CUDNN_MODULE}
 
 source \$HOME/miniconda3/etc/profile.d/conda.sh
-conda activate ${CONDA_ENV}
+conda activate ${CONDA_ENV} || { echo "ERROR: conda activate ${CONDA_ENV} failed on \$(hostname)"; exit 1; }
+
+# Verify env activation actually picked up the right python + dependency.
+# (See comment block in submit_hpo_ddns.sh for why this matters.)
+echo "=== env check on \$(hostname) ==="
+echo "  python   : \$(which python)"
+python -c "import sys; print('  sys.executable =', sys.executable)"
+python -c "import optuna; print('  optuna', optuna.__version__, 'OK')" || {
+    echo "WARN: optuna missing in '${CONDA_ENV}' on \$(hostname); auto-installing..."
+    pip install --quiet 'optuna>=3.4,<5' || { echo "ERROR: pip install optuna failed"; exit 1; }
+    python -c "import optuna; print('  optuna', optuna.__version__, 'OK after install')"
+}
 
 echo "=== HPO Soft-PINN  Node: \$(hostname)  GPU: \${CUDA_VISIBLE_DEVICES:-none} ==="
 echo "=== Start: \$(date)  N_TRIALS=${N_TRIALS}  N_SEEDS=${N_SEEDS}  EPOCHS=${HPO_EPOCHS} ==="
