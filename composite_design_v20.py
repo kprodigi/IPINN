@@ -713,11 +713,25 @@ def _dry_run_shrink_training_cfg(cfg: Dict) -> None:
 
 
 def get_model_config(approach: str, protocol: str = "random", w_phys_override: float = None) -> Dict:
-    """Get model configuration with protocol-specific hyperparameters."""
-    
+    """Get model configuration with protocol-specific hyperparameters.
+
+    Unseen-θ=60° configs are v_16's hardcoded HPO-best (composite_design_v16.py
+    lines 272-329).  These are the configurations whose production retrain
+    (M=20 ensemble × 600-800 epochs) produced the documented results:
+        DDNS:  best val load R² = 0.7835  (arch [128, 64, 32])
+        Soft:  best val load R² = 0.8012  (arch [256, 128, 64])
+        Hard:  best val load R² = 0.8499  (arch [32, 32])
+    The Soft and Hard cfgs run in v_20's pipeline with the architectural
+    E(0)=0 BC active (replacing v_19's soft `w_bc` penalty); DDNS runs with
+    BC disabled inside train_ddns since it has no physics losses.
+
+    To reproduce the documented R² numbers, run:
+        python composite_design_v20.py --mode forward --data_dir ./data \\
+            --output_dir ./results --n_ensemble 20 --strict_paper
+    """
+
     if protocol == "unseen":
-        # --- Tuned hyperparameters for unseen θ=60° ---
-        # Best val load R2 = 0.783475, arch = [128, 64, 32]
+        # ---- v_16 cfg_ddns (Best val load R² = 0.7835, arch [128, 64, 32]) ----
         cfg_ddns = {
             "optimizer": "adam", "lr": 4.2123162503e-05,
             "weight_decay": 3.1582563297e-05, "batch_size": 64,
@@ -729,47 +743,48 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
             "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
             "sched_patience": 58, "sched_factor": 0.4589,
         }
-        
-        # Best val load R2 = 0.804971, arch = [256, 128]
-        # HPO v3: 95 trials, Optuna TPE, 2-seed evaluation
-        # w_phys=0.5195, w_mono=4.098, w_smooth=0.0194, delta=2.66 deg
+
+        # ---- v_16 cfg_soft (Best val load R² = 0.8012, arch [256, 128, 64]) ----
+        # ``w_bc`` is in v_16's cfg but UNUSED in v_20 — the architectural
+        # E(0)=0 correction in SoftPINNNet replaces the soft penalty.  Kept
+        # here so the cfg round-trips exactly with v_16 source.
         cfg_soft = {
-            "optimizer": "adam", "lr": 8.0733040807e-03,
-            "weight_decay": 6.8420377257e-04, "batch_size": 64,
-            "hidden_layers": [256, 128], "dropout": 0.007671,
-            "softplus_beta": 12.0831, "smoothl1_beta": 1.0266,
-            "w_data_load": 2.969519, "w_data_energy": 0.953040,
-            "w_phys": 0.519484 if w_phys_override is None else w_phys_override,
-            "w_bc": 0.599104, "colloc_ratio": 3.670053,
-            "w_monotonicity": 4.097050,
-            "w_angle_smooth": 0.019446,
-            "smooth_delta_deg": 2.6603,
+            "optimizer": "adam", "lr": 4.2358412564e-03,
+            "weight_decay": 1.5707123457e-04, "batch_size": 32,
+            "hidden_layers": [256, 128, 64], "dropout": 0.000137,
+            "softplus_beta": 11.0650, "smoothl1_beta": 1.1584,
+            "w_data_load": 3.609280, "w_data_energy": 1.704464,
+            "w_phys": 3.689334 if w_phys_override is None else w_phys_override,
+            "w_bc": 0.851661, "colloc_ratio": 3.697626,
+            "w_monotonicity": 4.957592,
+            "w_angle_smooth": 0.028448,
+            "smooth_delta_deg": 2.0000,
             "extrapolate_angles": True,
             "epochs": 800, "eval_every": 25,
             "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
-            "sched_patience": 55, "sched_factor": 0.4574,
+            "sched_patience": 71, "sched_factor": 0.6547,
         }
-        
-        # Best val load R2 = 0.850764, arch = [128, 64]
-        # HPO v3: 154 trials, Optuna TPE, 2-seed evaluation
-        # Stabilized training: warmup=80 epochs, cosine annealing, SWA last 20%
-        # w_mono=7.720, w_smooth=0.0161, w_curv=0.0013
+
+        # ---- v_16 cfg_hard (Best val load R² = 0.8499, arch [32, 32]) ----
+        # ``warmup_epochs`` and ``swa_pct`` are NOT in v_16 source but train_hard
+        # in v_20 expects them (default 80 and 0.20 from v_19's stability work).
         cfg_hard = {
-            "optimizer": "adam", "lr": 9.9507487403e-05,
-            "weight_decay": 3.7459350574e-03, "batch_size": 8,
-            "hidden_layers": [128, 64], "dropout": 0.005504,
-            "softplus_beta": 11.6712, "smoothl1_beta": 0.1176,
-            "w_load": 6.8031, "w_energy": 8.6549,
-            "grad_clip": 0.9834,
-            "w_monotonicity": 7.719974,
-            "w_angle_smooth": 0.016094,
-            "w_curvature": 0.001285,
-            "smooth_delta_deg": 1.9329,
-            "colloc_ratio": 3.5795,
+            "optimizer": "adamw", "lr": 4.0e-05,
+            "weight_decay": 5.27e-04, "batch_size": 16,
+            "hidden_layers": [32, 32], "dropout": 0.0003,
+            "softplus_beta": 13.82, "smoothl1_beta": 0.143,
+            "w_load": 6.0, "w_energy": 7.0,
+            "grad_clip": 1.63,
+            "w_monotonicity": 5.0,
+            "w_angle_smooth": 0.03,
+            "w_curvature": 0.005,
+            "smooth_delta_deg": 1.38,
+            "colloc_ratio": 1.86,
             "extrapolate_angles": True,
             "epochs": 800, "eval_every": 20,
-            "earlystop_patience_evals": 20, "earlystop_min_delta": 1e-5,
-            # Stabilization params (fixed, not searched)
+            "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
+            "sched_patience": 73, "sched_factor": 0.37,
+            # Stabilization params (v_19 defaults; not in v_16 source)
             "warmup_epochs": 80,
             "swa_pct": 0.20,
             "eta_min": 1e-6,

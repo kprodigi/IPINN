@@ -251,7 +251,11 @@ class TestCurvatureRegularizationHard:
     def test_hard_unseen_config_has_w_curvature(self, m):
         cfg = m.get_model_config("hard", "unseen")
         assert "w_curvature" in cfg
-        assert cfg["w_curvature"] == pytest.approx(0.001285)
+        # v_16 cfg_hard value (composite_design_v16.py line 322).  The earlier
+        # 0.001285 here was from a v_19 HPO winner that was replaced when
+        # get_model_config was switched to v_16's documented production cfg
+        # (which produced R²=0.8499 for Hard).
+        assert cfg["w_curvature"] == pytest.approx(0.005)
 
     def test_curvature_loss_scalar(self, m):
         net = m.HardEnergyNet(in_d=5, hidden_layers=[16], dropout=0.0, softplus_beta=1.0)
