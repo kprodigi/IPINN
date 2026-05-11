@@ -1922,12 +1922,20 @@ def train_soft(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     y_val = val_df[["load_kN", "energy_J"]].values
     
     model = SoftPINNNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
-    model.configure_zero_bc(params)
+    # Soft-PINN by name should use SOFT (penalty) constraints throughout.
+    # The architectural F(0)=E(0)=0 correction is reserved for Hard-PINN; for
+    # Soft-PINN the BC is enforced via the ``w_bc * (E(d=0))²`` penalty term
+    # below (identical to v_16's train_soft loss formulation).  This keeps
+    # the methodological ladder clean:
+    #   DDNS       — no physics
+    #   Soft-PINN  — soft physics + soft BC (penalties in loss)
+    #   Hard-PINN  — hard physics (F = dE/dd by autograd) + hard BC (architectural)
+    model.configure_zero_bc(params, enabled=False)
     opt = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"]) if cfg.get("optimizer", "adamw").lower() == "adam" else optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     sched = optim.lr_scheduler.ReduceLROnPlateau(opt, patience=cfg["sched_patience"], factor=cfg["sched_factor"], mode='max')
     mse = nn.MSELoss()
     sl1 = nn.SmoothL1Loss(beta=cfg["smoothl1_beta"])
-    
+
     # Use extrapolating collocation for unseen protocol
     extrapolate = cfg.get("extrapolate_angles", False)
     colloc_sampler = create_collocation_sampler(train_df, scaler_disp, enc, extrapolate_angles=extrapolate)
@@ -6812,7 +6820,8 @@ def run_hyperparam_sensitivity(train_df: pd.DataFrame, val_df: pd.DataFrame,
                 y_val = val_df[["load_kN", "energy_J"]].values
                 
                 model = SoftPINNNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
-                model.configure_zero_bc(params)
+                # Soft-PINN uses soft (penalty) BC, not architectural — match train_soft.
+                model.configure_zero_bc(params, enabled=False)
                 opt = optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
                 mse = nn.MSELoss()
                 sl1 = nn.SmoothL1Loss(beta=cfg["smoothl1_beta"])
@@ -7306,9 +7315,12 @@ def run_same_capacity_experiment(train_df: pd.DataFrame, val_df: pd.DataFrame,
         
         if approach == "soft":
             model = SoftPINNNet(Xtr.shape[1], architecture, cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
+            # Soft-PINN: soft BC via loss penalty, NOT architectural correction.
+            model.configure_zero_bc(params, enabled=False)
         else:
             model = HardEnergyNet(Xtr.shape[1], architecture, cfg.get("dropout", 0.0), cfg["softplus_beta"]).to(DEVICE)
-        model.configure_zero_bc(params)
+            # Hard-PINN: architectural E(d=0)=0 correction, force is dE/dd.
+            model.configure_zero_bc(params)
         
         n_params = model.count_parameters()
         
@@ -7533,7 +7545,8 @@ def run_extended_ablation(train_df: pd.DataFrame, val_df: pd.DataFrame,
             y_val = val_df[["load_kN", "energy_J"]].values
             
             model = SoftPINNNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
-            model.configure_zero_bc(params)
+            # Soft-PINN: soft BC penalty, not architectural — match train_soft.
+            model.configure_zero_bc(params, enabled=False)
             opt = optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
             mse = nn.MSELoss()
             sl1 = nn.SmoothL1Loss(beta=cfg["smoothl1_beta"])
