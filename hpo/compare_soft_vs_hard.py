@@ -11,17 +11,23 @@ Hard-PINN's value is NOT primarily about R² lift over Soft-PINN (the gap is
 typically ~0.02-0.03 on this problem).  It is about CATEGORICAL physics
 guarantees that Soft-PINN can only approximate:
 
-   1. F(d=0) and E(d=0):
+   1. F(d=0) AND E(d=0):
         Soft  →  small but non-zero residual (~10⁻¹ units)
         Hard  →  exactly zero by construction (machine precision)
+
+      Hard's ``HardEnergyNet.configure_zero_bc`` enforces BOTH BCs
+      architecturally via slope-subtraction:
+        E_corrected(x) = E_net(x) − E_net(x|d=0)
+                         − (d_s − d_s0) · ∂E_net/∂d_s|_{x|d=0} + c_{0,E}
+      so E(d=0) = c_{0,E} (raw 0) and ∂E/∂d_s|_{d=0} = 0 (raw F(0) = 0).
 
    2. Force-energy thermodynamic identity F = dE/dd:
         Soft  →  residual penalised in loss; small but nonzero
         Hard  →  F is computed AS dE/dd via autograd; residual = 0 always
 
-   3. Hyperparameter count:
-        Soft  →  needs w_phys, w_bc tuned
-        Hard  →  no w_phys, no w_bc (architectural)
+   3. Hyperparameter count for BC enforcement:
+        Soft  →  w_bc tuned (and a separate physics weight w_phys)
+        Hard  →  no w_bc (architectural)
 
    4. Worst-seed behaviour and ensemble interval coverage — usually
       tighter for Hard since its physics is exact.

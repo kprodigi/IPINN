@@ -44,12 +44,23 @@ The file is organized in nine top-level blocks, in source order:
 | 1391–1462 | `SoftPINNNet` — two-headed MLP for force and energy (DDNS and Soft-PINN both use this) |
 | 1428–1462 | `SoftPINNNet.configure_zero_bc` — architectural `E(0)=0`/`F(0)=0` correction |
 | 1463–1529 | `HardEnergyNet` — single-output energy network; force is `dE/dd` via `torch.autograd.grad` |
-| 1501–1529 | `HardEnergyNet.configure_zero_bc` — same architectural BC, applied through the energy head |
+| 1501–1529 | `HardEnergyNet.configure_zero_bc` — slope-subtraction architectural BC (both `E(0)=0` and `F(0)=0`) |
 
 The architectural BC is the v_20 contribution: it replaces v_19's soft `w_bc`
-penalty with an exact subtraction
-`E_corrected(x) = E_net(x) − E_net(x|d=0) + c_{0,E}` so the boundary is
-satisfied by construction and `w_bc` is no longer needed in the loss.
+penalty with an exact subtraction so `w_bc` is no longer needed in the loss.
+Two flavors:
+
+- **SoftPINNNet** (two-headed `[F, E]`) corrects each output directly at
+  `d=0`:
+  `F_corr(x) = F_net(x) − F_net(x|d=0) + c_{0,F}`,
+  `E_corr(x) = E_net(x) − E_net(x|d=0) + c_{0,E}`.
+- **HardEnergyNet** (single output `E`, with `F = dE/dd`) must pin BOTH the
+  value AND the d-slope at the boundary to recover `F(0)=0`. Slope
+  subtraction does this:
+  `E_corr(x) = E_net(x) − E_net(x|d=0) − (d_s − d_s0)·∂E_net/∂d_s|_{x|d=0}
+    + c_{0,E}`.
+  Cost: one extra inner `autograd.grad` per forward pass plus a second-order
+  graph during training (~2–3× the value-only correction).
 
 ## Block 4 — Physics losses (1530 – 1796) ← paper Section 3.5.2
 

@@ -1478,13 +1478,27 @@ class SoftPINNNet(nn.Module):
 class HardEnergyNet(nn.Module):
     """MLP for Hard-PINN (outputs only E; F derived by differentiation).
 
-    Optionally enforces ``E(d=0) ≡ 0`` in raw (un-normalized) space via an
-    architectural correction; activate by calling :meth:`configure_zero_bc`
-    after construction.  The correction subtracts a quantity that does NOT
-    depend on the displacement column of the input, so ``∂E_corrected/∂d ≡
-    ∂E_net/∂d`` everywhere — the ``F = dE/dd`` formulation is preserved
-    exactly.  Note: this does **not** make ``F(d=0) = 0`` architecturally
-    (that would require a different factoring such as ``E = d²·h``).
+    Optionally enforces BOTH ``E(d=0) ≡ 0`` AND ``F(d=0) ≡ dE/dd|_{d=0} ≡ 0``
+    in raw (un-normalized) space via an architectural correction; activate by
+    calling :meth:`configure_zero_bc` after construction.
+
+    The correction is slope-subtraction in scaled space::
+
+        E_corrected(x) = E_net(x) − E_net(x|d=0)
+                         − (d_s − d_s0) · (∂E_net/∂d_s)|_{x=x|d=0}
+                         + c_{0,E}
+
+    where ``d_s`` is the scaled displacement column of ``x``, ``d_s0`` is its
+    scaled-zero value ``-mu_d/sig_d``, and ``c_{0,E} = -mu_E/sig_E``.  At
+    ``x|d=0`` the second and third terms cancel exactly: the value reduces to
+    ``c_{0,E}`` (raw E = 0) and ``∂E_corrected/∂d_s|_{x=x|d=0} = 0`` (raw F =
+    0).  Both BCs are enforced for every (θ, LC).
+
+    Cost vs the v_16 value-only correction (subtract ``E_net(x|d=0)`` only):
+    one additional inner ``autograd.grad`` call per forward pass to obtain
+    ``∂E_net/∂d_s|_{x|d=0}``, plus a second-order graph during training (so
+    the outer physics-loss backward can flow back to the net's weights).
+    Roughly 2–3× the v_16 forward/backward cost.
     """
 
     def __init__(self, in_d: int, hidden_layers: List[int], dropout: float,
@@ -1501,7 +1515,7 @@ class HardEnergyNet(nn.Module):
         layers.append(nn.Linear(d, 1))
         self.net = nn.Sequential(*layers)
         self._init_weights()
-        # Architectural E(d=0)=0 correction (inactive by default).
+        # Architectural E(d=0)=0 AND F(d=0)=0 correction (inactive by default).
         self._zero_bc_active = False
         self.register_buffer("_d_scaled_at_zero", torch.zeros(1))
         self.register_buffer("_c0_E", torch.zeros(1))
@@ -1514,13 +1528,14 @@ class HardEnergyNet(nn.Module):
                     nn.init.zeros_(m.bias)
 
     def configure_zero_bc(self, params: "ScalingParams", enabled: bool = True) -> None:
-        """Activate (or disable) the architectural E(d=0)=0 correction.
+        """Activate (or disable) the architectural E(d=0)=0 AND F(d=0)=0 correction.
 
         After this call, ``forward(x)`` produces a normalized energy whose
         un-normalized value is exactly zero whenever the displacement column
         of ``x`` equals ``-mu_d/sig_d`` (i.e. raw d = 0), for any (θ, LC).
-        ``F = dE/dd`` is unchanged because the subtracted terms do not depend
-        on d.
+        Additionally, the d-derivative ``∂E_corrected/∂d_s|_{x|d=0} = 0``,
+        which by the chain rule gives raw ``F(d=0) = dE/dd|_{d=0} = 0``.
+        Both BCs hold at every batch element and for every (θ, LC).
         """
         self._zero_bc_active = bool(enabled)
         if not enabled:
@@ -1532,10 +1547,33 @@ class HardEnergyNet(nn.Module):
         out = self.net(x)
         if not self._zero_bc_active:
             return out
+        # Build x|d=0 = same (θ, LC) but displacement column replaced by the
+        # scaled value of raw d=0.  No in-place ops anywhere — autograd-safe.
         d0 = self._d_scaled_at_zero.view(1, 1).expand(x.size(0), 1)
         x0 = torch.cat([d0, x[:, U_COL + 1:]], dim=1)
+        # (1) Network value at the boundary.
         out0 = self.net(x0)
-        return out - out0 + self._c0_E
+        # (2) Network d-slope at the boundary.  Use a separate detached input
+        # with ``requires_grad=True`` so we can pull out the local sensitivity
+        # without entangling the outer-grad graph.  ``create_graph=self.training``
+        # so backward through the loss can reach the net's weights via
+        # ``dE_dd_at_zero`` during training; at eval/inference we save the
+        # double-backward cost.  ``retain_graph`` left at its default (= the
+        # value of ``create_graph``); explicitly passing ``False`` here would
+        # free intermediates that the outer ``loss.backward()`` needs when the
+        # loss depends on both ``dE/dd`` and ``E_n`` (physics + data terms).
+        x0_grad = x0.detach().clone().requires_grad_(True)
+        out0_grad = self.net(x0_grad)
+        dE_dd_at_zero = torch.autograd.grad(
+            out0_grad.sum(),
+            x0_grad,
+            create_graph=self.training,
+        )[0][:, U_COL:U_COL + 1]
+        # (3) Slope-subtraction correction in scaled space.  ``d_delta`` is a
+        # function of ``x[:, U_COL]`` so the outer ``F = ∂E/∂d_s`` autograd
+        # still works; at ``x = x|d=0`` it is zero, killing the slope term.
+        d_delta = x[:, U_COL:U_COL + 1] - d0
+        return out - out0 - d_delta * dE_dd_at_zero + self._c0_E
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

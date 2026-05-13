@@ -240,6 +240,82 @@ class TestHardEnergyNet:
         dE = torch.autograd.grad(E.sum(), x, create_graph=True)[0]
         assert dE[:, 0].abs().sum() > 0
 
+    def test_zero_bc_enforces_E_and_F_zero_at_origin(self, m):
+        """Architectural BC: at raw d=0, both E and F = dE/dd are exactly zero."""
+        torch.manual_seed(0)
+        net = m.HardEnergyNet(in_d=5, hidden_layers=[16, 8], dropout=0.0, softplus_beta=1.0)
+        # Non-trivial scaling so the test rules out a degenerate (zero-everywhere) net.
+        params = m.ScalingParams(
+            mu_d=20.0, sig_d=10.0,
+            mu_F=5.0,  sig_F=2.0,
+            mu_E=100.0, sig_E=50.0,
+            grad_factor=1.0 / 10.0,
+        )
+        net.configure_zero_bc(params)
+        net.eval()
+        # Build a batch at raw d=0  →  scaled d = -mu_d/sig_d = -2.0
+        d_scaled_zero = -params.mu_d / params.sig_d
+        x = torch.zeros(8, 5)
+        x[:, 0] = d_scaled_zero
+        x[:, 1:] = torch.randn(8, 4)
+        x.requires_grad_(True)
+        # (1) E(d=0) = 0 in raw space.
+        E_n = net(x)
+        E_raw = E_n * params.sig_E + params.mu_E
+        assert torch.allclose(E_raw, torch.zeros_like(E_raw), atol=1e-5)
+        # (2) F(d=0) = dE/dd|_{d=0} = 0 in raw space (via chain rule, the
+        # scaled-space d-derivative at d_scaled_zero must vanish).
+        dE_dxs = torch.autograd.grad(E_n.sum(), x, create_graph=False)[0]
+        F_phys = dE_dxs[:, 0] * params.grad_factor
+        assert torch.allclose(F_phys, torch.zeros_like(F_phys), atol=1e-5)
+
+    def test_zero_bc_off_boundary_nontrivial(self, m):
+        """BC does not collapse the network — F is nonzero away from d=0."""
+        torch.manual_seed(1)
+        net = m.HardEnergyNet(in_d=5, hidden_layers=[16, 8], dropout=0.0, softplus_beta=1.0)
+        params = m.ScalingParams(0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0)
+        net.configure_zero_bc(params)
+        net.eval()
+        x = torch.randn(8, 5)
+        x[:, 0] = x[:, 0] + 5.0  # shift d-column well off the BC value (0.0)
+        x = x.requires_grad_(True)
+        E_n = net(x)
+        dE = torch.autograd.grad(E_n.sum(), x, create_graph=False)[0]
+        assert dE[:, 0].abs().sum() > 0
+
+    def test_zero_bc_supports_training_double_backward(self, m):
+        """The inner-grad graph survives outer ``loss.backward()`` in training mode."""
+        torch.manual_seed(2)
+        net = m.HardEnergyNet(in_d=5, hidden_layers=[16], dropout=0.0, softplus_beta=1.0)
+        params = m.ScalingParams(0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0)
+        net.configure_zero_bc(params)
+        net.train()
+        x = torch.randn(4, 5, requires_grad=True)
+        E_n = net(x)
+        # Physics-loss surrogate: ||dE/dd||² + data loss, then outer backward.
+        dE = torch.autograd.grad(E_n.sum(), x, create_graph=True)[0]
+        loss = (dE[:, 0] ** 2).mean() + E_n.pow(2).mean()
+        loss.backward()
+        # At least one weight tensor must receive a non-zero gradient.
+        assert any(
+            p.grad is not None and p.grad.abs().sum() > 0 for p in net.parameters()
+        )
+
+    def test_zero_bc_disabled_matches_raw_net(self, m):
+        """``configure_zero_bc(enabled=False)`` should restore the raw forward."""
+        torch.manual_seed(3)
+        net = m.HardEnergyNet(in_d=5, hidden_layers=[16], dropout=0.0, softplus_beta=1.0)
+        params = m.ScalingParams(0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0)
+        # Enable then disable.
+        net.configure_zero_bc(params, enabled=True)
+        net.configure_zero_bc(params, enabled=False)
+        net.eval()
+        x = torch.randn(6, 5)
+        out_with = net(x)
+        # Raw forward (bypass the BC machinery).
+        out_raw = net.net(x)
+        assert torch.allclose(out_with, out_raw)
+
 
 # =====================================================================
 # Hard-PINN curvature regularization (d²E/dd²)
