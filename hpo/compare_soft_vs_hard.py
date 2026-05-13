@@ -133,25 +133,21 @@ def boundary_residuals(models: List, approach: str, train_df, scaler_disp, enc,
 
     abs_F_list, abs_E_list = [], []
     for model in models:
-        with torch.no_grad():
-            if approach in ("soft", "ddns"):
+        if approach in ("soft", "ddns"):
+            with torch.no_grad():
                 pred = model(X_bc)
                 F_n = pred[:, 0]
                 E_n = pred[:, 1]
-            else:  # hard — model outputs E only; F via autograd not needed at d=0
-                E_n = model(X_bc).squeeze(-1)
-                # For the BC residual on F we still need F at d=0.  Use autograd.
-                X_bc_g = X_bc.detach().clone().requires_grad_(True)
-                E_g = model(X_bc_g).squeeze(-1)
-                grads = torch.autograd.grad(E_g.sum(), X_bc_g, create_graph=False)[0]
-                # F = dE/dd  in normalised space; scale by grad_factor to raw F units
-                F_n = grads[:, cd.U_COL] * params.grad_factor
-                F_n = (F_n - 0.0)  # already in raw F units after scaling; ensure 1-D
-                # convert F_n raw → normalised F_n for parity with Soft's normalised output
-                F_n = (F_n - params.mu_F) / max(1e-12, params.sig_F)
-        # Unnormalise to raw physical units
-        F_raw = F_n.detach().cpu().numpy() * params.sig_F + params.mu_F
-        E_raw = E_n.detach().cpu().numpy() * params.sig_E + params.mu_E
+            F_raw = F_n.detach().cpu().numpy() * params.sig_F + params.mu_F
+            E_raw = E_n.detach().cpu().numpy() * params.sig_E + params.mu_E
+        else:
+            # Hard: F via autograd; must keep grad context enabled.
+            X_bc_g = X_bc.detach().clone().requires_grad_(True)
+            E_g = model(X_bc_g).squeeze(-1)
+            grads = torch.autograd.grad(E_g.sum(), X_bc_g, create_graph=False)[0]
+            # F = dE/dd in raw kN once we multiply by grad_factor
+            F_raw = (grads[:, cd.U_COL] * params.grad_factor).detach().cpu().numpy()
+            E_raw = E_g.detach().cpu().numpy() * params.sig_E + params.mu_E
         abs_F_list.append(np.abs(F_raw))
         abs_E_list.append(np.abs(E_raw))
 
