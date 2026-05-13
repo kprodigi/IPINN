@@ -114,13 +114,10 @@ echo "  PYTHON_BIN: \$PYTHON_BIN"
 echo "=== STAGE 2 ${APPROACH^^} member \${MEMBER_IDX}  Node: \$(hostname)  GPU: \${CUDA_VISIBLE_DEVICES:-none} ==="
 echo "=== Start: \$(date) ==="
 
-"\$PYTHON_BIN" ${MEMBER_LAUNCHER} \\
-    --approach ${APPROACH} \\
-    --member_idx \${MEMBER_IDX} \\
-    --data_dir ${DATA_DIR} \\
-    --output_dir ${OUTPUT_DIR} \\
-    --n_ensemble ${M_ENSEMBLE} \\
-    --seed ${SEED}
+# Single-line invocation: the SDSMT cluster's sbatch eats backslash-newline
+# line-continuations inside unquoted heredocs (see commit d7da39a), making
+# the python call exit silently with "unrecognized arguments".
+"\$PYTHON_BIN" ${MEMBER_LAUNCHER} --approach ${APPROACH} --member_idx \${MEMBER_IDX} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_ensemble ${M_ENSEMBLE} --seed ${SEED}
 EXIT_CODE=\$?
 
 echo "=== End: \$(date)  Exit: \${EXIT_CODE} ==="
@@ -159,12 +156,8 @@ PYTHON_BIN="\$HOME/miniconda3/envs/${CONDA_ENV}/bin/python"
 echo "=== STAGE 2 ${APPROACH^^} merge  Node: \$(hostname) ==="
 echo "=== Start: \$(date) ==="
 
-"\$PYTHON_BIN" ${MERGE_LAUNCHER} \\
-    --approach ${APPROACH} \\
-    --data_dir ${DATA_DIR} \\
-    --output_dir ${OUTPUT_DIR} \\
-    --n_ensemble ${M_ENSEMBLE} \\
-    --seed ${SEED}
+# Single-line invocation (see d7da39a / multi-line heredoc continuation bug).
+"\$PYTHON_BIN" ${MERGE_LAUNCHER} --approach ${APPROACH} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_ensemble ${M_ENSEMBLE} --seed ${SEED}
 EXIT_CODE=\$?
 
 echo "=== End: \$(date)  Exit: \${EXIT_CODE} ==="

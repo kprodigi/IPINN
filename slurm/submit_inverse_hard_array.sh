@@ -114,12 +114,9 @@ echo "  PYTHON_BIN: \$PYTHON_BIN"
 echo "=== INVERSE HARD member \${MEMBER_IDX}  Node: \$(hostname)  GPU: \${CUDA_VISIBLE_DEVICES:-none} ==="
 echo "=== Start: \$(date) ==="
 
-"\$PYTHON_BIN" ${MEMBER_LAUNCHER} \\
-    --member_idx \${MEMBER_IDX} \\
-    --data_dir ${DATA_DIR} \\
-    --output_dir ${OUTPUT_DIR} \\
-    --n_ensemble ${M_ENSEMBLE} \\
-    --seed ${SEED}
+# Single-line invocation: the SDSMT cluster's sbatch eats backslash-newline
+# continuations inside unquoted heredocs (see commit d7da39a).
+"\$PYTHON_BIN" ${MEMBER_LAUNCHER} --member_idx \${MEMBER_IDX} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_ensemble ${M_ENSEMBLE} --seed ${SEED}
 EXIT_CODE=\$?
 
 echo "=== End: \$(date)  Exit: \${EXIT_CODE} ==="
@@ -154,11 +151,8 @@ PYTHON_BIN="\$HOME/miniconda3/envs/${CONDA_ENV}/bin/python"
 echo "=== INVERSE HARD merge  Node: \$(hostname) ==="
 echo "=== Start: \$(date) ==="
 
-"\$PYTHON_BIN" ${MERGE_LAUNCHER} \\
-    --data_dir ${DATA_DIR} \\
-    --output_dir ${OUTPUT_DIR} \\
-    --n_ensemble ${M_ENSEMBLE} \\
-    --seed ${SEED}
+# Single-line invocation (see d7da39a).
+"\$PYTHON_BIN" ${MERGE_LAUNCHER} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_ensemble ${M_ENSEMBLE} --seed ${SEED}
 EXIT_CODE=\$?
 
 echo "=== End: \$(date)  Exit: \${EXIT_CODE} ==="
@@ -204,13 +198,8 @@ PYTHON_BIN="\$HOME/miniconda3/envs/${CONDA_ENV}/bin/python"
 echo "=== INVERSE HARD analysis (GP-BO + classifier + Pareto + ...)  Node: \$(hostname) ==="
 echo "=== Start: \$(date) ==="
 
-"\$PYTHON_BIN" ${ANALYSIS_LAUNCHER} \\
-    --mode inverse \\
-    --data_dir ${DATA_DIR} \\
-    --output_dir ${OUTPUT_DIR} \\
-    --n_ensemble ${M_ENSEMBLE} \\
-    --seed ${SEED} \\
-    --use_pretrained_inverse ${PRETRAINED_BUNDLE}
+# Single-line invocation (see d7da39a).
+"\$PYTHON_BIN" ${ANALYSIS_LAUNCHER} --mode inverse --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_ensemble ${M_ENSEMBLE} --seed ${SEED} --use_pretrained_inverse ${PRETRAINED_BUNDLE}
 EXIT_CODE=\$?
 
 echo "=== End: \$(date)  Exit: \${EXIT_CODE} ==="
