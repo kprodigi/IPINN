@@ -10701,7 +10701,8 @@ def _train_forward_only(data_dir: str, output_dir: str,
 
 def _train_inverse_and_analyze(data_dir: str, output_dir: str,
                                logger: logging.Logger,
-                               df_all: Optional[pd.DataFrame] = None
+                               df_all: Optional[pd.DataFrame] = None,
+                               pretrained_inverse: Optional[Dict] = None,
                                ) -> Tuple[Dict, Dict]:
     """Train the full-data Hard-PINN inverse ensemble + LC plausibility
     classifier, then run every inverse-design analysis (GP-BO target
@@ -10712,12 +10713,37 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
 
     Used by ``run_pipeline_v20`` (mode='all') and directly by ``main_v20``
     when invoked with ``--mode inverse`` for parallel HPC submission.
+
+    ``pretrained_inverse`` (optional): a bundle produced by
+    ``hpo.merge_inverse_members``.  When given, this function skips the
+    expensive ``train_full_data_hard_pinn`` call and reconstructs the
+    surrogate from the bundle's state_dicts + preprocessors.  Used by the
+    SLURM array path that parallelises the M=20 member training across GPUs.
     """
     if df_all is None:
         df_all = load_data(data_dir, logger)
 
-    logger.info("\n[inverse 1/4] Full-data Hard-PINN + LC plausibility classifier")
-    inv_models, inv_sd, inv_so, inv_en, inv_p = train_full_data_hard_pinn(df_all, logger)
+    if pretrained_inverse is not None:
+        logger.info("\n[inverse 1/4] Loading pretrained full-data Hard-PINN surrogate "
+                    f"(M={pretrained_inverse.get('M_eff', '?')} members)")
+        cfg_pre = pretrained_inverse["cfg"]
+        in_d = int(pretrained_inverse["in_d"])
+        inv_sd = pretrained_inverse["scaler_disp"]
+        inv_so = pretrained_inverse["scaler_out"]
+        inv_en = pretrained_inverse["enc"]
+        inv_p  = pretrained_inverse["params"]
+        inv_models = []
+        for m_state in pretrained_inverse["inv_models_state"]:
+            model = HardEnergyNet(in_d, cfg_pre["hidden_layers"],
+                                  cfg_pre["dropout"], cfg_pre["softplus_beta"]).to(DEVICE)
+            model.configure_zero_bc(inv_p)
+            model.load_state_dict({k: v.to(DEVICE) for k, v in m_state["state_dict"].items()})
+            model.eval()
+            inv_models.append(model)
+        logger.info(f"  Reconstructed {len(inv_models)} inverse-design models on {DEVICE}.")
+    else:
+        logger.info("\n[inverse 1/4] Full-data Hard-PINN + LC plausibility classifier")
+        inv_models, inv_sd, inv_so, inv_en, inv_p = train_full_data_hard_pinn(df_all, logger)
     # Persist the full-data preprocessor state on disk so the inverse model
     # is fully reproducible from the artifacts directory (parity with the
     # ``random`` and ``unseen`` artifacts saved in ``_train_forward_only``).
@@ -11107,6 +11133,15 @@ def main_v20() -> None:
     parser.add_argument(
         "--replot_from", type=str, default=None,
         help="Source directory for replot mode.  Defaults to --output_dir.")
+    parser.add_argument(
+        "--use_pretrained_inverse", type=str, default=None,
+        help=("Path to a pretrained inverse-design surrogate bundle produced "
+              "by hpo.merge_inverse_members.  When set with --mode inverse, "
+              "the full-data Hard-PINN training is skipped — the M=20 ensemble "
+              "is reconstructed from the bundle's state_dicts and the pipeline "
+              "proceeds directly to classifier training, GP-BO target matching, "
+              "Jacobian, Pareto, and the rest.  Use this when the per-member "
+              "SLURM array (hpo/inverse_member.py) has produced the bundle."))
     args = parser.parse_args()
 
     CFG.dry_run                = bool(args.dry_run)
@@ -11160,7 +11195,31 @@ def main_v20() -> None:
 
     if args.mode == "inverse":
         log_runtime_environment(args.output_dir, logger, tag=log_tag)
-        _train_inverse_and_analyze(args.data_dir, args.output_dir, logger)
+        pretrained = None
+        if args.use_pretrained_inverse:
+            if not os.path.isfile(args.use_pretrained_inverse):
+                raise FileNotFoundError(
+                    f"--use_pretrained_inverse path does not exist: "
+                    f"{args.use_pretrained_inverse}"
+                )
+            logger.info(
+                f"  Loading pretrained inverse surrogate from "
+                f"{args.use_pretrained_inverse}"
+            )
+            try:
+                pretrained = torch.load(
+                    args.use_pretrained_inverse, map_location="cpu", weights_only=False,
+                )
+            except TypeError:
+                pretrained = torch.load(args.use_pretrained_inverse, map_location="cpu")
+            if pretrained.get("kind") != "inverse_full_data_pretrained":
+                logger.warning(
+                    f"  Pretrained bundle's 'kind' is "
+                    f"{pretrained.get('kind')!r}; expected "
+                    f"'inverse_full_data_pretrained'.  Proceeding anyway."
+                )
+        _train_inverse_and_analyze(args.data_dir, args.output_dir, logger,
+                                   pretrained_inverse=pretrained)
         logger.info("\n[inverse-only mode COMPLETE] inverse_models.pt + "
                     "analysis_results.pt saved; run --mode replot to render "
                     "figures + tables once forward_models.pt is also present.")
