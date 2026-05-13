@@ -1914,6 +1914,10 @@ def train_ddns(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
             r2_l = r2_safe(y_val[:, 0], Fv)
             r2_e = r2_safe(y_val[:, 1], Ev)
             val_score = _val_checkpoint_score(r2_l, r2_e, approach="ddns")
+            logger.info(
+                f"    [ddns] ep={ep:4d}  train_loss={loss_sum/nb:.4f}  "
+                f"val_R2_load={r2_l:.4f}  val_R2_energy={r2_e:.4f}"
+            )
             history["epoch"].append(ep)
             history["train_loss"].append(loss_sum / nb)
             history["val_load_r2"].append(r2_l)
@@ -2048,6 +2052,11 @@ def train_soft(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
             r2_l = r2_safe(y_val[:, 0], Fv)
             r2_e = r2_safe(y_val[:, 1], Ev)
             val_score = _val_checkpoint_score(r2_l, r2_e, approach="soft")
+            logger.info(
+                f"    [soft] ep={ep:4d}  train_loss={loss_sum/nb:.4f}  "
+                f"phys_loss={phys_sum/nb:.4f}  "
+                f"val_R2_load={r2_l:.4f}  val_R2_energy={r2_e:.4f}"
+            )
             history["epoch"].append(ep)
             history["train_loss"].append(loss_sum / nb)
             history["phys_loss"].append(phys_sum / nb)
@@ -2196,6 +2205,12 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
             r2_l = r2_safe(y_val[:, 0], Fv)
             r2_e = r2_safe(y_val[:, 1], Ev)
             val_score = _val_checkpoint_score(r2_l, r2_e, approach="hard")
+            _swa_tag = "swa" if (use_stabilized and swa_active) else "base"
+            logger.info(
+                f"    [hard] ep={ep:4d}  train_loss={loss_sum/nb:.4f}  "
+                f"val_R2_load={r2_l:.4f}  val_R2_energy={r2_e:.4f}  "
+                f"({_swa_tag})"
+            )
             history["epoch"].append(ep)
             history["train_loss"].append(loss_sum / nb)
             history["val_load_r2"].append(r2_l)
