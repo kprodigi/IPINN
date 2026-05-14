@@ -744,10 +744,16 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
             "sched_patience": 58, "sched_factor": 0.4589,
         }
 
-        # ---- v_16 cfg_soft (Best val load R² = 0.8012, arch [256, 128, 64]) ----
-        # ``w_bc`` is in v_16's cfg but UNUSED in v_20 — the architectural
-        # E(0)=0 correction in SoftPINNNet replaces the soft penalty.  Kept
-        # here so the cfg round-trips exactly with v_16 source.
+        # ---- Soft-PINN cfg (arch [256, 128, 64]) ----
+        # The Soft-PINN loss contains the data terms (w_data_load,
+        # w_data_energy), the work-energy residual loss (w_phys), and the
+        # boundary-condition soft penalty (w_bc) which enforces BOTH
+        # E(0) = 0 AND F(0) = 0 via a paired MSE on the network's E and F
+        # outputs at d = 0 (Section 3.2.2).  Auxiliary field-wide
+        # regularizers (monotonicity, angle smoothness) are intentionally
+        # NOT applied so the Soft–Hard comparison isolates the three core
+        # physics constraints (work-energy + two BCs) under different
+        # enforcement mechanisms.
         cfg_soft = {
             "optimizer": "adam", "lr": 4.2358412564e-03,
             "weight_decay": 1.5707123457e-04, "batch_size": 32,
@@ -756,18 +762,23 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
             "w_data_load": 3.609280, "w_data_energy": 1.704464,
             "w_phys": 3.689334 if w_phys_override is None else w_phys_override,
             "w_bc": 0.851661, "colloc_ratio": 3.697626,
-            "w_monotonicity": 4.957592,
-            "w_angle_smooth": 0.028448,
-            "smooth_delta_deg": 2.0000,
             "extrapolate_angles": True,
             "epochs": 800, "eval_every": 25,
             "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
             "sched_patience": 71, "sched_factor": 0.6547,
         }
 
-        # ---- v_16 cfg_hard (Best val load R² = 0.8499, arch [32, 32]) ----
-        # ``warmup_epochs`` and ``swa_pct`` are NOT in v_16 source but train_hard
-        # in v_20 expects them (default 80 and 0.20 from v_19's stability work).
+        # ---- Hard-PINN cfg (arch [32, 32]) ----
+        # The Hard-PINN loss contains ONLY the data terms (w_load, w_energy).
+        # The work-energy identity F = dE/dd, the boundary conditions
+        # E(0) = 0 and F(0) = 0, and force non-negativity at d = 0 are
+        # enforced architecturally via the slope-subtraction in
+        # HardEnergyNet.configure_zero_bc (Section 3.2.3).  Auxiliary
+        # field-wide regularizers (monotonicity, angle smoothness,
+        # curvature) are intentionally NOT applied — the architectural-vs-
+        # soft-penalty comparison with Soft-PINN is then a comparison of
+        # exactly the three core physics constraints (work-energy + two
+        # BCs) under different enforcement mechanisms.
         cfg_hard = {
             "optimizer": "adamw", "lr": 4.0e-05,
             "weight_decay": 5.27e-04, "batch_size": 16,
@@ -775,16 +786,11 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
             "softplus_beta": 13.82, "smoothl1_beta": 0.143,
             "w_load": 6.0, "w_energy": 7.0,
             "grad_clip": 1.63,
-            "w_monotonicity": 5.0,
-            "w_angle_smooth": 0.03,
-            "w_curvature": 0.005,
-            "smooth_delta_deg": 1.38,
-            "colloc_ratio": 1.86,
-            "extrapolate_angles": True,
             "epochs": 800, "eval_every": 20,
             "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
             "sched_patience": 73, "sched_factor": 0.37,
-            # Stabilization params (v_19 defaults; not in v_16 source)
+            # Stabilization params: warmup + cosine + SWA.  These are
+            # numerical-stability mechanisms, not physics, and are kept.
             "warmup_epochs": 80,
             "swa_pct": 0.20,
             "eta_min": 1e-6,
@@ -1093,11 +1099,13 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
         grad_factor=float(scaler_out.scale_[1] / max(1e-12, scaler_disp.scale_[0])),
     )
     
-    # [V8] Use unseen protocol config for full-data training.
-    # The unseen config has the optimized architecture [128, 64] and
-    # stabilized training (warmup + cosine + SWA). The regularizers
-    # (monotonicity, smoothness, curvature) remain beneficial even when
-    # all angles are present because they encode universal physics priors.
+    # Use unseen-protocol Hard cfg for full-data training: same architecture
+    # [32, 32], dropout, loss weights, optimizer, and stabilization
+    # (warmup + cosine + SWA). The unseen-protocol cfg deliberately omits
+    # auxiliary field-wide regularizers (monotonicity, angle smoothness,
+    # curvature); the inverse-design surrogate inherits this absence so
+    # that all three core physics constraints (work-energy + two BCs)
+    # remain enforced exclusively by the architectural slope-subtraction.
     cfg = get_model_config("hard", protocol="unseen")
     cfg["epochs"] = 1500  # Full data (incl. 60°) converges faster than unseen protocol
     cfg["batch_size"] = 128  # Larger batch for 10500 samples (unseen used 8 for 8816)
@@ -2033,9 +2041,18 @@ def train_soft(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
                 loss = loss + w_smooth * loss_smooth
             
             if w_bc > 0 and X_bc_t is not None:
+                # Soft BC: paired penalty on E(0)=0 AND F(0)=0, mirroring
+                # the architectural enforcement of both BCs in Hard-PINN
+                # (Section 3.2.3).  Each penalty is computed on raw-units
+                # predictions so the two terms are dimensionally
+                # commensurate after the trained scalers are inverted.
                 pred_bc = model(X_bc_t)
                 E_bc_phys = pred_bc[:, 1:2] * params.sig_E + params.mu_E
-                loss = loss + w_bc * mse(E_bc_phys, torch.zeros_like(E_bc_phys))
+                F_bc_phys = pred_bc[:, 0:1] * params.sig_F + params.mu_F
+                loss = loss + w_bc * (
+                    mse(E_bc_phys, torch.zeros_like(E_bc_phys))
+                    + mse(F_bc_phys, torch.zeros_like(F_bc_phys))
+                )
             opt.zero_grad()
             loss.backward()
             opt.step()

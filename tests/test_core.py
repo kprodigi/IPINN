@@ -318,28 +318,71 @@ class TestHardEnergyNet:
 
 
 # =====================================================================
-# Hard-PINN curvature regularization (d²E/dd²)
+# Hard-PINN curvature regularization (d²E/dd²) — function preserved for
+# ablation use, but NOT active in the production Hard cfg.  The
+# unseen-protocol Hard cfg deliberately omits w_curvature / w_monotonicity /
+# w_angle_smooth so the architectural-vs-soft-penalty comparison with the
+# Soft-PINN isolates the three core physics constraints (work-energy + two
+# BCs) under different enforcement mechanisms.
 # =====================================================================
 class TestCurvatureRegularizationHard:
     def test_curvature_fn_exists(self, m):
+        # Function is still in the module for ablation experiments, even
+        # though the production cfg does not invoke it.
         assert hasattr(m, "curvature_regularization_hard")
 
-    def test_hard_unseen_config_has_w_curvature(self, m):
+    def test_hard_unseen_config_excludes_auxiliary_regularizers(self, m):
         cfg = m.get_model_config("hard", "unseen")
-        assert "w_curvature" in cfg
-        # v_16 cfg_hard value (composite_design_v16.py line 322).  The earlier
-        # 0.001285 here was from a v_19 HPO winner that was replaced when
-        # get_model_config was switched to v_16's documented production cfg
-        # (which produced R²=0.8499 for Hard).
-        assert cfg["w_curvature"] == pytest.approx(0.005)
+        # The production Hard-PINN cfg must NOT contain auxiliary
+        # field-wide regularizer weights; physics enforcement in Hard is
+        # exclusively architectural (Section 3.2.3 of the manuscript).
+        for key in ("w_curvature", "w_monotonicity", "w_angle_smooth"):
+            assert key not in cfg, (
+                f"{key} must not be set in production Hard cfg; "
+                f"auxiliary regularizers are omitted by design."
+            )
+
+    def test_soft_unseen_config_excludes_auxiliary_regularizers(self, m):
+        cfg = m.get_model_config("soft", "unseen")
+        # Soft-PINN matches Hard-PINN's auxiliary-regularizer omission;
+        # only the work-energy residual and the paired E(0)/F(0) BC
+        # penalty are present besides the data losses.
+        for key in ("w_monotonicity", "w_angle_smooth", "w_curvature"):
+            assert key not in cfg, (
+                f"{key} must not be set in production Soft cfg; "
+                f"auxiliary regularizers are omitted by design."
+            )
 
     def test_curvature_loss_scalar(self, m):
+        # Function-level smoke test for ablation use; not invoked by the
+        # production training pipeline.
         net = m.HardEnergyNet(in_d=5, hidden_layers=[16], dropout=0.0, softplus_beta=1.0)
         x = torch.randn(8, 5, requires_grad=True)
         params = m.ScalingParams(0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0)
         loss = m.curvature_regularization_hard(x, net, params)
         assert loss.ndim == 0
         assert torch.isfinite(loss)
+
+
+# =====================================================================
+# Soft-PINN paired BC penalty (E(0)=0 AND F(0)=0)
+# =====================================================================
+class TestSoftPairedBCPenalty:
+    def test_soft_unseen_config_has_w_bc(self, m):
+        cfg = m.get_model_config("soft", "unseen")
+        assert "w_bc" in cfg and cfg["w_bc"] > 0, (
+            "Soft-PINN must have a positive w_bc for the paired E(0)/F(0) "
+            "soft penalty (Section 3.2.2)."
+        )
+
+    def test_soft_pinn_outputs_both_F_and_E(self, m):
+        # The paired BC penalty needs a network that emits both heads.
+        net = m.SoftPINNNet(in_d=5, hidden_layers=[16], dropout=0.0, softplus_beta=1.0)
+        x = torch.randn(4, 5)
+        out = net(x)
+        assert out.shape == (4, 2), (
+            "SoftPINNNet must output [F_n, E_n] for the paired BC penalty to work."
+        )
 
 
 # =====================================================================
