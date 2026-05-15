@@ -371,7 +371,16 @@ def make_objective(
         member_r2s: List[float] = []
         t_trial = time.time()
         for k in range(n_seeds):
-            seed_k = base_seed + 1000 * k
+            # Use a prime stride (17) shifted by one stride from the base
+            # so HPO trial seeds never coincide with any production-ensemble
+            # member seed.  Forward production uses ``base + 1000 * m``;
+            # inverse production uses ``base + 100 * m``; the prime 17 is
+            # coprime with both 1000 and 100, and the ``+ 17`` shift ensures
+            # ``k = 0`` is also offset from ``base``.  Without this offset,
+            # HPO trials at default ``--seed 2026`` would train on the
+            # identical RNG state as forward member 0 / 1 / 2 ..., biasing
+            # the HPO objective toward those specific trajectories.
+            seed_k = base_seed + 17 * (k + 1)
             r2 = _train_and_score_member(
                 approach, cfg, seed_k,
                 df_tr, df_val, scaler_disp, scaler_out, enc, params,

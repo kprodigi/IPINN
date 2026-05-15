@@ -145,13 +145,32 @@ def main():
                 f"(member indices: {[int(d['member_idx']) for d in parts]})")
 
     # Preprocessors should be identical across partials (deterministic from
-    # df_all).  Take from the first partial; assert agreement is consistent.
+    # df_all).  Take from the first partial; verify the rest agree on the
+    # scaler statistics — this would catch the rare case where someone
+    # re-ran individual members against a modified data directory.
     scaler_disp = parts[0]["scaler_disp"]
     scaler_out  = parts[0]["scaler_out"]
     enc         = parts[0]["enc"]
     params      = parts[0]["params"]
     cfg         = parts[0]["cfg"]
     in_d        = int(parts[0]["in_d"])
+    for p in parts[1:]:
+        if not np.allclose(
+            scaler_disp.mean_, p["scaler_disp"].mean_, rtol=0, atol=1e-12,
+        ) or not np.allclose(
+            scaler_disp.scale_, p["scaler_disp"].scale_, rtol=0, atol=1e-12,
+        ):
+            raise RuntimeError(
+                f"Preprocessor mismatch between member {parts[0]['member_idx']} "
+                f"and member {p['member_idx']}.  Some partial bundles were "
+                f"trained against a different data directory; cannot merge.",
+            )
+        if int(p["in_d"]) != in_d:
+            raise RuntimeError(
+                f"Feature-dimension mismatch between member "
+                f"{parts[0]['member_idx']} (in_d={in_d}) and member "
+                f"{p['member_idx']} (in_d={p['in_d']}).  Cannot merge.",
+            )
 
     # Convergence filter (Tukey fence on TRAINING-set R²).  Mirrors the
     # filter inside train_full_data_hard_pinn at lines ~1236-1254.

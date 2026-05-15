@@ -166,8 +166,16 @@ def main():
         #     seed = CFG.seed_base + m_idx * 100   for m_idx in range(CFG.n_ensemble)
         # With n_ensemble=1 we have m_idx=0, so we set seed_base to be the
         # desired effective seed.
-        prev_n_ens = cd.CFG.n_ensemble
-        prev_seed_base = cd.CFG.seed_base
+        # Snapshot every CFG field we are about to mutate so the next member
+        # in the same SLURM task (when ``--members 0,1`` is used) sees a clean
+        # state on entry.  Restoring only ``n_ensemble`` and ``seed_base``
+        # would leak ``seed`` / ``split_seed`` across members.
+        prev_cfg_state = {
+            "n_ensemble": cd.CFG.n_ensemble,
+            "seed":       cd.CFG.seed,
+            "seed_base":  cd.CFG.seed_base,
+            "split_seed": cd.CFG.split_seed,
+        }
         cd.CFG.n_ensemble = 1
         cd.CFG.seed       = member_seed
         cd.CFG.seed_base  = member_seed
@@ -177,7 +185,11 @@ def main():
         try:
             inv_models, scaler_disp, scaler_out, enc, params = \
                 cd.train_full_data_hard_pinn(df_all, logger)
-        except (RuntimeError, ValueError) as ex:
+        except Exception as ex:
+            # Broaden from (RuntimeError, ValueError) so OOMs, KeyErrors,
+            # AssertionErrors etc. also produce a `.FAILED.json` marker the
+            # merge step can report cleanly, instead of crashing the SLURM
+            # task silently.
             logger.error(
                 f"  TRAINING FAILED ({type(ex).__name__}): {ex}.  "
                 f"No partial bundle written for member {member_idx}."
@@ -189,14 +201,14 @@ def main():
                      "exception_repr": repr(ex)}, fh, indent=2,
                 )
             # Restore CFG and continue to next member (or exit).
-            cd.CFG.n_ensemble = prev_n_ens
-            cd.CFG.seed_base  = prev_seed_base
+            for k, v in prev_cfg_state.items():
+                setattr(cd.CFG, k, v)
             continue
         elapsed = time.time() - t0
 
         # Restore CFG (so subsequent members in the same task get clean state).
-        cd.CFG.n_ensemble = prev_n_ens
-        cd.CFG.seed_base  = prev_seed_base
+        for k, v in prev_cfg_state.items():
+            setattr(cd.CFG, k, v)
 
         if len(inv_models) != 1:
             logger.error(
