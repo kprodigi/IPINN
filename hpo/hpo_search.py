@@ -69,17 +69,27 @@ Outputs (per ``--output_dir``)
     hpo_best_params_<approach>.json         Best params so far — rewritten
                                             atomically after every completed
                                             trial; copy-pasteable into the
-                                            ``get_model_config`` cfg
-    hpo_history_<approach>.csv              Every trial (params, R^2, state,
-                                            start/complete datetimes,
-                                            duration); also rewritten after
-                                            every completed trial
+                                            ``get_model_config`` cfg.  Also
+                                            includes a ``best_metrics`` block
+                                            with mean/std train and val
+                                            R^2_load + R^2_energy across
+                                            seeds, and a ``best_per_seed_metrics``
+                                            list for reproducibility.
+    hpo_history_<approach>.csv              Every trial.  Columns include the
+                                            objective value plus
+                                            ``mean_train_load_r2``,
+                                            ``mean_val_load_r2``,
+                                            ``mean_train_energy_r2``,
+                                            ``mean_val_energy_r2``,
+                                            std versions, the train-val gap,
+                                            and all searched hyperparameters.
+                                            Rewritten after every trial.
     hpo_run_state_<approach>.json           Compact progress snapshot
                                             (completed/failed/running counts,
                                             current best, last trial)
     hpo_best_snapshots_<approach>/          Audit trail: a JSON copy of the
-        best_at_trial_NNNN.json             best-params dict at the moment
-                                            each new best was set
+        best_at_trial_NNNN.json             best-params dict (incl. metrics)
+                                            at the moment each new best was set
     hpo_log_<approach>.txt                  Full Optuna log
 
 Crash / preemption safety
@@ -116,7 +126,7 @@ import os
 import sys
 import time
 import warnings
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -352,8 +362,18 @@ def _train_and_score_member(
     enc,
     params,
     logger: logging.Logger,
-) -> float:
-    """Train one ensemble member with the trial cfg and return val load R^2."""
+) -> Dict[str, float]:
+    """Train one ensemble member with the trial cfg and return all four
+    summary metrics: train and val R^2 for both load and energy.
+
+    Returns a dict with keys
+        ``train_load_r2``, ``val_load_r2``,
+        ``train_energy_r2``, ``val_energy_r2``.
+    The optimiser objective uses ``val_load_r2``; the other three are
+    persisted via ``trial.set_user_attr`` so every HPO trial's CSV row
+    carries the full train-vs-val picture, including the train < val
+    pattern characteristic of the unseen-angle protocol.
+    """
     train_fn = {"ddns": cd.train_ddns, "soft": cd.train_soft, "hard": cd.train_hard}[approach]
     _orig_get_cfg = cd.get_model_config
 
@@ -371,10 +391,20 @@ def _train_and_score_member(
             df_tr, df_val, scaler_disp, scaler_out, enc, params,
             seed, "unseen", logger,
         )
-        metrics = cd.evaluate_model(
+        # Evaluate on BOTH splits so trials record train vs val side-by-side.
+        # ``evaluate_model`` returns load_r2 + energy_r2 on the supplied df.
+        val_m = cd.evaluate_model(
             model, approach, df_val, scaler_disp, scaler_out, enc, params,
         )
-        return float(metrics["load_r2"])
+        train_m = cd.evaluate_model(
+            model, approach, df_tr, scaler_disp, scaler_out, enc, params,
+        )
+        return {
+            "train_load_r2":   float(train_m["load_r2"]),
+            "val_load_r2":     float(val_m["load_r2"]),
+            "train_energy_r2": float(train_m.get("energy_r2", float("nan"))),
+            "val_energy_r2":   float(val_m.get("energy_r2", float("nan"))),
+        }
     finally:
         cd.get_model_config = _orig_get_cfg
 
@@ -401,7 +431,8 @@ def make_objective(
         trial_params.setdefault("eval_every", max(1, hpo_epochs // 8))
         cfg = _build_trial_cfg(approach, trial_params)
 
-        member_r2s: List[float] = []
+        # Per-seed metrics; we average across seeds for the trial summary.
+        per_seed: List[Dict[str, float]] = []
         t_trial = time.time()
         for k in range(n_seeds):
             # Use a prime stride (17) shifted by one stride from the base
@@ -414,25 +445,62 @@ def make_objective(
             # identical RNG state as forward member 0 / 1 / 2 ..., biasing
             # the HPO objective toward those specific trajectories.
             seed_k = base_seed + 17 * (k + 1)
-            r2 = _train_and_score_member(
+            seed_metrics = _train_and_score_member(
                 approach, cfg, seed_k,
                 df_tr, df_val, scaler_disp, scaler_out, enc, params,
                 logger,
             )
-            member_r2s.append(r2)
+            per_seed.append(seed_metrics)
             logger.info(
                 f"  trial {trial.number:03d}  seed {k+1}/{n_seeds}  "
-                f"val_R2_load={r2:.4f}"
+                f"train_R2_load={seed_metrics['train_load_r2']:.4f}  "
+                f"val_R2_load={seed_metrics['val_load_r2']:.4f}  "
+                f"train_R2_energy={seed_metrics['train_energy_r2']:.4f}  "
+                f"val_R2_energy={seed_metrics['val_energy_r2']:.4f}"
             )
-            trial.report(float(np.mean(member_r2s)), step=k)
+            # Report the running mean of the OBJECTIVE (val load R^2) to
+            # Optuna so a pruner could act on the partial trial.
+            running_mean_val_load = float(np.mean(
+                [s["val_load_r2"] for s in per_seed]
+            ))
+            trial.report(running_mean_val_load, step=k)
 
-        mean_r2 = float(np.mean(member_r2s))
+        # Trial-level summaries: mean and std across seeds for every metric.
+        def _agg(key: str) -> Tuple[float, float]:
+            vs = np.array([s[key] for s in per_seed], dtype=float)
+            return float(vs.mean()), float(vs.std(ddof=0))
+
+        mean_val_load,   std_val_load   = _agg("val_load_r2")
+        mean_train_load, std_train_load = _agg("train_load_r2")
+        mean_val_eng,    std_val_eng    = _agg("val_energy_r2")
+        mean_train_eng,  std_train_eng  = _agg("train_energy_r2")
+
+        # Persist all four metrics + the train-vs-val gap on the trial so
+        # the on-disk history CSV and best-params JSON include the full
+        # picture, not just the objective.  ``trial.user_attrs`` round-trips
+        # through Optuna's SQLite storage and is exposed in the history
+        # callback.
+        trial.set_user_attr("mean_val_load_r2",    mean_val_load)
+        trial.set_user_attr("mean_train_load_r2",  mean_train_load)
+        trial.set_user_attr("mean_val_energy_r2",  mean_val_eng)
+        trial.set_user_attr("mean_train_energy_r2", mean_train_eng)
+        trial.set_user_attr("std_val_load_r2",     std_val_load)
+        trial.set_user_attr("std_train_load_r2",   std_train_load)
+        trial.set_user_attr("train_val_load_gap",  mean_train_load - mean_val_load)
+        trial.set_user_attr("per_seed_metrics",    per_seed)
+        trial.set_user_attr("n_seeds_completed",   len(per_seed))
+
         elapsed = time.time() - t_trial
+        gap = mean_train_load - mean_val_load
+        gap_sign = "+" if gap >= 0 else ""
         logger.info(
-            f"trial {trial.number:03d} DONE  mean_val_R2_load={mean_r2:.4f}  "
+            f"trial {trial.number:03d} DONE  "
+            f"mean_train_R2_load={mean_train_load:.4f}  "
+            f"mean_val_R2_load={mean_val_load:.4f}  "
+            f"gap={gap_sign}{gap:.4f}  "
             f"(n_seeds={n_seeds}, wall={elapsed:.0f}s)"
         )
-        return mean_r2
+        return mean_val_load
 
     return objective
 
@@ -565,6 +633,23 @@ def _best_payload(study: "optuna.Study") -> Optional[Dict]:
         "n_running":     n_running,
         "last_updated":  time.strftime("%Y-%m-%d %H:%M:%S"),
     }
+    # Surface the train/val metric breakdown stored as user_attrs by the
+    # objective.  These let the headline JSON answer "what's the train R^2
+    # at the best trial?" without parsing the history CSV.
+    metric_keys = [
+        "mean_train_load_r2",   "mean_val_load_r2",
+        "mean_train_energy_r2", "mean_val_energy_r2",
+        "std_train_load_r2",    "std_val_load_r2",
+        "train_val_load_gap",   "n_seeds_completed",
+    ]
+    best_metrics = {
+        k: best.user_attrs.get(k) for k in metric_keys if k in best.user_attrs
+    }
+    if best_metrics:
+        payload["best_metrics"] = best_metrics
+    # Full per-seed breakdown for paper-quality reproducibility (small).
+    if "per_seed_metrics" in best.user_attrs:
+        payload["best_per_seed_metrics"] = best.user_attrs["per_seed_metrics"]
     if "hidden_layers" in best.params and approach in HL_BY_APPROACH:
         hl_key = best.params["hidden_layers"]
         hl_map = HL_BY_APPROACH[approach]
@@ -575,15 +660,36 @@ def _best_payload(study: "optuna.Study") -> Optional[Dict]:
 
 
 def _history_csv_content(study: "optuna.Study") -> str:
-    """Serialise every trial (number, value, state, params, datetimes) to CSV."""
+    """Serialise every trial to CSV.  Columns:
+
+      trial, value, state, datetime_start, datetime_complete, duration_sec,
+      mean_train_load_r2, mean_val_load_r2,
+      mean_train_energy_r2, mean_val_energy_r2,
+      std_train_load_r2, std_val_load_r2,
+      train_val_load_gap, n_seeds_completed,
+      <every searched hyperparameter>
+
+    The train/val R^2 columns are pulled from the per-trial ``user_attrs``
+    set by ``make_objective``.  This lets a single CSV answer both
+    "what's the best val R^2_load" (= ``value``) and "how does train R^2
+    compare to val R^2 for the recovered config" (= the metric columns).
+    """
     import io
     all_param_keys: set = set()
     for t in study.trials:
         all_param_keys.update(t.params.keys())
     param_keys = sorted(all_param_keys)
+    # Fixed-order metric columns so the CSV header is stable across runs.
+    metric_cols = [
+        "mean_train_load_r2",   "mean_val_load_r2",
+        "mean_train_energy_r2", "mean_val_energy_r2",
+        "std_train_load_r2",    "std_val_load_r2",
+        "train_val_load_gap",   "n_seeds_completed",
+    ]
     headers = (
         ["trial", "value", "state", "datetime_start", "datetime_complete",
          "duration_sec"]
+        + metric_cols
         + param_keys
     )
     buf = io.StringIO()
@@ -603,6 +709,14 @@ def _history_csv_content(study: "optuna.Study") -> str:
                 t.datetime_complete.isoformat(timespec="seconds") if t.datetime_complete else "",
             "duration_sec": dur,
         }
+        for k in metric_cols:
+            v = t.user_attrs.get(k)
+            if v is None:
+                row[k] = ""
+            elif isinstance(v, float):
+                row[k] = f"{v:.6f}"
+            else:
+                row[k] = v
         for k in param_keys:
             row[k] = t.params.get(k, "")
         writer.writerow(row)
@@ -691,18 +805,26 @@ def make_checkpoint_callback(
                 state_path,
                 json.dumps(_run_state_payload(study, trial), indent=2) + "\n",
             )
-            # 4) Concise log line so the user can monitor progress
+            # 4) Concise log line so the user can monitor progress.
+            #    Shows train R^2 alongside the val R^2 objective so the
+            #    train-vs-val gap is visible at every trial completion.
             best_for_log = _safe_best_trial(study)
             best_str = (
                 f"{best_for_log.value:.4f}"
                 if best_for_log is not None and best_for_log.value is not None
                 else "n/a"
             )
+            t_train = trial.user_attrs.get("mean_train_load_r2")
+            t_val   = trial.user_attrs.get("mean_val_load_r2")
+            train_str = "n/a" if t_train is None else f"{t_train:.4f}"
+            val_str   = (
+                "n/a" if t_val is None else f"{t_val:.4f}"
+            ) if trial.value is None else f"{trial.value:.4f}"
             logger.info(
                 f"  [checkpoint] trial {trial.number} "
                 f"state={str(trial.state).split('.')[-1]} "
-                f"value={'n/a' if trial.value is None else f'{trial.value:.4f}'} "
-                f"| best_so_far={best_str}"
+                f"train_R2_load={train_str}  val_R2_load={val_str} "
+                f"| best_val_R2_load_so_far={best_str}"
             )
         except Exception as exc:  # pragma: no cover
             # Never let a checkpointing failure abort the study; the SQLite
