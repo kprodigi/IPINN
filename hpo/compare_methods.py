@@ -61,7 +61,7 @@ _HPO_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HPO_DIR, os.pardir))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-import composite_design_v20 as cd  # noqa: E402
+import composite_design as cd  # noqa: E402
 
 warnings.filterwarnings("ignore", category=UserWarning, module=r"matplotlib")
 

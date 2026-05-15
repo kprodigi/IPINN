@@ -11,7 +11,7 @@ Usage:
     python slurm/hpc_run_stage.py --stage train_random_hard --output_dir ./results_hpc
     ...
 
-The existing `python composite_design_v20.py --strict_paper` still works
+The existing `python composite_design.py --strict_paper` still works
 unchanged for single-machine sequential runs.
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ import torch
 # ---------------------------------------------------------------------------
 # Import the main pipeline module
 # ---------------------------------------------------------------------------
-# This script lives in ``slurm/``; ``composite_design_v20.py`` lives at the
+# This script lives in ``slurm/``; ``composite_design.py`` lives at the
 # repo root.  Insert the parent directory on ``sys.path`` so the import
 # resolves whether this is invoked as ``python slurm/hpc_run_stage.py`` from
 # the repo root or as ``python hpc_run_stage.py`` from inside ``slurm/``.
@@ -40,7 +40,7 @@ _SLURM_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_SLURM_DIR, os.pardir))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-import composite_design_v20 as cd  # noqa: E402
+import composite_design as cd  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers

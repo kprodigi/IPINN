@@ -16,7 +16,7 @@ and gives independent SQLite study databases that survive preemption.
 
 ```
 Stage 1 ── HPO forward      ─→ best hyperparameters per approach
-Stage 2 ── apply best       ─→ patch composite_design_v20.get_model_config
+Stage 2 ── apply best       ─→ patch composite_design.get_model_config
 Stage 3 ── retrain forward  ─→ full-budget forward models with new HPs
 Stage 4 ── HPO inverse      ─→ tune GP-BO + classifier weights on Stage 3 models
 ```
@@ -77,7 +77,7 @@ Each approach writes the following to `--output_dir` (default `./hpo_v20`):
 ```
 <output_dir>/
   tune_v20_study_<approach>.db     # per-approach SQLite study (resumable)
-  best_params_<approach>.json      # copy-pasteable into composite_design_v20
+  best_params_<approach>.json      # copy-pasteable into composite_design
   trial_history_<approach>.csv     # every trial's params + R² + duration
   hpo_log_<approach>.txt           # full Optuna log (per-trial reports)
 ```

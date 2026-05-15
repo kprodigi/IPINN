@@ -13,7 +13,7 @@ aggregation + Tukey-fence filter + ensemble metrics), this lets us cut the
 wall-clock from ~M × per-member to (M / N_gpus) × per-member.
 
 Reproducibility: each member m uses seed = ``seed + m * 1000`` — identical to
-:func:`composite_design_v20.train_ensemble`'s loop.  So member m trained by
+:func:`composite_design.train_ensemble`'s loop.  So member m trained by
 this launcher matches member m trained by ``stage2_v16.py`` bit-for-bit.
 
 Outputs (per ``--output_dir``):
@@ -45,12 +45,12 @@ from typing import Dict, List
 import numpy as np
 import torch
 
-# stage2_member.py lives in ``hpo/``; composite_design_v20.py is at the repo root.
+# stage2_member.py lives in ``hpo/``; composite_design.py is at the repo root.
 _HPO_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HPO_DIR, os.pardir))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-import composite_design_v20 as cd  # noqa: E402
+import composite_design as cd  # noqa: E402
 
 warnings.filterwarnings("ignore", category=UserWarning, module=r"matplotlib")
 
@@ -95,7 +95,7 @@ def main():
     p.add_argument("--force_cpu",  action="store_true")
     p.add_argument("--dry_run",    action="store_true",
                    help="Smoke mode: shrinks training budgets via "
-                        "composite_design_v20._dry_run_shrink_training_cfg.  "
+                        "composite_design._dry_run_shrink_training_cfg.  "
                         "Useful for CI; NOT for production retrain.")
     args = p.parse_args()
 

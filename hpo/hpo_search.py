@@ -77,7 +77,7 @@ except ImportError as e:  # pragma: no cover
 # Reuse v_20's training infrastructure verbatim.  Importing this module also
 # applies its atomic-CSV monkey-patch and warning filters.
 #
-# tune_v20.py lives in ``hpo/``; composite_design_v20.py lives at the repo
+# tune_v20.py lives in ``hpo/``; composite_design.py lives at the repo
 # root.  Insert the parent directory on ``sys.path`` before the import so
 # this script works whether it's invoked as ``python hpo/tune_v20.py`` from
 # the repo root or as ``python tune_v20.py`` from inside ``hpo/``.
@@ -85,7 +85,7 @@ _HPO_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HPO_DIR, os.pardir))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-import composite_design_v20 as cd  # noqa: E402
+import composite_design as cd  # noqa: E402
 
 # Silence Optuna's per-trial INFO chatter on stdout — we already log to file.
 optuna.logging.set_verbosity(optuna.logging.WARNING)

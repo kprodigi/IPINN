@@ -6,7 +6,7 @@ INVERSE-DESIGN — merge per-member partial bundles into a pretrained surrogate
 Companion to :mod:`hpo.inverse_member`.  Collects
 ``parts_inverse_hard/member_*.pt`` files produced by parallel SLURM array
 tasks, applies the same Tukey-fence convergence filter that
-``composite_design_v20.train_full_data_hard_pinn`` would have applied,
+``composite_design.train_full_data_hard_pinn`` would have applied,
 and writes ONE bundle the downstream GP-BO + inverse-design analysis
 pipeline can consume:
 
@@ -15,7 +15,7 @@ pipeline can consume:
 
 To feed this bundle into the existing inverse-design pipeline, run::
 
-    python composite_design_v20.py --mode inverse \\
+    python composite_design.py --mode inverse \\
         --output_dir <output_dir> \\
         --use_pretrained_inverse <output_dir>/inverse_pretrained_hard.pt
 
@@ -51,7 +51,7 @@ _HPO_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HPO_DIR, os.pardir))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-import composite_design_v20 as cd  # noqa: E402
+import composite_design as cd  # noqa: E402
 
 warnings.filterwarnings("ignore", category=UserWarning, module=r"matplotlib")
 
@@ -207,9 +207,9 @@ def main():
     logger.info(f"  Reconstruction smoke check OK ({sum(p.numel() for p in test_model.parameters())} params).")
 
     # Write the pretrained bundle.  The downstream consumer is
-    # composite_design_v20._train_inverse_and_analyze invoked with
+    # composite_design._train_inverse_and_analyze invoked with
     # ``--use_pretrained_inverse <this path>`` (we add that flag in a
-    # companion patch to composite_design_v20).
+    # companion patch to composite_design).
     out_path = os.path.join(args.output_dir, "inverse_pretrained_hard.pt")
     bundle = {
         "approach":         "hard",
@@ -259,7 +259,7 @@ def main():
     logger.info("design pipeline (skips training, runs classifier + GP-BO + ")
     logger.info("ablations):")
     logger.info("")
-    logger.info(f"  python composite_design_v20.py --mode inverse \\")
+    logger.info(f"  python composite_design.py --mode inverse \\")
     logger.info(f"      --output_dir {args.output_dir} \\")
     logger.info(f"      --use_pretrained_inverse {out_path}")
     logger.info("")

@@ -4,7 +4,7 @@
 INVERSE-DESIGN — per-member retrain of the full-data Hard-PINN surrogate
 ================================================================================
 Trains ONE (or a small list) of the M full-data Hard-PINN ensemble members
-that ``composite_design_v20.train_full_data_hard_pinn`` would otherwise
+that ``composite_design.train_full_data_hard_pinn`` would otherwise
 produce sequentially.  Parallelise the inverse-design surrogate training
 across GPU nodes via a SLURM array job.
 
@@ -56,7 +56,7 @@ _HPO_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HPO_DIR, os.pardir))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-import composite_design_v20 as cd  # noqa: E402
+import composite_design as cd  # noqa: E402
 
 warnings.filterwarnings("ignore", category=UserWarning, module=r"matplotlib")
 
@@ -115,7 +115,7 @@ def main():
     p.add_argument("--force_cpu",  action="store_true")
     p.add_argument("--dry_run",    action="store_true",
                    help="Smoke mode: shrinks training budgets via "
-                        "composite_design_v20._dry_run_shrink_training_cfg.  "
+                        "composite_design._dry_run_shrink_training_cfg.  "
                         "Useful for CI; NOT for production retrain.")
     args = p.parse_args()
 

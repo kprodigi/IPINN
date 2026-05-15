@@ -1,7 +1,7 @@
 # Architecture and code map
 
 This document maps the paper's sections and major design decisions to
-specific line ranges in `composite_design_v20.py` (≈11,094 lines, single
+specific line ranges in `composite_design.py` (≈11,094 lines, single
 file). Use it as a reviewer's table of contents — every numbered section
 points at a self-contained block.
 

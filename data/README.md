@@ -1,7 +1,7 @@
 # Experimental Dataset
 
 This directory holds the quasi-static crushing measurements used to train and
-evaluate every PINN variant in `composite_design_v20.py`.
+evaluate every PINN variant in `composite_design.py`.
 
 ## Files
 
@@ -16,7 +16,7 @@ within one experiment.
 
 ## Required columns (case-insensitive after rename)
 
-The loader (`composite_design_v20.py::load_data`) renames columns by keyword
+The loader (`composite_design.py::load_data`) renames columns by keyword
 match, then validates against this canonical schema:
 
 | Canonical name | Units | Source aliases recognised |
@@ -42,7 +42,7 @@ filename (`LC1.xlsx` → `LC1`, `LC2.xlsx` → `LC2`).
 
 ```bash
 # from the repo root:
-python composite_design_v20.py --data_dir ./data --output_dir ./results --strict_paper
+python composite_design.py --data_dir ./data --output_dir ./results --strict_paper
 ```
 
 The CLI flag `--data_dir` is what every pipeline entry point reads; it
@@ -54,4 +54,4 @@ accepts either an absolute or repo-root-relative path. The HPO scripts and
 LC1 and LC2 are evaluated at a common displacement `d_common = 80 mm` (the
 shorter of the two crush paths) for the energy-absorption-per-unit-length
 metric so the comparison is not confounded by LC2's longer crush window.
-This convention is enforced in `composite_design_v20.py::compute_ea_per_unit`.
+This convention is enforced in `composite_design.py::compute_ea_per_unit`.

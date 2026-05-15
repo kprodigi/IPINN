@@ -726,7 +726,7 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
     BC disabled inside train_ddns since it has no physics losses.
 
     To reproduce the documented R² numbers, run:
-        python composite_design_v20.py --mode forward --data_dir ./data \\
+        python composite_design.py --mode forward --data_dir ./data \\
             --output_dir ./results --n_ensemble 20 --strict_paper
     """
 
@@ -1164,7 +1164,7 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
         else:
             optimizer = torch.optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
         
-        # [V8] Stabilized training for inverse design Hard-PINN
+        # Stabilized training for inverse design Hard-PINN
         warmup_ep = cfg.get("warmup_epochs", 80)
         total_ep = cfg["epochs"]
         scheduler = WarmupCosineScheduler(optimizer, warmup_ep, total_ep, eta_min=cfg.get("eta_min", 1e-6))
@@ -1219,13 +1219,13 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
                 optimizer.step()
                 epoch_loss += loss.item()
             
-            # [V8] Stabilized schedule + SWA
+            # Stabilized schedule + SWA
             scheduler.step()
             if epoch >= swa_start:
                 swa_active = True
                 swa_model.update_parameters(model)
         
-        # [V8] Use SWA model for final evaluation if active
+        # Use SWA model for final evaluation if active
         eval_model = swa_model.module if swa_active else model
         
         # Compute training-set R² for convergence check (batched: full tensor grad is VRAM-heavy)
@@ -2113,7 +2113,7 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     - Angle-smoothness regularization on both E and F = dE/dd
     - Monotonicity constraint (F = dE/dd ≥ 0)
     - Curvature regularization (smooth force curves via d²E/dd²)
-    - [V8] Stabilized training: LR warmup + cosine annealing + SWA
+    - Stabilized training: LR warmup + cosine annealing + SWA
     """
     set_seed(seed)
     cfg = get_model_config("hard", protocol)
@@ -2129,7 +2129,7 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     model.configure_zero_bc(params)
     opt = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"]) if cfg.get("optimizer", "adamw").lower() == "adam" else optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     
-    # [V8] Scheduler selection: stabilized (unseen) vs reactive (random)
+    # Scheduler selection: stabilized (unseen) vs reactive (random)
     use_stabilized = "warmup_epochs" in cfg
     if use_stabilized:
         sched = WarmupCosineScheduler(opt, cfg["warmup_epochs"], cfg["epochs"],
@@ -2166,7 +2166,7 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     history = {"epoch": [], "train_loss": [], "val_load_r2": [], "val_energy_r2": [],
                "phys_residual_rms": []}
     best_state, best_r2 = None, -1e9
-    # [V8] Disable early stopping for stabilized training: SWA needs the full
+    # Disable early stopping for stabilized training: SWA needs the full
     # epoch budget to accumulate weight averages.
     es = None if use_stabilized else EarlyStopping(cfg["earlystop_patience_evals"], cfg["earlystop_min_delta"])
     
@@ -2207,7 +2207,7 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
             loss_sum += loss.item()
             nb += 1
         
-        # [V8] Scheduler step: warmup+cosine every epoch, ReduceLROnPlateau on eval
+        # Scheduler step: warmup+cosine every epoch, ReduceLROnPlateau on eval
         if use_stabilized:
             sched.step()
             if ep >= swa_start:
@@ -2215,7 +2215,7 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
                 swa_model.update_parameters(model)
         
         if ep % cfg["eval_every"] == 0:
-            # [V8] Evaluate SWA model if active, otherwise base model
+            # Evaluate SWA model if active, otherwise base model
             eval_model = swa_model.module if (use_stabilized and swa_active) else model
             eval_model.eval()
             Fv, Ev = hard_pinn_predict_load_energy(eval_model, Xv, params)
@@ -2242,7 +2242,7 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
             if es is not None and es(val_score, ep):
                 break
 
-    # [V8] Final SWA evaluation
+    # Final SWA evaluation
     if use_stabilized and swa_active:
         swa_model.module.eval()
         Fv, Ev = hard_pinn_predict_load_energy(swa_model.module, Xv, params)
@@ -3437,7 +3437,7 @@ def gp_bo_minimize_joint(objective_funcs: Dict[str, Callable], bounds: Tuple[flo
     """
     Joint GP-BO minimization over (theta, LC) using skopt.gp_minimize.
     
-    [V8] Uses scikit-optimize's gp_minimize with a joint search space:
+    Uses scikit-optimize's gp_minimize with a joint search space:
       - theta: Real dimension (continuous angle)
       - LC: Categorical dimension (LC1 or LC2)
     

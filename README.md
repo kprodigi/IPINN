@@ -42,10 +42,10 @@ pytest
 
 ```bash
 # Full paper run (requires skopt):
-python composite_design_v20.py --data_dir ./data --output_dir ./results_paper --strict_paper
+python composite_design.py --data_dir ./data --output_dir ./results_paper --strict_paper
 
 # Quick smoke test:
-python composite_design_v20.py --dry_run --data_dir tests/fixtures --output_dir ./results_test --force_cpu
+python composite_design.py --dry_run --data_dir tests/fixtures --output_dir ./results_test --force_cpu
 ```
 
 ### HPC Parallel Run (SLURM)
@@ -170,7 +170,7 @@ The `submit_pipeline.sh` script splits the monolithic pipeline into SLURM jobs:
 
 ```
 IPINN/
-  composite_design_v20.py     # Main pipeline (single module — forward + inverse + analysis)
+  composite_design.py     # Main pipeline (single module — forward + inverse + analysis)
   pyproject.toml              # Package metadata
   environment.yml             # Conda environment
   requirements.txt            # Pip dependencies

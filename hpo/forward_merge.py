@@ -12,7 +12,7 @@ SLURM array tasks and emits the SAME outputs as :mod:`hpo.stage2_v16`:
     stage2_<approach>_bundle.pt      trained models + scalers (torch.save)
 
 The merge applies the same Tukey-fence convergence filter on training-set
-R² as :func:`composite_design_v20.train_ensemble`, so the merged outputs
+R² as :func:`composite_design.train_ensemble`, so the merged outputs
 match the sequential ``stage2_v16.py`` outputs (modulo non-determinism from
 CUDA kernels across different GPUs — bit-for-bit equality is not
 guaranteed when members are trained on different hardware).
@@ -45,7 +45,7 @@ _HPO_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HPO_DIR, os.pardir))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-import composite_design_v20 as cd  # noqa: E402
+import composite_design as cd  # noqa: E402
 
 warnings.filterwarnings("ignore", category=UserWarning, module=r"matplotlib")
 
@@ -203,7 +203,7 @@ def main():
         models.append(model)
 
     # --- Convergence filter (Tukey fence on TRAINING-set R²) ------------------
-    # Mirrors composite_design_v20.train_ensemble at lines ~2295-2342.
+    # Mirrors composite_design.train_ensemble at lines ~2295-2342.
     train_r2_scores = [float(p["train_metrics"]["load_r2"]) for p in parts]
     k_iqr = cd.CFG.convergence_filter_iqr
     M_total = len(models)

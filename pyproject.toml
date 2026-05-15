@@ -46,7 +46,7 @@ test = ["pytest>=7.4"]
 dev  = ["pytest>=7.4", "scikit-optimize>=0.10.1", "optuna>=3.4,<5"]
 
 [project.scripts]
-ipinn = "composite_design_v20:main_v20"
+ipinn = "composite_design:main_v20"
 
 [project.urls]
 Repository = "https://github.com/kprodigi/IPINN"
@@ -55,10 +55,10 @@ Repository = "https://github.com/kprodigi/IPINN"
 # The HPO entry point (``hpo/tune_v20.py``) and HPC stage dispatcher
 # (``slurm/hpc_run_stage.py``) are standalone scripts intentionally kept out
 # of the install surface — they are invoked by path from SLURM scripts and
-# do their own ``sys.path`` resolution to import ``composite_design_v20``.
+# do their own ``sys.path`` resolution to import ``composite_design``.
 [tool.setuptools]
 py-modules = [
-    "composite_design_v20",
+    "composite_design",
 ]
 
 [tool.pytest.ini_options]

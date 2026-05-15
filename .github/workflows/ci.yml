@@ -30,7 +30,7 @@ jobs:
 
       - name: End-to-end dry run
         run: |
-          python composite_design_v20.py \
+          python composite_design.py \
             --dry_run \
             --data_dir tests/fixtures \
             --output_dir results_ci_dry \

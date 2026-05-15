@@ -27,7 +27,7 @@ HPO and HPC infrastructure in dedicated sibling directories:
 
 ```
 .
-├── composite_design_v20.py    # main pipeline (single module)
+├── composite_design.py    # main pipeline (single module)
 ├── data/                      # LC1.xlsx, LC2.xlsx
 ├── hpo/                       # Optuna HPO entry point
 ├── slurm/                     # SLURM submission scripts + HPC dispatcher
@@ -38,7 +38,7 @@ HPO and HPC infrastructure in dedicated sibling directories:
 ## Code Style
 
 - Python 3.10+ with type hints
-- Single main module (`composite_design_v20.py`) for reproducibility
+- Single main module (`composite_design.py`) for reproducibility
 - Publication figures follow Elsevier/Composite Structures formatting (600 DPI, 7.48" width)
 
 ## Reporting Issues
