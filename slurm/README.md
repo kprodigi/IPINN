@@ -132,8 +132,8 @@ All SLURM stdout/stderr lands in `<output_dir>/slurm_logs/`:
 
 - `submit_pipeline.sh`: `<stage>_<jobid>.{out,err}`
 - `submit_hpo.sh`: `hpo_<approach>_<jobid>_<worker>.{out,err}`
-- `submit_forward.sh`: `stage2_<approach>_m<idx>_<jobid>.{out,err}`,
-  `stage2_<approach>_merge_<jobid>.{out,err}`
+- `submit_forward.sh`: `forward_<approach>_m<idx>_<jobid>.{out,err}`,
+  `forward_<approach>_merge_<jobid>.{out,err}`
 - `submit_inverse.sh`: `inverse_hard_m<idx>_<jobid>.{out,err}`,
   `inverse_hard_merge_<jobid>.{out,err}`,
   `inverse_hard_analysis_<jobid>.{out,err}`

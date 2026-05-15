@@ -33,9 +33,9 @@ guarantees that Soft-PINN can only approximate:
       tighter for Hard since its physics is exact.
 
 Usage:
-    python hpo/compare_soft_vs_hard.py \\
-        --soft_bundle  results_forward/stage2_soft_bundle.pt \\
-        --hard_bundle  results_forward/stage2_hard_bundle.pt \\
+    python hpo/compare_methods.py \\
+        --soft_bundle  results_forward/forward_soft_bundle.pt \\
+        --hard_bundle  results_forward/forward_hard_bundle.pt \\
         --output_dir   results_forward/
 
 Writes:
@@ -70,7 +70,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module=r"matplotlib")
 # Helpers
 # =============================================================================
 def _make_logger(log_path: str) -> logging.Logger:
-    log = logging.getLogger("compare_soft_vs_hard")
+    log = logging.getLogger("compare_methods")
     log.setLevel(logging.INFO)
     log.handlers = []
     fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
@@ -238,8 +238,8 @@ def r2_per_member(per_member_pred: np.ndarray, y_true: np.ndarray) -> np.ndarray
 # =============================================================================
 def main():
     p = argparse.ArgumentParser(description="Soft-PINN vs Hard-PINN physics-correctness comparison.")
-    p.add_argument("--soft_bundle", required=True, help="Path to stage2_soft_bundle.pt")
-    p.add_argument("--hard_bundle", required=True, help="Path to stage2_hard_bundle.pt")
+    p.add_argument("--soft_bundle", required=True, help="Path to forward_soft_bundle.pt")
+    p.add_argument("--hard_bundle", required=True, help="Path to forward_hard_bundle.pt")
     p.add_argument("--output_dir",  default="./results_forward")
     p.add_argument("--force_cpu",   action="store_true")
     args = p.parse_args()

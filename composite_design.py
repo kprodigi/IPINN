@@ -8805,728 +8805,13 @@ def generate_output_manifest(output_dir: str, logger: logging.Logger) -> None:
 
 
 # =============================================================================
-# MAIN PIPELINE
+# PIPELINE ORCHESTRATION, FIGURE LAYER, AND CLI
 # =============================================================================
-def run_pipeline(data_dir: str, output_dir: str):
-    """Main pipeline orchestrating all computations."""
-    refresh_device()
-    os.makedirs(output_dir, exist_ok=True)
-    logger = setup_logging(output_dir)
-    apply_dry_run_settings(logger)
-    set_publication_style()
-    log_runtime_environment(output_dir, logger)
-    check_publication_dependencies(logger)
-    
-    logger.info("=" * 80)
-    logger.info("PINN CRASHWORTHINESS FRAMEWORK - VERSION 5 (Extended Analyses Edition)")
-    logger.info("=" * 80)
-    logger.info(f"Data directory: {data_dir}")
-    logger.info(f"Output directory: {output_dir}")
-    logger.info(f"Device: {DEVICE}")
-    logger.info(f"Ensemble size: {CFG.n_ensemble}")
-    logger.info(f"Random seed: {CFG.seed_base}")
-    logger.info("")
-    logger.info("VERSION 6 CHANGES:")
-    logger.info("  [P] Ensemble size increased from M=5 to M=20 for tighter uncertainty bands")
-    logger.info("  [Q] Unseen-angle curves now use ensemble mean (not best member) as center line")
-    logger.info("  [R] Conformal calibration applied to all plotted +/-2sigma confidence bands")
-    logger.info("  [S] Conformal factors reported in Table1_forward_results.csv")
-    logger.info("  [T] On-manifold inverse targets with grid-midpoint placement")
-    logger.info(
-        f"  [U] GP-BO budget (defaults): {BO_CFG.n_calls_total} total "
-        f"(n_init={BO_CFG.n_init}, joint theta+LC search via skopt)"
-    )
-    logger.info("  [V] Convergence filter: Tukey fence (Q1-1.5*IQR) on training-set R2")
-    logger.info("  [W] Hard-PINN unseen architecture widened from [32,32] to [64,64]")
-    logger.info("  [X] Dual optimizer selection: accuracy (star) and efficiency (diamond)")
-    logger.info("  [Y] Target uniqueness scan: detect multimodal objective landscapes")
-    logger.info("  [Z] M_total and M_eff reported in Table1_forward_results.csv")
-    logger.info(f"       Tukey fence multiplier: {CFG.convergence_filter_iqr}")
-    logger.info("")
-    logger.info("VERSION 7 CHANGES:")
-    logger.info("  [AA] Hard-PINN unseen architecture reverted to [32,32]")
-    logger.info("  [AB] Epochs and early-stopping patience increased across all configs")
-    logger.info("  [AC] ttest_rel replaced with ttest_ind (Welch) to handle unequal M_eff")
-    logger.info("  [AD] GP-BO Posterior Evolution figure: true objective landscape overlay")
-    logger.info("  [AE] GP-BO Posterior Evaluation: Fig_gpbo_posterior_evaluation_<target>.png (one per target)")
-    logger.info("")
-    logger.info("VERSION 8 CHANGES:")
-    logger.info("  [AF] Hard-PINN unseen: stabilized training (warmup + cosine + SWA)")
-    logger.info("       LR warmup (80 epochs) prevents catastrophic early gradient updates")
-    logger.info("       Cosine annealing replaces ReduceLROnPlateau for deterministic decay")
-    logger.info("       SWA (last 20%) averages weights for smoother loss landscape")
-    logger.info("  [AG] Hard-PINN unseen: HPO v3 config, arch [128,64] (was [32,32])")
-    logger.info("       154 Optuna TPE trials, best val R²=0.851 (was 0.850)")
-    logger.info("  [AH] Soft-PINN unseen: HPO v3 config, arch [256,128] (was [256,128,64])")
-    logger.info("       95 Optuna TPE trials, best val R²=0.805 (was 0.801)")
-    logger.info("  [AI] Full-data Hard-PINN (inverse design) also uses stabilized training")
-    logger.info("  [AJ] GP-BO switched to skopt.gp_minimize with joint (theta, LC) space")
-    logger.info("       Single GP shares information across LCs (fixes LC1 starvation)")
-    logger.info(
-        f"       Default budget: {BO_CFG.n_calls_total} calls (n_init={BO_CFG.n_init}); "
-        "override via BO_CFG / code if needed"
-    )
-    logger.info("       Posteriors reconstructed from res.models at each iteration")
-    logger.info("")
-    logger.info("VERSION 9 (Q1 inverse artifacts):")
-    logger.info("  [AK] Table3_inverse_illposedness, Table_inverse_local_minima, Table_inverse_topk_basins")
-    logger.info("  [AL] Table_forward_jacobian_summary, Table_inverse_vs_calibration")
-    logger.info("  [AM] Likelihood posterior: Fig_inverse_posterior_likelihood, Table_inverse_posterior_likelihood")
-    logger.info("  [AN] Table_inverse_stress_protocol (robustness), Table_inverse_theta_member_spread")
-    logger.info("  [AO] Table_inverse_ablation (--inverse_ablation)")
-    logger.info("  [AP] Multi-seed BO uses full BOConfig (dataclasses.replace)")
-    logger.info("")
-    logger.info("VERSION 5 EXTENDED ANALYSES:")
-    logger.info("  [H] Physics verification figure: dE/dd = F proof")
-    logger.info("  [I] Baseline comparison: Linear, RF, XGBoost, GP")
-    logger.info("  [K] Hyperparameter sensitivity: w_phys × lr heatmap")
-    logger.info("  [L] Multi-seed inverse design robustness")
-    logger.info("  [M] Uncertainty calibration analysis")
-    logger.info("  [N] MAE added to all tables")
-    logger.info("  [O] Extended ablation table")
-    logger.info("")
-    logger.info("VERSION 4 CHANGES:")
-    logger.info("  [A] LC-specific displacement ranges (LC1=80mm, LC2=130mm)")
-    logger.info("  [B] Fixed NameError with disp_end variable")
-    logger.info("  [C] Cross-protocol bar plot y-axis starts at 0.5")
-    logger.info("  [D] Ablation study on unseen angle θ=60° protocol")
-    logger.info("  [E] Feasible inverse design targets from empirical data")
-    logger.info("  [F] GP-BO Posterior Evaluation (2x4 grid, one PNG per inverse target)")
-    logger.info("  [G] GP-BO inverse: convergence diagnostics and objective traces per target")
-    logger.info("")
-    
-    # Load data
-    df_all = load_data(data_dir, logger)
-    dual_results = {}
-    
-    # Protocol 1: Random 80-20 split
-    logger.info("\n" + "=" * 70)
-    logger.info("PROTOCOL 1: RANDOM 80-20 SPLIT (INTERPOLATION)")
-    logger.info("=" * 70)
-    train_df_r, val_df_r = split_random_80_20(df_all, CFG.split_seed, logger)
-    scaler_disp_r, scaler_out_r, enc_r, params_r = create_preprocessors(train_df_r, logger)
-    save_reproducibility_artifacts(output_dir, "random", train_df_r, scaler_disp_r, scaler_out_r, enc_r, params_r, logger)
-    
-    results_random = {}
-    for approach in ["ddns", "soft", "hard"]:
-        results_random[approach] = train_ensemble(approach, train_df_r, val_df_r, scaler_disp_r, scaler_out_r, enc_r, params_r, "random", logger)
-    
-    dual_results["random"] = results_random
-    dual_results["random"]["train_df"] = train_df_r
-    dual_results["random"]["val_df"] = val_df_r
-    dual_results["random"]["scaler_disp"] = scaler_disp_r
-    dual_results["random"]["scaler_out"] = scaler_out_r
-    dual_results["random"]["enc"] = enc_r
-    dual_results["random"]["params"] = params_r
-    
-    # Protocol 2: Unseen angle
-    logger.info("\n" + "=" * 70)
-    logger.info(f"PROTOCOL 2: UNSEEN-ANGLE HOLDOUT (θ*={CFG.theta_star}°)")
-    logger.info("=" * 70)
-    train_df_u, val_df_u = split_unseen_angle(df_all, CFG.theta_star, logger)
-    scaler_disp_u, scaler_out_u, enc_u, params_u = create_preprocessors(train_df_u, logger)
-    save_reproducibility_artifacts(output_dir, "unseen", train_df_u, scaler_disp_u, scaler_out_u, enc_u, params_u, logger)
-    
-    results_unseen = {}
-    for approach in ["ddns", "soft", "hard"]:
-        results_unseen[approach] = train_ensemble(approach, train_df_u, val_df_u, scaler_disp_u, scaler_out_u, enc_u, params_u, "unseen", logger)
-    
-    dual_results["unseen"] = results_unseen
-    dual_results["unseen"]["train_df"] = train_df_u
-    dual_results["unseen"]["val_df"] = val_df_u
-    dual_results["unseen"]["scaler_disp"] = scaler_disp_u
-    dual_results["unseen"]["scaler_out"] = scaler_out_u
-    dual_results["unseen"]["enc"] = enc_u
-    dual_results["unseen"]["params"] = params_u
-    
-    # Statistical tests
-    logger.info("\n" + "=" * 70)
-    logger.info("STATISTICAL SIGNIFICANCE TESTS")
-    logger.info("=" * 70)
-    stat_tests = compute_statistical_tests(dual_results, logger)
-    
-    # Design space metrics
-    logger.info("\n" + "=" * 70)
-    logger.info("DESIGN SPACE METRICS (FROM DATA)")
-    logger.info("=" * 70)
-    df_metrics = compute_design_space_metrics(df_all, logger)
-    logger.info(f"Computed metrics for {len(df_metrics)} configurations")
-    enrich_df_metrics_ea_common(df_metrics, df_all, logger)
-    
-    # [CHANGE D] Ablation study on unseen angle protocol
-    df_ablation = pd.DataFrame()
-    if CFG.run_ablation:
-        logger.info("\n" + "=" * 70)
-        logger.info("ABLATION STUDY: PHYSICS WEIGHT (UNSEEN ANGLE θ=60°)")
-        logger.info("=" * 70)
-        df_ablation = run_ablation_study(train_df_u, val_df_u, scaler_disp_u, scaler_out_u, enc_u, params_u, "unseen", logger)
-        df_ablation.to_csv(os.path.join(output_dir, "Table5_ablation.csv"), index=False)
-        logger.info("  Saved: Table5_ablation.csv")
-    
-    # Forward model figures
-    logger.info("\n" + "=" * 70)
-    logger.info("GENERATING FORWARD MODEL FIGURES")
-    logger.info("=" * 70)
-    
-    # Compute uncertainty calibration BEFORE figures so conformal factors
-    # can be applied to plotted confidence bands
-    logger.info("  Computing uncertainty calibration (conformal factors)...")
-    calibration = compute_uncertainty_calibration(dual_results, logger)
-    
-    fig_parity_plots(dual_results, output_dir, logger)
-    fig_residual_histograms(dual_results, output_dir, logger)
-    fig_boxplot_comparison(dual_results, output_dir, logger)
-    fig_training_curves(dual_results, output_dir, logger)
-    fig_cross_protocol_comparison(dual_results, output_dir, logger)
-    fig_unseen_curves(dual_results, df_all, output_dir, logger, calibration=calibration)
-    fig_random_grid_curves(dual_results, df_all, output_dir, logger)
-    fig_validation_error_maps(dual_results, output_dir, logger)
-    table_validation_errors_by_angle_bin(dual_results, output_dir, logger)
-    fig_qq_load_residuals(dual_results, output_dir, logger)
-    # Ablation figure removed per user request
-    # if not df_ablation.empty:
-    #     fig_ablation_study(df_ablation, output_dir, logger)
-    
-    # =========================================================================
-    # EXTENDED ANALYSES (V5)
-    # =========================================================================
-    if CFG.run_robustness_analyses:
-        logger.info("\n" + "=" * 70)
-        logger.info("ROBUSTNESS ANALYSIS: PHYSICS VERIFICATION")
-        logger.info("=" * 70)
-        physics_residuals = fig_physics_verification(dual_results, val_df_u, scaler_disp_u, 
-                                                       enc_u, params_u, output_dir, logger)
-        
-        # --- BASELINE COMPARISON: UNSEEN PROTOCOL ONLY ---
-        logger.info("\n" + "=" * 70)
-        logger.info("ROBUSTNESS ANALYSIS: BASELINE MODEL COMPARISON (UNSEEN θ=60°)")
-        logger.info("=" * 70)
-        baseline_results_u = train_baseline_models(train_df_u, val_df_u, scaler_disp_u, enc_u, params_u, logger)
-        fig_baseline_comparison(baseline_results_u, dual_results, output_dir, logger, protocol="unseen")
-        
-        # --- HYPERPARAMETER SENSITIVITY: UNSEEN PROTOCOL ---
-        logger.info("\n" + "=" * 70)
-        logger.info("ROBUSTNESS ANALYSIS: HYPERPARAMETER SENSITIVITY (UNSEEN θ=60°)")
-        logger.info("=" * 70)
-        sensitivity_df_u = run_hyperparam_sensitivity(train_df_u, val_df_u, scaler_disp_u, scaler_out_u, enc_u, params_u, "unseen", logger)
-        fig_hyperparam_sensitivity(sensitivity_df_u, output_dir, logger, tag="unseen")
-        
-        logger.info("\n" + "=" * 70)
-        logger.info("ROBUSTNESS ANALYSIS: UNCERTAINTY CALIBRATION")
-        logger.info("=" * 70)
-        # calibration already computed before figure generation; reuse it
-        fig_reliability_diagram(calibration, output_dir, logger)
-
-    else:
-        logger.info("\n  Skipping robustness analyses (--no_robustness flag set)")
-
-    # [CHANGE E] Generate feasible inverse design targets
-    logger.info("\n" + "=" * 70)
-    logger.info("INVERSE DESIGN: FULL-DATA HARD-PINN TRAINING")
-    logger.info("=" * 70)
-    logger.info("  Training Hard-PINN on 100% of data for maximum inverse design accuracy")
-    logger.info("  (No holdout: forward model already validated via dual protocols)")
-    
-    # Train full-data Hard-PINN ensemble for inverse design
-    inv_models, inv_scaler_disp, inv_scaler_out, inv_enc, inv_params = train_full_data_hard_pinn(df_all, logger)
-    
-    # Generate inverse design targets from empirical data quantiles
-    logger.info("\n" + "=" * 70)
-    logger.info("INVERSE DESIGN TARGETS")
-    logger.info("=" * 70)
-    inverse_targets = generate_feasible_targets(df_metrics, logger, df_all=df_all)
-    
-    # =========================================================================
-    # ENSEMBLE CLASSIFIER FOR LOADING-CONDITION PLAUSIBILITY
-    # =========================================================================
-    logger.info("\n" + "=" * 70)
-    logger.info("ENSEMBLE CLASSIFIER: LOADING-CONDITION PLAUSIBILITY")
-    logger.info("=" * 70)
-    cal_ens, clf_feat_scaler, clf_diag = train_lc_plausibility_classifier(df_metrics, logger)
-    fig_lc_classifier_diagnostics(clf_diag, output_dir, logger)
-    generate_classifier_diagnostics_table(cal_ens, clf_feat_scaler, clf_diag, output_dir, logger)
-    fig_classifier_decision_boundary(cal_ens, clf_feat_scaler, df_metrics, output_dir, logger)
-    
-    # Auto-tune lambda (classifier penalty weight)
-    lambda_opt, lambda_diag = auto_tune_lambda(cal_ens, clf_feat_scaler, df_metrics, logger)
-    BO_CFG.prob_weight = lambda_opt
-
-    # Inverse design optimization using full-data models WITH classifier penalty
-    logger.info("\n" + "=" * 70)
-    logger.info("INVERSE DESIGN: GP-BO (WITH CLASSIFIER PENALTY)")
-    logger.info("=" * 70)
-    logger.info(f"  Using full-data Hard-PINN models + classifier penalty (w={BO_CFG.prob_weight:.4f})")
-    
-    all_inverse_results = []
-    for target in inverse_targets:
-        logger.info(f"\n  Target {target['id']}: EA@{D_COMMON:.0f}mm={target['EA']:.2f}J, IPF={target['IPF']:.3f}kN")
-        logger.info(f"    Expected: {target.get('expected_lc', 'N/A')} at {target.get('expected_angle_range', 'N/A')}")
-        res = run_inverse_design(inv_models, "hard", target["EA"], target["IPF"], 
-                                 inv_scaler_disp, inv_enc, inv_params, BO_CFG, logger,
-                                 cal_ens=cal_ens, feat_scaler=clf_feat_scaler)
-        res["target_info"] = target  # Store target info for analysis
-        all_inverse_results.append(res)
-        
-        for method in ["gpbo"]:
-            key = f"{method}_best"
-            if key in res:
-                best = res[key]
-                method_name = method.upper()
-                pred_lc = best.get('lc', best.get('best_lc', ''))
-                pred_angle = best['x_best']
-                # Check if angle is non-training angle
-                training_angles = [45, 50, 55, 60, 65, 70]
-                is_interpolated = not any(abs(pred_angle - ta) < 0.5 for ta in training_angles)
-                interp_marker = "✓" if is_interpolated else "≈trained"
-                logger.info(f"    {method_name}: θ={pred_angle:.1f}° {interp_marker}, LC={pred_lc}, "
-                           f"EA@{EA_COMMON_MM_TAG} err={best.get('ea_error_pct', float('nan')):.1f}%, "
-                           f"IPF_err={best['ipf_error_pct']:.1f}% "
-                           f"→ EA@{EA_COMMON_MM_TAG}={best.get('pred_ea', 0):.2f}J, "
-                           f"EA_full={best.get('pred_ea_full', best.get('pred_ea', 0)):.2f}J, "
-                           f"IPF={best.get('pred_ipf', 0):.3f}kN")
-        
-        # One convergence curve + one GP-BO Posterior Evaluation figure per target
-        # (avoid duplicate BO diagnostic figures; see fig_bo_posterior_evaluation docstring).
-        fig_inverse_optimizer_convergence(res, output_dir, logger, tag=target['id'])
-        fig_bo_posterior_evaluation(res, output_dir, logger, tag=target['id'])
-    
-    # Analyze LC distribution in results
-    logger.info("\n  --- Inverse Design LC Distribution Summary ---")
-    for method in ["gpbo"]:
-        lc1_count = sum(1 for r in all_inverse_results if f"{method}_best" in r and r[f"{method}_best"].get("lc") == "LC1")
-        lc2_count = sum(1 for r in all_inverse_results if f"{method}_best" in r and r[f"{method}_best"].get("lc") == "LC2")
-        logger.info(f"    {method.upper()}: LC1={lc1_count}, LC2={lc2_count} (target: 2 LC1, 3 LC2)")
-    
-    # Inverse design figures (combined)
-    logger.info("\n" + "=" * 70)
-    logger.info("GENERATING INVERSE DESIGN FIGURES")
-    logger.info("=" * 70)
-    if all_inverse_results:
-        generate_optimizer_comparison_table(all_inverse_results, output_dir, logger)
-    fig_design_space(inv_models, "hard", inv_scaler_disp, inv_enc, inv_params, output_dir, logger)
-    if all_inverse_results:
-        fig_inverse_parity_uncertainty(all_inverse_results, output_dir, logger)
-        fig_inverse_vs_nearest_experimental_curve(
-            df_all, all_inverse_results, inv_models,
-            inv_scaler_disp, inv_enc, inv_params, output_dir, logger,
-        )
-        # Ill-posedness analysis figures
-        fig_solution_landscape(all_inverse_results, output_dir, logger)
-        fig_inverse_posterior(all_inverse_results, output_dir, logger)
-
-    # Forward-map Jacobian analysis
-    logger.info("\n" + "=" * 70)
-    logger.info("FORWARD-MAP JACOBIAN ANALYSIS (ILL-POSEDNESS CHARACTERIZATION)")
-    logger.info("=" * 70)
-    jacobian_results = None
-    try:
-        jacobian_results = compute_forward_map_jacobian(
-            inv_models, "hard", inv_scaler_disp, inv_enc, inv_params,
-            (CFG.angle_opt_min, CFG.angle_opt_max), logger)
-        fig_forward_map_jacobian(jacobian_results, output_dir, logger)
-    except Exception as e:
-        logger.warning(f"  Jacobian analysis failed: {e}")
-
-    # =========================================================================
-    # LAMBDA SENSITIVITY SWEEP
-    # =========================================================================
-    if BO_CFG.lambda_sweep:
-        logger.info("\n" + "=" * 70)
-        logger.info("LAMBDA SENSITIVITY ANALYSIS")
-        logger.info("=" * 70)
-        run_lambda_sensitivity(
-            inv_models, "hard", inverse_targets,
-            inv_scaler_disp, inv_enc, inv_params,
-            BO_CFG, cal_ens, clf_feat_scaler,
-            output_dir, logger
-        )
-    
-    # =========================================================================
-    # CLASSIFIER ABLATION: WITH vs WITHOUT PLAUSIBILITY PENALTY
-    # =========================================================================
-    if BO_CFG.run_classifier_ablation:
-        logger.info("\n" + "=" * 70)
-        logger.info("CLASSIFIER ABLATION: WITH vs WITHOUT PENALTY")
-        logger.info("=" * 70)
-        logger.info("  Running inverse design WITHOUT classifier penalty for comparison...")
-        
-        all_inverse_results_no_clf = []
-        for target in inverse_targets:
-            res_no = run_inverse_design(
-                inv_models, "hard", target["EA"], target["IPF"],
-                inv_scaler_disp, inv_enc, inv_params, BO_CFG, logger,
-                cal_ens=None, feat_scaler=None)  # no classifier
-            res_no["target_info"] = target
-            all_inverse_results_no_clf.append(res_no)
-        
-        # Build comparison table
-        ablation_rows = []
-        for i, target in enumerate(inverse_targets):
-            tid = target["id"]
-            for method in ["gpbo"]:
-                key = f"{method}_best"
-                # WITH penalty
-                if key in all_inverse_results[i]:
-                    bw = all_inverse_results[i][key]
-                    ea_err_w = bw.get("ea_error_pct", float("nan"))
-                    ipf_err_w = bw.get("ipf_error_pct", float("nan"))
-                    lc_w = bw.get("lc", bw.get("best_lc", ""))
-                    angle_w = bw.get("x_best", float("nan"))
-                    # Compute p_LC for the WITH-penalty result
-                    m_w = compute_ea_ipf_ensemble(
-                        inv_models, "hard", angle_w, lc_w,
-                        inv_scaler_disp, inv_enc, inv_params, d_eval=D_COMMON
-                    )
-                    _, p_lc_w = compute_lc_penalty(
-                        cal_ens, clf_feat_scaler,
-                        m_w["EA"], m_w["IPF"],
-                        lc_w, prob_weight=0.0,  # just get p_lc
-                        angle_deg=float(angle_w),
-                    )
-                else:
-                    ea_err_w = ipf_err_w = p_lc_w = float("nan")
-                    lc_w = angle_w = ""
-                
-                # WITHOUT penalty
-                if key in all_inverse_results_no_clf[i]:
-                    bwo = all_inverse_results_no_clf[i][key]
-                    ea_err_wo = bwo.get("ea_error_pct", float("nan"))
-                    ipf_err_wo = bwo.get("ipf_error_pct", float("nan"))
-                    lc_wo = bwo.get("lc", bwo.get("best_lc", ""))
-                    angle_wo = bwo.get("x_best", float("nan"))
-                    m_wo = compute_ea_ipf_ensemble(
-                        inv_models, "hard", angle_wo, lc_wo,
-                        inv_scaler_disp, inv_enc, inv_params, d_eval=D_COMMON
-                    )
-                    _, p_lc_wo = compute_lc_penalty(
-                        cal_ens, clf_feat_scaler,
-                        m_wo["EA"], m_wo["IPF"],
-                        lc_wo, prob_weight=0.0,
-                        angle_deg=float(angle_wo),
-                    )
-                else:
-                    ea_err_wo = ipf_err_wo = p_lc_wo = float("nan")
-                    lc_wo = angle_wo = ""
-                
-                ablation_rows.append({
-                    "Target": tid,
-                    "Method": method.upper(),
-                    "With_Penalty_Angle": f"{angle_w:.1f}" if isinstance(angle_w, float) else "",
-                    "With_Penalty_LC": lc_w,
-                    "With_Penalty_EA_err%": f"{ea_err_w:.2f}",
-                    "With_Penalty_IPF_err%": f"{ipf_err_w:.2f}",
-                    "With_Penalty_p_LC": f"{p_lc_w:.4f}" if not np.isnan(p_lc_w) else "",
-                    "No_Penalty_Angle": f"{angle_wo:.1f}" if isinstance(angle_wo, float) else "",
-                    "No_Penalty_LC": lc_wo,
-                    "No_Penalty_EA_err%": f"{ea_err_wo:.2f}",
-                    "No_Penalty_IPF_err%": f"{ipf_err_wo:.2f}",
-                    "No_Penalty_p_LC": f"{p_lc_wo:.4f}" if not np.isnan(p_lc_wo) else "",
-                })
-        
-        df_clf_ablation = pd.DataFrame(ablation_rows)
-        df_clf_ablation.to_csv(os.path.join(output_dir, "Table_classifier_ablation.csv"), index=False)
-        logger.info("  Saved: Table_classifier_ablation.csv")
-        
-        # Summary statistics
-        with_plc = [float(r["With_Penalty_p_LC"]) for r in ablation_rows 
-                     if r["With_Penalty_p_LC"] and r["With_Penalty_p_LC"] != "nan"]
-        without_plc = [float(r["No_Penalty_p_LC"]) for r in ablation_rows 
-                        if r["No_Penalty_p_LC"] and r["No_Penalty_p_LC"] != "nan"]
-        if with_plc and without_plc:
-            logger.info(f"  Mean p_LC WITH penalty:    {np.mean(with_plc):.4f} (±{np.std(with_plc):.4f})")
-            logger.info(f"  Mean p_LC WITHOUT penalty: {np.mean(without_plc):.4f} (±{np.std(without_plc):.4f})")
-    
-    # =========================================================================
-    # ROBUSTNESS: MULTI-SEED INVERSE DESIGN
-    # =========================================================================
-    if CFG.run_robustness_analyses:
-        logger.info("\n" + "=" * 70)
-        logger.info("ROBUSTNESS: INVERSE DESIGN MULTI-SEED (MULTI-SEED)")
-        logger.info("=" * 70)
-        robust_inverse_results = []
-        for target in inverse_targets[:3]:  # First 3 targets for robustness analysis
-            logger.info(f"\n  Robustness analysis for Target {target['id']}")
-            robust_res = run_inverse_design_robust(
-                inv_models, "hard", target["EA"], target["IPF"],
-                inv_scaler_disp, inv_enc, inv_params, BO_CFG, logger, n_seeds=5,
-                cal_ens=cal_ens, feat_scaler=clf_feat_scaler)
-            robust_inverse_results.append(robust_res)
-        generate_inverse_robustness_table(robust_inverse_results, output_dir, logger)
-    
-    # =========================================================================
-    # MULTIOBJECTIVE OPTIMIZATION WITH ENHANCED VISUALIZATION
-    # =========================================================================
-    logger.info("\n" + "=" * 70)
-    logger.info(f"MULTIOBJECTIVE EA@{D_COMMON:.0f}mm vs IPF TRADE-OFF ANALYSIS (DISPLACEMENT-FAIR)")
-    logger.info("=" * 70)
-    logger.info(f"  Both LCs evaluated at d={D_COMMON:.0f}mm to isolate intrinsic force response")
-    logger.info("  Key insight: α=0 (IPF priority) → low angles + LC1 (stable)")
-    logger.info("              α=1 (EA priority) → high angles + LC2 (catastrophic risk)")
-    
-    pareto_df, landscape_df = run_multiobjective_sweep(inv_models, "hard", inv_scaler_disp, inv_enc, 
-                                                        inv_params, df_metrics, logger,
-                                                        output_dir=output_dir, df_all=df_all)
-    
-    # Traditional Pareto figure
-    fig_pareto_tradeoff(pareto_df, output_dir, logger)
-    
-    # Enhanced multi-objective heatmaps
-    fig_multiobjective_heatmaps(pareto_df, landscape_df, output_dir, logger, calibration=calibration)
-    
-    # Save tables
-    pareto_df.to_csv(os.path.join(output_dir, "Table6_pareto_sweep.csv"), index=False)
-    landscape_df.to_csv(os.path.join(output_dir, "Table_design_landscape.csv"), index=False)
-    logger.info("  Saved: Table6_pareto_sweep.csv")
-    logger.info("  Saved: Table_design_landscape.csv")
-    fig_landscape_ensemble_disagreement(landscape_df, output_dir, logger)
-    fig_d_common_sensitivity_ea(
-        inv_models, "hard", inv_scaler_disp, inv_enc, inv_params,
-        landscape_df, output_dir, logger,
-    )
-
-    # Save per-LC conditional Pareto fronts
-    pareto_by_lc = pareto_df.attrs.get("pareto_by_lc", {})
-    for lc, lc_df in pareto_by_lc.items():
-        fname = f"Table_pareto_conditional_{lc}.csv"
-        lc_df.to_csv(os.path.join(output_dir, fname), index=False)
-        logger.info(f"  Saved: {fname}")
-
-    # =========================================================================
-    # PARETO-OPTIMAL INVERSE DESIGN TARGETS
-    # =========================================================================
-    # Run inverse design on targets drawn from the actual Pareto front to
-    # verify that GP-BO can recover known-feasible designs.
-    if CFG.run_robustness_analyses:
-        pareto_dominance_df = pareto_df.attrs.get("pareto_dominance", pd.DataFrame())
-        if not pareto_dominance_df.empty and len(pareto_dominance_df) >= 5:
-            logger.info("\n" + "=" * 70)
-            logger.info("INVERSE DESIGN WITH PARETO-OPTIMAL TARGETS")
-            logger.info("=" * 70)
-            pareto_targets = generate_pareto_targets(pareto_dominance_df, logger, n_targets=5)
-
-            if pareto_targets:
-                pareto_inverse_results = []
-                for target in pareto_targets:
-                    logger.info(f"\n  Pareto Target {target['id']}: EA@{EA_COMMON_MM_TAG}={target['EA']:.2f}J, IPF={target['IPF']:.3f}kN")
-                    res = run_inverse_design(inv_models, "hard", target["EA"], target["IPF"],
-                                             inv_scaler_disp, inv_enc, inv_params, BO_CFG, logger,
-                                             cal_ens=cal_ens, feat_scaler=clf_feat_scaler)
-                    res["target_info"] = target
-                    pareto_inverse_results.append(res)
-
-                    best = res.get("gpbo_best", {})
-                    if best:
-                        angle_err = abs(best["x_best"] - target["angle_hint"])
-                        lc_match = best.get("lc", "") == target["lc_hint"]
-                        logger.info(f"    Result: theta={best['x_best']:.1f} deg ({'+' if angle_err < 1 else ''}{angle_err:.1f} deg from hint), "
-                                   f"LC={best.get('lc','')}{' MATCH' if lc_match else ' MISMATCH'}, "
-                                   f"EA_err={best.get('ea_error_pct',0):.1f}%, IPF_err={best.get('ipf_error_pct',0):.1f}%")
-
-                # Save recovery table
-                rows = []
-                for target, res in zip(pareto_targets, pareto_inverse_results):
-                    best = res.get("gpbo_best", {})
-                    rows.append({
-                        "Target": target["id"],
-                        "EA_target": f"{target['EA']:.2f}",
-                        "IPF_target": f"{target['IPF']:.3f}",
-                        "Hint_angle": f"{target['angle_hint']:.1f}",
-                        "Hint_LC": target["lc_hint"],
-                        "Recovered_angle": f"{best.get('x_best', float('nan')):.1f}",
-                        "Recovered_LC": best.get("lc", ""),
-                        "EA_err_pct": f"{best.get('ea_error_pct', float('nan')):.2f}",
-                        "IPF_err_pct": f"{best.get('ipf_error_pct', float('nan')):.2f}",
-                        "Angle_error_deg": f"{abs(best.get('x_best', 0) - target['angle_hint']):.1f}",
-                        "LC_match": best.get("lc", "") == target["lc_hint"],
-                    })
-                pd.DataFrame(rows).to_csv(os.path.join(output_dir, "Table_pareto_target_recovery.csv"), index=False)
-                logger.info("  Saved: Table_pareto_target_recovery.csv")
-
-    # Summary tables
-    logger.info("\n" + "=" * 70)
-    logger.info("GENERATING SUMMARY TABLES")
-    logger.info("=" * 70)
-    generate_summary_tables(dual_results, df_metrics, all_inverse_results, stat_tests, output_dir, logger, calibration=calibration)
-
-    logger.info("\n" + "=" * 70)
-    logger.info("INVERSE PUBLICATION ARTIFACTS (TABLES)")
-    logger.info("=" * 70)
-    generate_inverse_publication_artifacts(
-        output_dir,
-        logger,
-        all_inverse_results,
-        calibration=calibration,
-        jacobian_results=jacobian_results,
-        inv_models=inv_models,
-        inv_scaler_disp=inv_scaler_disp,
-        inv_enc=inv_enc,
-        inv_params=inv_params,
-        dual_results=dual_results,
-        df_metrics=df_metrics,
-        df_all=df_all,
-        bo_cfg=BO_CFG,
-        cal_ens=cal_ens,
-        clf_feat_scaler=clf_feat_scaler,
-    )
-
-    logger.info("\n" + "=" * 70)
-    logger.info("REPRODUCIBILITY & COMPUTE SUMMARY (PUBLICATION)")
-    logger.info("=" * 70)
-    write_statistical_testing_policy(output_dir, logger)
-    generate_compute_budget_summary(dual_results, all_inverse_results, output_dir, logger)
-    generate_output_manifest(output_dir, logger)
-
-    # =========================================================================
-    # SAVE PIPELINE STATE (for offline figure regeneration via --replot_from)
-    # =========================================================================
-    logger.info("\n" + "=" * 70)
-    logger.info("SAVING PIPELINE STATE")
-    logger.info("=" * 70)
-    _local = locals()
-    pipeline_state = {
-        "dual_results":           dual_results,
-        "df_all":                 df_all,
-        "df_metrics":             df_metrics,
-        "df_ablation":            df_ablation,
-        "stat_tests":             stat_tests,
-        "calibration":            calibration,
-        "val_df_u":               val_df_u,
-        "scaler_disp_u":          scaler_disp_u,
-        "scaler_out_u":           scaler_out_u,
-        "enc_u":                  enc_u,
-        "params_u":               params_u,
-        "inv_models":             inv_models,
-        "inv_scaler_disp":        inv_scaler_disp,
-        "inv_scaler_out":         inv_scaler_out,
-        "inv_enc":                inv_enc,
-        "inv_params":             inv_params,
-        "inverse_targets":        inverse_targets,
-        "cal_ens":                cal_ens,
-        "clf_feat_scaler":        clf_feat_scaler,
-        "clf_diag":               clf_diag,
-        "all_inverse_results":    all_inverse_results,
-        "jacobian_results":       jacobian_results,
-        "pareto_df":              pareto_df,
-        "landscape_df":           landscape_df,
-        # The following are scoped inside `if CFG.run_robustness_analyses:`
-        # blocks and may not be defined; pull them via locals().get to avoid
-        # NameError when those blocks were skipped.
-        "baseline_results_u":     _local.get("baseline_results_u"),
-        "sensitivity_df_u":       _local.get("sensitivity_df_u"),
-        "physics_residuals":      _local.get("physics_residuals"),
-        "robust_inverse_results": _local.get("robust_inverse_results"),
-        "pareto_inverse_results": _local.get("pareto_inverse_results"),
-    }
-    save_pipeline_state(pipeline_state, output_dir, logger)
-
-    logger.info("\n" + "=" * 80)
-    logger.info("PIPELINE COMPLETE")
-    logger.info(f"All results saved to: {output_dir}")
-    logger.info("=" * 80)
-
-    return dual_results, all_inverse_results, pareto_df, stat_tests, df_ablation
-
-
-
-# =============================================================================
-# CLI ENTRY POINT
-# =============================================================================
-def main():
-    parser = argparse.ArgumentParser(description="PINN Crashworthiness Framework - Version 5 (Extended Analyses Edition)")
-    parser.add_argument("--data_dir", type=str, default=".", help="Directory containing data files")
-    parser.add_argument("--output_dir", type=str, default="./results", help="Output directory")
-    parser.add_argument("--n_ensemble", type=int, default=20, help="Ensemble size (default: 20)")
-    parser.add_argument("--show_plots", action="store_true", help="Display plots on screen")
-    parser.add_argument("--seed", type=int, default=2026, help="Random seed base")
-    parser.add_argument("--no_ablation", action="store_true", help="Skip ablation study")
-
-    parser.add_argument("--no_robustness", action="store_true", help="Skip robustness analyses (baselines, sensitivity, robustness)")
-    parser.add_argument("--force_cpu", action="store_true", help="Use CPU even if CUDA is available")
-    parser.add_argument(
-        "--strict_paper",
-        action="store_true",
-        help="Abort if optional deps missing (skopt for GP-BO). Use for submission runs.",
-    )
-    parser.add_argument(
-        "--dry_run",
-        action="store_true",
-        help="CI/smoke: tiny training budgets, M<=2, no reviewer extras; inverse uses coarse grid (no skopt).",
-    )
-    parser.add_argument(
-        "--inverse_ablation",
-        action="store_true",
-        help="Run extra GP-BO inverse ablation (no classifier penalty) on first targets; expensive.",
-    )
-    parser.add_argument(
-        "--no_inverse_stress",
-        action="store_true",
-        help="Skip validation-row inverse stress targets (Table_inverse_stress_protocol.csv).",
-    )
-    parser.add_argument(
-        "--no_inverse_member_spread",
-        action="store_true",
-        help="Skip Table_inverse_theta_member_spread.csv.",
-    )
-    parser.add_argument(
-        "--replot_from",
-        type=str,
-        default=None,
-        help="Path to a pipeline_state.pkl saved by a previous run.  Skips all "
-             "training and analyses and only regenerates figures from the saved "
-             "state.  Use to iterate on figure styling/layout without retraining.",
-    )
-    args = parser.parse_args()
-
-    CFG.dry_run = bool(args.dry_run)
-    CFG.n_ensemble = args.n_ensemble
-    CFG.seed = args.seed
-    CFG.seed_base = args.seed
-    CFG.split_seed = args.seed
-    BO_CFG.seed = args.seed
-    CFG.show_plots = args.show_plots
-    CFG.run_ablation = not args.no_ablation
-    CFG.run_robustness_analyses = not args.no_robustness
-    CFG.strict_paper_deps = bool(args.strict_paper)
-    # Replot mode: figures don't need GPU; pin to CPU so a state pickled from
-    # a CUDA run loads cleanly on a CPU-only box.
-    CFG.force_cpu = bool(args.force_cpu) or bool(args.replot_from)
-    CFG.run_inverse_ablation = bool(args.inverse_ablation)
-    CFG.run_inverse_stress_validation = not args.no_inverse_stress
-    CFG.run_inverse_member_spread = not args.no_inverse_member_spread
-    refresh_device()
-
-    if args.replot_from:
-        os.makedirs(args.output_dir, exist_ok=True)
-        logger = setup_logging(args.output_dir)
-        logger.info("=" * 80)
-        logger.info("REPLOT MODE: regenerating figures from saved state")
-        logger.info(f"Source: {args.replot_from}")
-        logger.info(f"Output: {args.output_dir}")
-        logger.info("=" * 80)
-        state = load_pipeline_state(args.replot_from, logger)
-        replot_figures_from_state(state, args.output_dir, logger)
-        return
-
-    run_pipeline(args.data_dir, args.output_dir)
-
-
-# =============================================================================
-# V_20 — FINAL PIPELINE: MULTI-PANEL FIGURES + THREE-BUNDLE STATE
-# =============================================================================
-# Everything below this divider is the publication entry point.  Training, physics-loss,
-# classifier, GP-BO, and Pareto-sweep machinery above is reused verbatim from
-# and architecture code above are kept stable for regression safety.  Below:
-#   * Figure layer: 10 multi-panel manuscript figures (Fig01–Fig10) and 7
-#     single-panel appendix figures (FigA1–FigA7), each with no overlapping
-#     labels/legends/titles.
-#   * Pipeline orchestration: inverse + multi-objective focused.
-#   * State save/load: three independent torch.save bundles so forward (slow,
-#     hours) and analysis (fast, minutes) iterations can be uncoupled.
-#   * CLI: a smaller flag set with ``--replot_from <dir>`` that reads any
-#     subset of bundles that happen to be present.
-#
-# Legacy ``main()`` and ``run_pipeline()`` entry points are preserved above but no longer
-# reachable via ``__main__``.  The active entry point is ``main()`` below.
+# Below: multi-panel manuscript figures, the three-bundle pipeline state
+# save/load helpers, and the ``main()`` entry point with ``--mode all/forward/
+# inverse/replot``.  The state bundles let forward training (slow) and
+# downstream analysis / plotting (fast) iterate independently — replot mode
+# regenerates every figure from whichever subset of bundles is present.
 # =============================================================================
 
 # Bundle filenames
@@ -10608,13 +9893,14 @@ def fig_10_robustness(lambda_diag: Optional[pd.DataFrame],
 
 
 # =============================================================================
-# APPENDIX FIGURES — single-panel wrappers around the legacy routines
+# APPENDIX FIGURES — single-panel wrappers around the supplementary routines
 # =============================================================================
 def fig_appendix_all(forward_state: Optional[Dict],
                         inverse_state: Optional[Dict],
                         analysis_state: Optional[Dict],
                         output_dir: str, logger: logging.Logger) -> None:
-    """Generate the 7 appendix figures by reusing the legacy plotting routines.
+    """Generate the 7 appendix figures by reusing the supplementary plotting
+    routines defined earlier in this module.
 
     These are already styled with apply_fig_style(); they go to the same
     output directory but with FigAx_*.png filenames.
@@ -10654,10 +9940,10 @@ def fig_appendix_all(forward_state: Optional[Dict],
 
 
 # =============================================================================
-# V_20 PIPELINE ORCHESTRATION
+# PIPELINE ORCHESTRATION
 # =============================================================================
 # =============================================================================
-# V_20 TRAINING HELPERS — splittable for parallel HPC submission
+# TRAINING HELPERS — splittable for parallel HPC submission
 # =============================================================================
 def _train_forward_only(data_dir: str, output_dir: str,
                         logger: logging.Logger,
@@ -10968,7 +10254,7 @@ def _render_all_tables(forward_state: Dict, inverse_state: Dict,
 
 
 # =============================================================================
-# V_20 PIPELINE ORCHESTRATION
+# PIPELINE ORCHESTRATION
 # =============================================================================
 def run_pipeline(data_dir: str, output_dir: str,
                      logger: Optional[logging.Logger] = None) -> Dict:
@@ -10999,7 +10285,7 @@ def run_pipeline(data_dir: str, output_dir: str,
     check_publication_dependencies(logger)
 
     logger.info("=" * 80)
-    logger.info("IPINN CRASHWORTHINESS FRAMEWORK — V_20 (mode=all)")
+    logger.info("IPINN CRASHWORTHINESS FRAMEWORK — (mode=all)")
     logger.info("=" * 80)
     logger.info(f"Data: {data_dir}  Out: {output_dir}  M={CFG.n_ensemble}  seed={CFG.seed_base}")
 
@@ -11015,13 +10301,13 @@ def run_pipeline(data_dir: str, output_dir: str,
     _render_all_figures(forward_state, inverse_state, analysis_state,
                             output_dir, logger)
 
-    # Inventory every figure/table/sidecar written above into MANIFEST_outputs.csv.
-    # Must run after all writes so the listing is complete.  The legacy
-    # The current run_pipeline() needs this initialization too.
+    # Inventory every figure/table/sidecar written above into
+    # MANIFEST_outputs.csv.  Must run after all writes so the listing is
+    # complete.
     generate_output_manifest(output_dir, logger)
 
     logger.info("\n" + "=" * 80)
-    logger.info("V_20 PIPELINE COMPLETE")
+    logger.info("PIPELINE COMPLETE")
     logger.info(f"All results in: {output_dir}")
     logger.info("=" * 80)
     return {"forward": forward_state, "inverse": inverse_state,
@@ -11091,7 +10377,7 @@ def _render_all_figures(forward_state: Dict, inverse_state: Dict,
     fig_10_robustness(lambda_diag, dcommon_diag, clf_ab_diag,
                          output_dir, logger)
 
-    # Appendix figures (reuse the legacy plotting routines)
+    # Appendix figures (reuse the supplementary plotting routines)
     fig_appendix_all(forward_state, inverse_state, analysis_state,
                         output_dir, logger)
 
@@ -11099,7 +10385,7 @@ def _render_all_figures(forward_state: Dict, inverse_state: Dict,
 # =============================================================================
 # Replot mode: load whatever bundles are present and re-render figures
 # =============================================================================
-def replot_v20(source_dir: str, output_dir: str, logger: logging.Logger) -> None:
+def replot_from_bundles(source_dir: str, output_dir: str, logger: logging.Logger) -> None:
     """Reload bundle(s) from ``source_dir`` and regenerate every figure +
     table whose inputs are available.  Missing bundles are silently skipped.
 
@@ -11133,7 +10419,7 @@ def main() -> None:
     )
     parser.add_argument("--data_dir",   type=str, default=".",
                         help="Directory containing data files (LC1.xlsx, LC2.xlsx).")
-    parser.add_argument("--output_dir", type=str, default="./results_v20",
+    parser.add_argument("--output_dir", type=str, default="./results",
                         help="Output directory for figures, tables, and bundles.")
     parser.add_argument("--n_ensemble", type=int, default=20,
                         help="Forward ensemble size (default: 20).")
@@ -11197,7 +10483,7 @@ def main() -> None:
     log_tag = args.mode if args.mode in {"forward", "inverse"} else ""
     logger = setup_logging(args.output_dir, tag=log_tag)
     logger.info("=" * 80)
-    logger.info(f"IPINN — V_20 (mode={args.mode!r})")
+    logger.info(f"IPINN (mode={args.mode!r})")
     logger.info(f"Output: {args.output_dir}")
     logger.info("=" * 80)
 
@@ -11212,7 +10498,7 @@ def main() -> None:
     if args.mode == "replot":
         src = args.replot_from or args.output_dir
         logger.info(f"Replot source: {src}")
-        replot_v20(src, args.output_dir, logger)
+        replot_from_bundles(src, args.output_dir, logger)
         return
 
     if args.mode == "forward":
