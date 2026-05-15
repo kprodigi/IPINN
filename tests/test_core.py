@@ -30,10 +30,16 @@ class TestConfig:
 class TestBOConfigDefaults:
     def test_bo_defaults(self, m):
         bo = m.BOConfig()
-        assert bo.n_calls_total == 30
-        assert bo.n_init == 6
+        # Tightened budget: empirical convergence happens within ~7
+        # evaluations, so B=20 (5 init + 15 EI) with stagnation early
+        # stopping covers the same ground at ~50% of the prior cost.
+        assert bo.n_calls_total == 20
+        assert bo.n_init == 5
         assert bo.xi == 0.01
         assert bo.n_bo_restarts == 5
+        # Early-stop safety net
+        assert bo.stagnation_patience == 6
+        assert bo.stagnation_min_delta == 1e-5
 
 
 class TestDispEndMM:
