@@ -10257,8 +10257,30 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
         inv_so = pretrained_inverse["scaler_out"]
         inv_en = pretrained_inverse["enc"]
         inv_p  = pretrained_inverse["params"]
+        # Validate the bundle contains at least one member state_dict before
+        # iterating.  An empty ``inv_models_state`` would silently produce
+        # an empty ``inv_models`` list and downstream calls to
+        # ``compute_ea_ipf_ensemble`` / ``evaluate_ensemble`` would fail
+        # obliquely (e.g. ``np.mean`` over an empty list).
+        states = pretrained_inverse.get("inv_models_state") or []
+        if len(states) == 0:
+            raise RuntimeError(
+                "Pretrained inverse bundle contains zero member "
+                "state_dicts (inv_models_state is empty).  This usually "
+                "means every per-member SLURM task failed or no members "
+                "passed the convergence filter.  Inspect the inverse-"
+                "merge log and rerun the failed members before invoking "
+                "--use_pretrained_inverse.",
+            )
+        if len(states) < 3:
+            logger.warning(
+                f"  Pretrained inverse bundle has only {len(states)} "
+                f"surviving member(s); GP-BO posterior widths will be "
+                f"noisy.  Consider rerunning failed members or relaxing "
+                f"the convergence filter.",
+            )
         inv_models = []
-        for m_state in pretrained_inverse["inv_models_state"]:
+        for m_state in states:
             model = HardEnergyNet(in_d, cfg_pre["hidden_layers"],
                                   cfg_pre["dropout"], cfg_pre["softplus_beta"]).to(DEVICE)
             model.configure_zero_bc(inv_p)

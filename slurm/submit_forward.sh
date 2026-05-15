@@ -33,7 +33,10 @@
 # CUDNN_MODULE=cudnn/9.0.0-cuda12
 # SEED=2026
 # MEMBER_WALL=24:00:00 per-array-task wall time
-# MERGE_WALL=01:00:00 merge job wall time (CPU-only, fast)
+# MERGE_WALL=01:00:00 merge job wall time (allocates 1 GPU — the
+#                    merge runs evaluate_ensemble for Hard, which does
+#                    autograd through M=20 models on the val set; GPU
+#                    keeps it <15 min instead of ~2 h on CPU)
 # MEM=32G
 #
 # Example: 10 GPUs in flight, the rest queued, finishing in ~2 waves

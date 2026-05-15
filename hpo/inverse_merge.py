@@ -204,9 +204,18 @@ def main():
                     )
         else:
             logger.info(f"    All {M_total} members above fence")
-    if sum(keep_mask) < 3:
-        logger.warning(
-            f"  WARNING: Only {sum(keep_mask)} members survived filtering."
+    # Hard abort when fewer than MIN_SURVIVORS members survived (mirrors
+    # the forward-merge floor).  Writing a 1- or 2-member pretrained
+    # inverse surrogate would silently produce misleading GP-BO posterior
+    # widths downstream.
+    MIN_SURVIVORS = 3
+    if sum(keep_mask) < MIN_SURVIVORS:
+        raise RuntimeError(
+            f"Only {sum(keep_mask)} members survived the Tukey-fence "
+            f"convergence filter (minimum required: {MIN_SURVIVORS}).  "
+            f"M_total={M_total}, failed={len(failed)}, missing={len(missing)}.  "
+            f"Rerun the failed/missing members or relax the filter via "
+            f"composite_design.CFG.convergence_filter_iqr before merging.",
         )
 
     surviving = [p for p, k in zip(parts, keep_mask) if k]
@@ -243,7 +252,10 @@ def main():
         "member_train_r2":  train_r2_scores,
         "M_total":          int(M_total),
         "M_eff":            int(sum(keep_mask)),
-        "convergence_fence": float(fence),
+        # ``fence`` stays at -inf when no fence was applied (M < 5 or
+        # IQR ≤ 0.01).  Emit None → JSON null so downstream loaders do
+        # not have to special-case non-standard ``-Infinity`` literals.
+        "convergence_fence": (float(fence) if np.isfinite(fence) else None),
         "failed_members":   failed,
         "missing_member_idx": missing,
         "seed_base":        int(args.seed),
@@ -261,7 +273,7 @@ def main():
         "mean_train_r2":      float(np.mean(train_r2_scores)),
         "min_train_r2":       float(np.min(train_r2_scores)),
         "max_train_r2":       float(np.max(train_r2_scores)),
-        "convergence_fence":  float(fence),
+        "convergence_fence":  (float(fence) if np.isfinite(fence) else None),
         "failed_members":     failed,
         "missing_member_idx": missing,
         "bundle_path":        os.path.abspath(out_path),

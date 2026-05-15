@@ -263,10 +263,19 @@ def main():
             logger.info(f"    All {M_total} members above fence (no outliers)")
     else:
         M_eff = M_total
-    if len(models) < 3:
-        logger.warning(
-            f"  WARNING: Only {len(models)} members survived filtering; "
-            f"consider rerunning failed members or decreasing k_iqr."
+    # Abort hard when fewer than MIN_SURVIVORS members survived.  A
+    # 1- or 2-member "ensemble" would still write a bundle but is not a
+    # meaningful representation of the search and will produce
+    # misleading R^2 confidence intervals downstream.  3 is the
+    # conventional minimum for any std/IQR-based reporting.
+    MIN_SURVIVORS = 3
+    if len(models) < MIN_SURVIVORS:
+        raise RuntimeError(
+            f"Only {len(models)} members survived the Tukey-fence convergence "
+            f"filter (minimum required: {MIN_SURVIVORS}).  M_total={M_total}, "
+            f"failed={len(failed)}, missing={len(missing)}.  Rerun the failed/"
+            f"missing members or relax the filter via "
+            f"composite_design.CFG.convergence_filter_iqr before merging.",
         )
 
     # Ensemble metrics (predictions averaged across surviving members).
@@ -314,7 +323,11 @@ def main():
         "n_ensemble_requested": int(args.n_ensemble),
         "M_total":              int(M_total),
         "M_eff":                int(len(models)),
-        "convergence_fence":    float(fence),
+        # When no fence was applied (M_total < 5 OR IQR ≤ 0.01) ``fence``
+        # stays at ``-inf``, which json.dump serializes as the
+        # non-standard literal ``-Infinity``.  Emit ``null`` instead so
+        # the JSON parses everywhere.
+        "convergence_fence":    (float(fence) if np.isfinite(fence) else None),
         "member_indices":       [int(p["member_idx"]) for p in parts],
         "per_member_load_r2":   member_load_r2,
         "per_member_energy_r2": member_energy_r2,
