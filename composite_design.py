@@ -218,10 +218,10 @@ ONE_AND_HALF_COL_IN = 5.51
 # and inserting at 100% scale into a Composite Structures full-page figure means
 # these point sizes are exactly the on-page sizes the reader sees.
 _BASE_FONT_AT_FULL_WIDTH = {
-    "label":     16.0,  # x/y axis labels (v_17 axes.labelsize)
-    "title":     16.0,  # subplot titles (v_17 axes.titlesize, bold)
-    "tick":      14.0,  # tick labels (v_17 xtick/ytick.labelsize)
-    "legend":    12.0,  # legend entries (v_17 legend.fontsize)
+    "label":     16.0,  # x/y axis labels (axes.labelsize)
+    "title":     16.0,  # subplot titles (axes.titlesize, bold)
+    "tick":      14.0,  # tick labels (xtick/ytick.labelsize)
+    "legend":    12.0,  # legend entries (legend.fontsize)
     "panel":     14.0,  # panel labels (a)/(b)/(c), bold
     "annot":     12.0,  # in-axes annotations
     "suptitle":  16.0,  # figure-level suptitle, bold
@@ -234,9 +234,9 @@ FIG_FONT_WEIGHT = "bold"
 
 
 def scaled_fonts(fig_width: float) -> dict:
-    """Font sizes (pt) for figures (v_17 style — fixed sizes, no width scaling).
+    """Font sizes (pt) for figures (fixed sizes, no width scaling).
 
-    Returns the v_17 baseline sizes regardless of ``fig_width`` so every figure
+    Returns the baseline sizes regardless of ``fig_width`` so every figure
     uses the same Arial sizing (label=16, title=16, tick=14, legend=12).  The
     ``fig_width`` argument is preserved for call-site compatibility but unused.
 
@@ -251,7 +251,7 @@ def scaled_fonts(fig_width: float) -> dict:
         "panel":      _BASE_FONT_AT_FULL_WIDTH["panel"],
         "annot":      _BASE_FONT_AT_FULL_WIDTH["annot"],
         "suptitle":   _BASE_FONT_AT_FULL_WIDTH["suptitle"],
-        # Geometry — v_17 line/tick widths.
+        # Geometry — line/tick widths.
         "linewidth":  1.8,
         "markersize": 7.0,
         "axes_lw":    1.2,
@@ -261,14 +261,14 @@ def scaled_fonts(fig_width: float) -> dict:
 
 
 def apply_fig_style(fig, axes=None, fig_width: float = None, logger: Optional[logging.Logger] = None):
-    """Enforce v_17-style Arial figure look on every text element.
+    """Enforce the Arial figure style on every text element.
 
     Call AFTER creating subplots and setting labels/titles, BEFORE savefig.
     Sets x/y labels, titles, tick labels, legend entries, suptitle, figure-level
     legends, and any colorbar text to Arial at the size returned by
     :func:`scaled_fonts`.  Subplot titles, suptitle, and panel labels are bold;
-    body text (axis labels, ticks, legend entries) is regular weight, matching
-    the v_17 figure style.
+    body text (axis labels, ticks, legend entries) is regular weight by
+    default, with uniform bold applied per user request.
 
     Free-floating Text annotations preserve any explicit ``fontweight`` the
     caller set (so e.g. an annotation passed with ``fontweight='bold'`` keeps
@@ -304,11 +304,11 @@ def apply_fig_style(fig, axes=None, fig_width: float = None, logger: Optional[lo
             for spine in ax.spines.values():
                 spine.set_linewidth(sf["axes_lw"])
 
-            # Axis labels — regular weight (v_17 default).
+            # Axis labels.
             for tobj in (ax.xaxis.label, ax.yaxis.label):
                 if tobj.get_text():
                     _set(tobj, sf["label"], weight="bold")
-            # Subplot title — bold (v_17 axes.titleweight='bold').
+            # Subplot title — bold (axes.titleweight='bold').
             if ax.title.get_text():
                 _set(ax.title, sf["title"], weight="bold")
 
@@ -337,7 +337,7 @@ def apply_fig_style(fig, axes=None, fig_width: float = None, logger: Optional[lo
         except Exception as ex:
             _log.debug("apply_fig_style: fig legend styling skipped: %s", ex)
 
-    # Suptitle — bold (matches v_17).
+    # Suptitle — bold.
     if fig._suptitle is not None and fig._suptitle.get_text():
         _set(fig._suptitle, sf["suptitle"], weight="bold")
 
@@ -358,17 +358,16 @@ def apply_fig_style(fig, axes=None, fig_width: float = None, logger: Optional[lo
 
 
 def set_publication_style():
-    """Set matplotlib defaults to v_17 figure style with Arial (sans-serif).
+    """Set matplotlib defaults to the publication figure style with Arial.
 
-    Mirrors v_17's rcParams (figure 8x6 in, font.size 14, axes.labelsize 16,
+    Configures rcParams for an 8x6 in figure, font.size 14, axes.labelsize 16,
     axes.titlesize 16 bold, tick labels 14, legend 12, lines 1.8 pt, markers
-    7 pt) but switches the family from serif (Times New Roman) to sans-serif
-    (Arial).  Individual figure routines should still call
-    :func:`apply_fig_style` before savefig to enforce per-element Arial sizing
-    on tick labels, suptitle, etc.
+    7 pt, using a sans-serif Arial family.  Individual figure routines should
+    still call :func:`apply_fig_style` before savefig to enforce per-element
+    Arial sizing on tick labels, suptitle, etc.
     """
     plt.rcParams.update({
-        # Output geometry — v_17 defaults.
+        # Output geometry.
         "figure.figsize": (8, 6),
         "figure.dpi":     150,
         "figure.facecolor": "white",
@@ -378,14 +377,14 @@ def set_publication_style():
         "savefig.facecolor": "white",
         "pdf.fonttype":   42,   # embed TrueType (editable in Illustrator/Acrobat)
         "ps.fonttype":    42,
-        # Fonts — Arial (sans-serif), **bold** weight at v_17 sizes.
+        # Fonts — Arial (sans-serif), **bold** weight at publication sizes.
         "font.family":    "sans-serif",
         "font.sans-serif": FIG_FONT_FAMILY,
         "font.weight":    "bold",
         "font.size":      14,
         "mathtext.default": "regular",
         "mathtext.fontset": "dejavusans",
-        # Axes — v_17 sizes; every text element is bold.
+        # Axes — every text element is bold.
         "axes.labelsize":   16,
         "axes.labelweight": "bold",
         "axes.titlesize":   16,
@@ -393,7 +392,7 @@ def set_publication_style():
         "axes.linewidth":   1.2,
         "axes.grid":        True,
         "axes.axisbelow":   True,
-        # Ticks — v_17 sizes, in-pointing.
+        # Ticks — in-pointing.
         "xtick.labelsize": 14,
         "ytick.labelsize": 14,
         "xtick.direction": "in",
@@ -406,20 +405,19 @@ def set_publication_style():
         "ytick.major.width": 1.0,
         "xtick.minor.visible": True,
         "ytick.minor.visible": True,
-        # Legend — v_17 sizes.
+        # Legend.
         "legend.fontsize":   12,
         "legend.frameon":    True,
         "legend.framealpha": 0.95,
-        # Lines — v_17 thickness.
+        # Lines.
         "lines.linewidth":  1.8,
         "lines.markersize": 7,
-        # Grid — v_17 styling (subtle, dashed).
+        # Grid — subtle, dashed.
         "grid.alpha":     0.25,
         "grid.linewidth": 0.5,
         "grid.linestyle": "--",
         "errorbar.capsize": 3,
-        # Colour cycle and image.cmap left at matplotlib defaults (v_17 didn't
-        # set these explicitly).
+        # Colour cycle and image.cmap left at matplotlib defaults.
     })
 
 
@@ -715,14 +713,14 @@ def _dry_run_shrink_training_cfg(cfg: Dict) -> None:
 def get_model_config(approach: str, protocol: str = "random", w_phys_override: float = None) -> Dict:
     """Get model configuration with protocol-specific hyperparameters.
 
-    Unseen-θ=60° configs are v_16's hardcoded HPO-best (composite_design_v16.py
-    lines 272-329).  These are the configurations whose production retrain
-    (M=20 ensemble × 600-800 epochs) produced the documented results:
+    Unseen-θ=60° configs are hardcoded HPO-best.  These are the configurations
+    whose production retrain (M=20 ensemble × 600-800 epochs) produced the
+    documented results:
         DDNS:  best val load R² = 0.7835  (arch [128, 64, 32])
         Soft:  best val load R² = 0.8012  (arch [256, 128, 64])
         Hard:  best val load R² = 0.8499  (arch [32, 32])
-    The Soft and Hard cfgs run in v_20's pipeline with the architectural
-    E(0)=0 BC active (replacing v_19's soft `w_bc` penalty); DDNS runs with
+    The Soft and Hard cfgs run with the architectural E(0)=0 BC active (the
+    slope-subtraction construction described in Section 3.2.3); DDNS runs with
     BC disabled inside train_ddns since it has no physics losses.
 
     To reproduce the documented R² numbers, run:
@@ -731,7 +729,7 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
     """
 
     if protocol == "unseen":
-        # ---- v_16 cfg_ddns (Best val load R² = 0.7835, arch [128, 64, 32]) ----
+        # ---- cfg_ddns (Best val load R² = 0.7835, arch [128, 64, 32]) ----
         cfg_ddns = {
             "optimizer": "adam", "lr": 4.2123162503e-05,
             "weight_decay": 3.1582563297e-05, "batch_size": 64,
@@ -1502,11 +1500,11 @@ class HardEnergyNet(nn.Module):
     ``c_{0,E}`` (raw E = 0) and ``∂E_corrected/∂d_s|_{x=x|d=0} = 0`` (raw F =
     0).  Both BCs are enforced for every (θ, LC).
 
-    Cost vs the v_16 value-only correction (subtract ``E_net(x|d=0)`` only):
+    Cost vs a value-only correction (subtract ``E_net(x|d=0)`` only):
     one additional inner ``autograd.grad`` call per forward pass to obtain
     ``∂E_net/∂d_s|_{x|d=0}``, plus a second-order graph during training (so
     the outer physics-loss backward can flow back to the net's weights).
-    Roughly 2–3× the v_16 forward/backward cost.
+    Roughly 2–3× the value-only forward/backward cost.
     """
 
     def __init__(self, in_d: int, hidden_layers: List[int], dropout: float,
@@ -1787,7 +1785,7 @@ def curvature_regularization_hard(Xin: torch.Tensor, model: nn.Module,
 def _val_checkpoint_score(r2_load: float, r2_energy: float, approach: str = "soft") -> float:
     """Validation score for checkpointing, LR schedule, and early stopping.
 
-    Matches v_17 semantics: **load R² is the sole checkpointing metric** for
+    By convention, **load R² is the sole checkpointing metric** for
     all three approaches (DDNS, Soft-PINN, Hard-PINN).  ``r2_energy`` and
     ``approach`` are kept in the signature for call-site compatibility but
     are unused.  NaN-safe: returns -inf if ``r2_load`` is NaN so the
@@ -1975,7 +1973,7 @@ def train_soft(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     # Soft-PINN by name should use SOFT (penalty) constraints throughout.
     # The architectural F(0)=E(0)=0 correction is reserved for Hard-PINN; for
     # Soft-PINN the BC is enforced via the ``w_bc * (E(d=0))²`` penalty term
-    # below (identical to v_16's train_soft loss formulation).  This keeps
+    # below (the standard Soft-PINN loss formulation).  This keeps
     # the methodological ladder clean:
     #   DDNS       — no physics
     #   Soft-PINN  — soft physics + soft BC (penalties in loss)
@@ -9515,9 +9513,9 @@ def main():
 # =============================================================================
 # V_20 — FINAL PIPELINE: MULTI-PANEL FIGURES + THREE-BUNDLE STATE
 # =============================================================================
-# Everything below this divider is new for v_20.  The training, physics-loss,
+# Everything below this divider is the publication entry point.  Training, physics-loss,
 # classifier, GP-BO, and Pareto-sweep machinery above is reused verbatim from
-# v_19 — that code is regression-sensitive and well-validated.  v_20 changes:
+# and architecture code above are kept stable for regression safety.  Below:
 #   * Figure layer: 10 multi-panel manuscript figures (Fig01–Fig10) and 7
 #     single-panel appendix figures (FigA1–FigA7), each with no overlapping
 #     labels/legends/titles.
@@ -9527,17 +9525,17 @@ def main():
 #   * CLI: a smaller flag set with ``--replot_from <dir>`` that reads any
 #     subset of bundles that happen to be present.
 #
-# v_19's ``main()`` and ``run_pipeline()`` are preserved above but no longer
-# reachable via ``__main__``.  v_20's entry point is ``main_v20()``.
+# Legacy ``main()`` and ``run_pipeline()`` entry points are preserved above but no longer
+# reachable via ``__main__``.  The active entry point is ``main()`` below.
 # =============================================================================
 
 # Bundle filenames
-_V20_FORWARD_BUNDLE  = "forward_models.pt"
-_V20_INVERSE_BUNDLE  = "inverse_models.pt"
-_V20_ANALYSIS_BUNDLE = "analysis_results.pt"
+_FORWARD_BUNDLE  = "forward_models.pt"
+_INVERSE_BUNDLE  = "inverse_models.pt"
+_ANALYSIS_BUNDLE = "analysis_results.pt"
 
 
-def _v20_save_bundle(state: Dict, output_dir: str, filename: str, logger: logging.Logger) -> str:
+def _save_bundle(state: Dict, output_dir: str, filename: str, logger: logging.Logger) -> str:
     """Atomic ``torch.save`` (tmp + os.replace) — SLURM-preempt safe."""
     path = os.path.join(output_dir, filename)
     tmp = path + ".tmp"
@@ -9550,20 +9548,20 @@ def _v20_save_bundle(state: Dict, output_dir: str, filename: str, logger: loggin
 
 def save_forward_bundle(state: Dict, output_dir: str, logger: logging.Logger) -> str:
     """Trained forward ensembles + scalers + calibration."""
-    return _v20_save_bundle(state, output_dir, _V20_FORWARD_BUNDLE, logger)
+    return _save_bundle(state, output_dir, _FORWARD_BUNDLE, logger)
 
 
 def save_inverse_bundle(state: Dict, output_dir: str, logger: logging.Logger) -> str:
     """Full-data Hard-PINN + classifier ensemble + diagnostics."""
-    return _v20_save_bundle(state, output_dir, _V20_INVERSE_BUNDLE, logger)
+    return _save_bundle(state, output_dir, _INVERSE_BUNDLE, logger)
 
 
 def save_analysis_bundle(state: Dict, output_dir: str, logger: logging.Logger) -> str:
     """All non-NN analysis outputs (BO, Pareto, robustness, sensitivity)."""
-    return _v20_save_bundle(state, output_dir, _V20_ANALYSIS_BUNDLE, logger)
+    return _save_bundle(state, output_dir, _ANALYSIS_BUNDLE, logger)
 
 
-def _v20_load_bundle(path: str, logger: Optional[logging.Logger] = None) -> Optional[Dict]:
+def _load_bundle(path: str, logger: Optional[logging.Logger] = None) -> Optional[Dict]:
     """``torch.load`` with ``map_location='cpu'`` so CUDA-trained pickles
     reload on CPU-only machines for figure regeneration.
 
@@ -9588,21 +9586,21 @@ def _v20_load_bundle(path: str, logger: Optional[logging.Logger] = None) -> Opti
 
 
 def load_forward_bundle(output_dir: str, logger: Optional[logging.Logger] = None) -> Optional[Dict]:
-    return _v20_load_bundle(os.path.join(output_dir, _V20_FORWARD_BUNDLE), logger)
+    return _load_bundle(os.path.join(output_dir, _FORWARD_BUNDLE), logger)
 
 
 def load_inverse_bundle(output_dir: str, logger: Optional[logging.Logger] = None) -> Optional[Dict]:
-    return _v20_load_bundle(os.path.join(output_dir, _V20_INVERSE_BUNDLE), logger)
+    return _load_bundle(os.path.join(output_dir, _INVERSE_BUNDLE), logger)
 
 
 def load_analysis_bundle(output_dir: str, logger: Optional[logging.Logger] = None) -> Optional[Dict]:
-    return _v20_load_bundle(os.path.join(output_dir, _V20_ANALYSIS_BUNDLE), logger)
+    return _load_bundle(os.path.join(output_dir, _ANALYSIS_BUNDLE), logger)
 
 
 # -----------------------------------------------------------------------------
 # Figure helpers
 # -----------------------------------------------------------------------------
-def _v20_savefig(fig, output_dir: str, name: str, logger: logging.Logger, *, dpi: int = 600) -> str:
+def _savefig(fig, output_dir: str, name: str, logger: logging.Logger, *, dpi: int = 600) -> str:
     """Save and close ``fig``; log and return the absolute path."""
     path = os.path.join(output_dir, name)
     fig.savefig(path, dpi=dpi, bbox_inches='tight', facecolor='white')
@@ -9611,7 +9609,7 @@ def _v20_savefig(fig, output_dir: str, name: str, logger: logging.Logger, *, dpi
     return path
 
 
-def _v20_panel_label(ax, label: str, *, x: float = -0.16, y: float = 1.06,
+def _panel_label(ax, label: str, *, x: float = -0.16, y: float = 1.06,
                      fontsize: float = 16.0) -> None:
     """Place a bold panel label '(a)' at axes-fraction coordinates.
 
@@ -9626,7 +9624,7 @@ def _v20_panel_label(ax, label: str, *, x: float = -0.16, y: float = 1.06,
 # =============================================================================
 # FIGURE 1 — Dataset overview (3 panels)
 # =============================================================================
-def figv20_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
+def fig_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
                                logger: logging.Logger) -> str:
     """Fig. 1: representative experimental curves and target distributions."""
     set_publication_style()
@@ -9661,7 +9659,7 @@ def figv20_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
     ax_a.set_title("Experimental curves")
     ax_a.grid(True, alpha=0.3)
     ax_a.legend(loc="upper right", title="LC")
-    _v20_panel_label(ax_a, "a")
+    _panel_label(ax_a, "a")
 
     # (b, c) EA / IPF per (angle, LC)
     df_metrics = compute_design_space_metrics(df_all, logger)
@@ -9713,18 +9711,18 @@ def figv20_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
 
     _grouped_box(ax_b, "EA",  "Energy absorbed EA (J)",     "EA distribution")
     _grouped_box(ax_c, "IPF", "Initial peak force IPF (kN)", "IPF distribution")
-    _v20_panel_label(ax_b, "b")
-    _v20_panel_label(ax_c, "c")
+    _panel_label(ax_b, "b")
+    _panel_label(ax_c, "c")
 
     fig.suptitle("Dataset overview", fontweight="bold", y=0.99)
     apply_fig_style(fig)
-    return _v20_savefig(fig, output_dir, "Fig01_dataset_overview.png", logger)
+    return _savefig(fig, output_dir, "Fig01_dataset_overview.png", logger)
 
 
 # =============================================================================
 # FIGURE 2 — Forward parity across protocols (4 panels)
 # =============================================================================
-def figv20_02_forward_parity(dual_results: Dict, output_dir: str,
+def fig_02_forward_parity(dual_results: Dict, output_dir: str,
                              logger: logging.Logger) -> str:
     """Fig. 2: predicted vs ground-truth scatter for load and energy under
     both evaluation protocols (random 80/20 and unseen θ=60°)."""
@@ -9772,18 +9770,18 @@ def figv20_02_forward_parity(dual_results: Dict, output_dir: str,
             ax.set_title(f"{plabel} — {ch_label.split(' ')[0]}")
             ax.grid(True, alpha=0.3)
             ax.legend(loc="upper left", framealpha=0.95)
-            _v20_panel_label(ax, "abcd"[2 * r + c])
+            _panel_label(ax, "abcd"[2 * r + c])
 
     fig.suptitle("Forward-model accuracy across evaluation protocols",
                  fontweight="bold", y=0.97)
     apply_fig_style(fig)
-    return _v20_savefig(fig, output_dir, "Fig02_forward_parity.png", logger)
+    return _savefig(fig, output_dir, "Fig02_forward_parity.png", logger)
 
 
 # =============================================================================
 # FIGURE 3 — Unseen-angle generalization with conformal bands (4 panels)
 # =============================================================================
-def figv20_03_unseen_generalization(dual_results: Dict, df_all: pd.DataFrame,
+def fig_03_unseen_generalization(dual_results: Dict, df_all: pd.DataFrame,
                                     output_dir: str, logger: logging.Logger,
                                     calibration: Optional[Dict] = None) -> str:
     """Fig. 3: predicted load and energy curves at unseen θ=60° for both LCs,
@@ -9846,7 +9844,7 @@ def figv20_03_unseen_generalization(dual_results: Dict, df_all: pd.DataFrame,
             ax.set_ylabel(ylab)
             ax.set_title(f"{lc} — {ylab.split(' ')[0]} (θ=60°)")
             ax.grid(True, alpha=0.3)
-            _v20_panel_label(ax, "abcd"[2 * r + c])
+            _panel_label(ax, "abcd"[2 * r + c])
 
     # shared figure-level legend (avoids per-axes legend overlap)
     fig.legend(legend_handles, legend_labels, loc="lower center", ncol=4,
@@ -9854,13 +9852,13 @@ def figv20_03_unseen_generalization(dual_results: Dict, df_all: pd.DataFrame,
     fig.suptitle(r"Generalization to unseen angle $\theta=60°$  (ensemble mean ± conformal 2σ)",
                  fontweight="bold", y=0.97)
     apply_fig_style(fig)
-    return _v20_savefig(fig, output_dir, "Fig03_unseen_generalization.png", logger)
+    return _savefig(fig, output_dir, "Fig03_unseen_generalization.png", logger)
 
 
 # =============================================================================
 # FIGURE 4 — Physics consistency + uncertainty calibration (3 panels)
 # =============================================================================
-def figv20_04_physics_calibration(dual_results: Dict, calibration: Dict,
+def fig_04_physics_calibration(dual_results: Dict, calibration: Dict,
                                   val_df_u: pd.DataFrame, scaler_disp_u,
                                   enc_u, params_u: ScalingParams,
                                   output_dir: str,
@@ -9912,7 +9910,7 @@ def figv20_04_physics_calibration(dual_results: Dict, calibration: Dict,
     ax_a.set_title("Physics residual")
     ax_a.legend(loc="upper right")
     ax_a.grid(True, alpha=0.3)
-    _v20_panel_label(ax_a, "a")
+    _panel_label(ax_a, "a")
 
     # (b) reliability diagram: raw vs conformal-corrected coverage at fixed
     # sigma levels (compute_uncertainty_calibration stores arrays for
@@ -9966,7 +9964,7 @@ def figv20_04_physics_calibration(dual_results: Dict, calibration: Dict,
                     ncol=1, framealpha=0.92, borderpad=0.5,
                     handlelength=1.6, labelspacing=0.35)
     ax_b.grid(True, alpha=0.3)
-    _v20_panel_label(ax_b, "b")
+    _panel_label(ax_b, "b")
 
     # (c) Q–Q plot of standardized load residuals (Hard-PINN, unseen)
     if "hard" in res:
@@ -9997,18 +9995,18 @@ def figv20_04_physics_calibration(dual_results: Dict, calibration: Dict,
     ax_c.set_title("Q–Q load residuals (unseen)")
     ax_c.legend(loc="upper left")
     ax_c.grid(True, alpha=0.3)
-    _v20_panel_label(ax_c, "c")
+    _panel_label(ax_c, "c")
 
     fig.suptitle("Physics consistency and uncertainty calibration",
                  fontweight="bold", y=0.99)
     apply_fig_style(fig)
-    return _v20_savefig(fig, output_dir, "Fig04_physics_calibration.png", logger)
+    return _savefig(fig, output_dir, "Fig04_physics_calibration.png", logger)
 
 
 # =============================================================================
 # FIGURE 5 — Inverse-problem ill-posedness (3 panels)
 # =============================================================================
-def figv20_05_ill_posedness(jacobian_results: Optional[Dict],
+def fig_05_ill_posedness(jacobian_results: Optional[Dict],
                             all_inverse_results: Optional[List[Dict]],
                             landscape_df: Optional[pd.DataFrame],
                             output_dir: str, logger: logging.Logger) -> str:
@@ -10040,7 +10038,7 @@ def figv20_05_ill_posedness(jacobian_results: Optional[Dict],
     ax_a.set_title("Forward Jacobian sensitivity")
     ax_a.legend(loc="best")
     ax_a.grid(True, alpha=0.3)
-    _v20_panel_label(ax_a, "a")
+    _panel_label(ax_a, "a")
 
     # (b) GP-BO objective landscape for one target — pick first with landscape
     drew_b = False
@@ -10081,7 +10079,7 @@ def figv20_05_ill_posedness(jacobian_results: Optional[Dict],
     if ax_b.get_legend_handles_labels()[0]:
         ax_b.legend(loc="best", fontsize=10)
     ax_b.grid(True, alpha=0.3)
-    _v20_panel_label(ax_b, "b")
+    _panel_label(ax_b, "b")
 
     # (c) Ensemble disagreement σ(θ, LC) — std across members from landscape_df
     if landscape_df is not None and not landscape_df.empty:
@@ -10098,18 +10096,18 @@ def figv20_05_ill_posedness(jacobian_results: Optional[Dict],
     ax_c.set_title("Forward ensemble σ across (θ, LC)")
     ax_c.legend(loc="best", fontsize=10)
     ax_c.grid(True, alpha=0.3)
-    _v20_panel_label(ax_c, "c")
+    _panel_label(ax_c, "c")
 
     fig.suptitle("Inverse problem is ill-posed — forward sensitivity, multimodal landscape, ensemble disagreement",
                  fontweight="bold", y=0.99)
     apply_fig_style(fig)
-    return _v20_savefig(fig, output_dir, "Fig05_ill_posedness.png", logger)
+    return _savefig(fig, output_dir, "Fig05_ill_posedness.png", logger)
 
 
 # =============================================================================
 # FIGURE 6 — LC plausibility classifier diagnostics (4 panels)
 # =============================================================================
-def figv20_06_classifier(clf_diag: Dict, output_dir: str,
+def fig_06_classifier(clf_diag: Dict, output_dir: str,
                          logger: logging.Logger) -> str:
     """Fig. 6: confusion matrix, ROC, PR, and reliability for the calibrated
     soft-voting LC classifier (LOO cross-validation)."""
@@ -10143,7 +10141,7 @@ def figv20_06_classifier(clf_diag: Dict, output_dir: str,
                   fontsize=14)
     plt.colorbar(im, ax=ax_a, fraction=0.046)
     ax_a.set_title("Confusion matrix (LOO)")
-    _v20_panel_label(ax_a, "a")
+    _panel_label(ax_a, "a")
 
     # (b) ROC
     fpr, tpr, _ = roc_curve(y, pr)
@@ -10156,7 +10154,7 @@ def figv20_06_classifier(clf_diag: Dict, output_dir: str,
     ax_b.set_title("ROC")
     ax_b.legend(loc="lower right")
     ax_b.grid(True, alpha=0.3)
-    _v20_panel_label(ax_b, "b")
+    _panel_label(ax_b, "b")
 
     # (c) PR
     prec, rec, _ = precision_recall_curve(y, pr)
@@ -10169,7 +10167,7 @@ def figv20_06_classifier(clf_diag: Dict, output_dir: str,
     ax_c.set_title("Precision–recall")
     ax_c.legend(loc="lower left")
     ax_c.grid(True, alpha=0.3)
-    _v20_panel_label(ax_c, "c")
+    _panel_label(ax_c, "c")
 
     # (d) calibration / reliability
     n_bins = max(3, min(8, len(y) // 3))
@@ -10183,18 +10181,18 @@ def figv20_06_classifier(clf_diag: Dict, output_dir: str,
     ax_d.set_title("Calibration")
     ax_d.legend(loc="upper left")
     ax_d.grid(True, alpha=0.3)
-    _v20_panel_label(ax_d, "d")
+    _panel_label(ax_d, "d")
 
     fig.suptitle("Loading-condition plausibility classifier (LOO diagnostics)",
                  fontweight="bold", y=0.97)
     apply_fig_style(fig)
-    return _v20_savefig(fig, output_dir, "Fig06_classifier_diagnostics.png", logger)
+    return _savefig(fig, output_dir, "Fig06_classifier_diagnostics.png", logger)
 
 
 # =============================================================================
 # FIGURE 7 — GP-BO inverse design (4 panels)
 # =============================================================================
-def figv20_07_inverse_design(all_inverse_results: List[Dict],
+def fig_07_inverse_design(all_inverse_results: List[Dict],
                              df_all: pd.DataFrame,
                              inv_models: List[nn.Module],
                              inv_scaler_disp, inv_enc, inv_params,
@@ -10248,7 +10246,7 @@ def figv20_07_inverse_design(all_inverse_results: List[Dict],
     ax_a.set_yscale("log")
     ax_a.legend(loc="upper right", fontsize=10, ncol=2)
     ax_a.grid(True, which="both", alpha=0.3)
-    _v20_panel_label(ax_a, "a")
+    _panel_label(ax_a, "a")
 
     # (b) predicted vs target parity (EA, IPF)
     tgt_EA, pred_EA, std_EA = [], [], []
@@ -10285,7 +10283,7 @@ def figv20_07_inverse_design(all_inverse_results: List[Dict],
     ax_b.set_title("Inverse parity (EA, IPF)")
     ax_b.legend(loc="upper left")
     ax_b.grid(True, alpha=0.3)
-    _v20_panel_label(ax_b, "b")
+    _panel_label(ax_b, "b")
 
     # (c) recovered curve vs nearest experimental
     drew_c = False
@@ -10322,7 +10320,7 @@ def figv20_07_inverse_design(all_inverse_results: List[Dict],
     ax_c.set_title("Recovered curves vs nearest experiment")
     ax_c.legend(loc="best", fontsize=9, ncol=1)
     ax_c.grid(True, alpha=0.3)
-    _v20_panel_label(ax_c, "c")
+    _panel_label(ax_c, "c")
 
     # (d) multi-seed θ stability — ``run_inverse_design_robust`` returns
     # aggregates (``gpbo_x_mean``, ``gpbo_x_std``, plus min/max in
@@ -10362,18 +10360,18 @@ def figv20_07_inverse_design(all_inverse_results: List[Dict],
     if ax_d.get_legend_handles_labels()[0]:
         ax_d.legend(loc="best", fontsize=10)
     ax_d.grid(True, axis="y", alpha=0.3)
-    _v20_panel_label(ax_d, "d")
+    _panel_label(ax_d, "d")
 
     fig.suptitle("Inverse design via GP-Bayesian optimisation",
                  fontweight="bold", y=0.97)
     apply_fig_style(fig)
-    return _v20_savefig(fig, output_dir, "Fig07_inverse_design.png", logger)
+    return _savefig(fig, output_dir, "Fig07_inverse_design.png", logger)
 
 
 # =============================================================================
 # FIGURE 8 — Multi-objective Pareto sweep (3 panels)
 # =============================================================================
-def figv20_08_pareto(pareto_df: pd.DataFrame, landscape_df: pd.DataFrame,
+def fig_08_pareto(pareto_df: pd.DataFrame, landscape_df: pd.DataFrame,
                      output_dir: str, logger: logging.Logger) -> str:
     """Fig. 8: (a) EA vs IPF Pareto front coloured by α,
     (b) optimal θ vs α with LC transitions,
@@ -10395,7 +10393,7 @@ def figv20_08_pareto(pareto_df: pd.DataFrame, landscape_df: pd.DataFrame,
         ax_a.set_ylabel("IPF (kN)")
         ax_a.set_title("Pareto front EA–IPF")
     ax_a.grid(True, alpha=0.3)
-    _v20_panel_label(ax_a, "a")
+    _panel_label(ax_a, "a")
 
     # (b) optimal θ vs α   (pareto_df column is 'angle', not 'theta')
     if pareto_df is not None and not pareto_df.empty and {"alpha", "angle"} <= set(pareto_df.columns):
@@ -10417,7 +10415,7 @@ def figv20_08_pareto(pareto_df: pd.DataFrame, landscape_df: pd.DataFrame,
     ax_b.set_title(r"Optimal θ vs α")
     ax_b.legend(loc="best", title="LC")
     ax_b.grid(True, alpha=0.3)
-    _v20_panel_label(ax_b, "b")
+    _panel_label(ax_b, "b")
 
     # (c) J(θ, α) heat-map — combined LC1+LC2 (best per α, θ).  ``pareto_df``
     # carries one row per (α, candidate-angle, lc); pivoting by (α, angle) and
@@ -10440,18 +10438,18 @@ def figv20_08_pareto(pareto_df: pd.DataFrame, landscape_df: pd.DataFrame,
     else:
         ax_c.text(0.5, 0.5, "no landscape data", ha="center", va="center",
                   transform=ax_c.transAxes, fontsize=12)
-    _v20_panel_label(ax_c, "c")
+    _panel_label(ax_c, "c")
 
     fig.suptitle(f"Multi-objective design space — EA@{int(D_COMMON)}mm vs IPF",
                  fontweight="bold", y=0.99)
     apply_fig_style(fig)
-    return _v20_savefig(fig, output_dir, "Fig08_pareto.png", logger)
+    return _savefig(fig, output_dir, "Fig08_pareto.png", logger)
 
 
 # =============================================================================
 # FIGURE 9 — Pareto-target recovery (2 panels)
 # =============================================================================
-def figv20_09_pareto_recovery(pareto_inverse_results: Optional[List[Dict]],
+def fig_09_pareto_recovery(pareto_inverse_results: Optional[List[Dict]],
                               pareto_targets: Optional[List[Dict]],
                               output_dir: str, logger: logging.Logger) -> str:
     """Fig. 9: GP-BO recovery on Pareto-optimal targets — recovered θ vs reference
@@ -10497,7 +10495,7 @@ def figv20_09_pareto_recovery(pareto_inverse_results: Optional[List[Dict]],
                            markersize=10, label="LC mismatch")]
     ax_a.legend(handles=legend_h, loc="upper left")
     ax_a.grid(True, alpha=0.3)
-    _v20_panel_label(ax_a, "a")
+    _panel_label(ax_a, "a")
 
     # (b) per-target angle error
     err = np.abs(rec - ref)
@@ -10510,18 +10508,18 @@ def figv20_09_pareto_recovery(pareto_inverse_results: Optional[List[Dict]],
     ax_b.set_ylabel(r"$|\theta_{\mathrm{rec}} - \theta_{\mathrm{ref}}|$ (°)")
     ax_b.set_title("Recovery angle error")
     ax_b.grid(True, axis="y", alpha=0.3)
-    _v20_panel_label(ax_b, "b")
+    _panel_label(ax_b, "b")
 
     fig.suptitle("Pareto-optimal target recovery — known-feasible inverse-design test",
                  fontweight="bold", y=0.99)
     apply_fig_style(fig)
-    return _v20_savefig(fig, output_dir, "Fig09_pareto_recovery.png", logger)
+    return _savefig(fig, output_dir, "Fig09_pareto_recovery.png", logger)
 
 
 # =============================================================================
 # FIGURE 10 — Robustness & sensitivity (3 panels)
 # =============================================================================
-def figv20_10_robustness(lambda_diag: Optional[pd.DataFrame],
+def fig_10_robustness(lambda_diag: Optional[pd.DataFrame],
                          dcommon_diag: Optional[pd.DataFrame],
                          classifier_ablation_diag: Optional[pd.DataFrame],
                          output_dir: str, logger: logging.Logger) -> str:
@@ -10553,7 +10551,7 @@ def figv20_10_robustness(lambda_diag: Optional[pd.DataFrame],
         ax_a.text(0.5, 0.5, "no λ-sensitivity data", ha="center", va="center",
                   transform=ax_a.transAxes, fontsize=12)
     ax_a.grid(True, which="both", alpha=0.3)
-    _v20_panel_label(ax_a, "a")
+    _panel_label(ax_a, "a")
 
     # (b) D_COMMON sensitivity
     if dcommon_diag is not None and not dcommon_diag.empty and "d_common" in dcommon_diag.columns:
@@ -10575,7 +10573,7 @@ def figv20_10_robustness(lambda_diag: Optional[pd.DataFrame],
     ax_b.set_title(r"$D_{\mathrm{common}}$ sensitivity")
     ax_b.legend(loc="best", title="LC")
     ax_b.grid(True, alpha=0.3)
-    _v20_panel_label(ax_b, "b")
+    _panel_label(ax_b, "b")
 
     # (c) classifier ablation
     if classifier_ablation_diag is not None and not classifier_ablation_diag.empty:
@@ -10601,22 +10599,22 @@ def figv20_10_robustness(lambda_diag: Optional[pd.DataFrame],
         ax_c.text(0.5, 0.5, "no classifier-ablation data",
                   ha="center", va="center", transform=ax_c.transAxes, fontsize=12)
     ax_c.grid(True, axis="y", alpha=0.3)
-    _v20_panel_label(ax_c, "c")
+    _panel_label(ax_c, "c")
 
     fig.suptitle("Robustness and sensitivity of the inverse-design framework",
                  fontweight="bold", y=0.99)
     apply_fig_style(fig)
-    return _v20_savefig(fig, output_dir, "Fig10_robustness.png", logger)
+    return _savefig(fig, output_dir, "Fig10_robustness.png", logger)
 
 
 # =============================================================================
-# APPENDIX FIGURES — single-panel wrappers around v_19 routines (already styled)
+# APPENDIX FIGURES — single-panel wrappers around the legacy routines
 # =============================================================================
-def figv20_appendix_all(forward_state: Optional[Dict],
+def fig_appendix_all(forward_state: Optional[Dict],
                         inverse_state: Optional[Dict],
                         analysis_state: Optional[Dict],
                         output_dir: str, logger: logging.Logger) -> None:
-    """Generate the 7 appendix figures by reusing v_19's existing routines.
+    """Generate the 7 appendix figures by reusing the legacy plotting routines.
 
     These are already styled with apply_fig_style(); they go to the same
     output directory but with FigAx_*.png filenames.
@@ -10667,8 +10665,8 @@ def _train_forward_only(data_dir: str, output_dir: str,
     """Train all forward ensembles (DDNS, Soft, Hard × random + unseen) and
     save ``forward_models.pt``.  Returns the forward-state dict.
 
-    Used both by ``run_pipeline_v20`` (mode='all') and directly by
-    ``main_v20`` when invoked with ``--mode forward`` for parallel HPC
+    Used both by ``run_pipeline`` (mode='all') and directly by
+    ``main`` when invoked with ``--mode forward`` for parallel HPC
     submission.  ``df_all`` is loaded from disk if not provided.
     """
     if df_all is None:
@@ -10743,11 +10741,11 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
     ablation, D_COMMON sensitivity).  Saves ``inverse_models.pt`` and
     ``analysis_results.pt``.  Returns ``(inverse_state, analysis_state)``.
 
-    Used by ``run_pipeline_v20`` (mode='all') and directly by ``main_v20``
+    Used by ``run_pipeline`` (mode='all') and directly by ``main``
     when invoked with ``--mode inverse`` for parallel HPC submission.
 
     ``pretrained_inverse`` (optional): a bundle produced by
-    ``hpo.merge_inverse_members``.  When given, this function skips the
+    ``hpo.inverse_merge``.  When given, this function skips the
     expensive ``train_full_data_hard_pinn`` call and reconstructs the
     surrogate from the bundle's state_dicts + preprocessors.  Used by the
     SLURM array path that parallelises the M=20 member training across GPUs.
@@ -10934,10 +10932,10 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
     return inverse_state, analysis_state
 
 
-def _v20_render_all_tables(forward_state: Dict, inverse_state: Dict,
+def _render_all_tables(forward_state: Dict, inverse_state: Dict,
                            analysis_state: Dict, output_dir: str,
                            logger: logging.Logger) -> None:
-    """Render every v_20 table.  Most tables need both forward and inverse
+    """Render every paper table.  Most tables need both forward and inverse
     bundles; missing inputs produce a warning rather than crash."""
     F = forward_state or {}
     I = inverse_state or {}
@@ -10972,7 +10970,7 @@ def _v20_render_all_tables(forward_state: Dict, inverse_state: Dict,
 # =============================================================================
 # V_20 PIPELINE ORCHESTRATION
 # =============================================================================
-def run_pipeline_v20(data_dir: str, output_dir: str,
+def run_pipeline(data_dir: str, output_dir: str,
                      logger: Optional[logging.Logger] = None) -> Dict:
     """Inverse-design + multi-objective focused pipeline (mode='all').
 
@@ -10985,10 +10983,10 @@ def run_pipeline_v20(data_dir: str, output_dir: str,
     its bundles into the same ``output_dir``), then run ``--mode replot``
     to load every bundle and produce figures + tables.
 
-    If ``logger`` is provided (the typical path from ``main_v20``), the
+    If ``logger`` is provided (the typical path from ``main``), the
     function reuses it instead of calling ``setup_logging`` again — which
     would truncate the existing ``run_log.txt`` and overwrite the banner
-    lines already written by ``main_v20``.
+    lines already written by ``main``.
     """
     refresh_device()
     os.makedirs(output_dir, exist_ok=True)
@@ -11011,15 +11009,15 @@ def run_pipeline_v20(data_dir: str, output_dir: str,
         data_dir, output_dir, logger, df_all=df_all)
 
     logger.info("\n[tables]")
-    _v20_render_all_tables(forward_state, inverse_state, analysis_state,
+    _render_all_tables(forward_state, inverse_state, analysis_state,
                            output_dir, logger)
     logger.info("\n[figures]")
-    _v20_render_all_figures(forward_state, inverse_state, analysis_state,
+    _render_all_figures(forward_state, inverse_state, analysis_state,
                             output_dir, logger)
 
     # Inventory every figure/table/sidecar written above into MANIFEST_outputs.csv.
     # Must run after all writes so the listing is complete.  The legacy
-    # run_pipeline() called this; v_20's run_pipeline_v20() needs it too.
+    # The current run_pipeline() needs this initialization too.
     generate_output_manifest(output_dir, logger)
 
     logger.info("\n" + "=" * 80)
@@ -11032,9 +11030,9 @@ def run_pipeline_v20(data_dir: str, output_dir: str,
 
 
 # =============================================================================
-# Render all v_20 figures from already-prepared bundle dicts
+# Render all paper figures from already-prepared bundle dicts
 # =============================================================================
-def _v20_render_all_figures(forward_state: Dict, inverse_state: Dict,
+def _render_all_figures(forward_state: Dict, inverse_state: Dict,
                             analysis_state: Dict, output_dir: str,
                             logger: logging.Logger) -> None:
     """Produce the 10 manuscript figures + 7 appendix figures from bundles."""
@@ -11070,31 +11068,31 @@ def _v20_render_all_figures(forward_state: Dict, inverse_state: Dict,
 
     # Manuscript figures
     if df_all is not None:
-        figv20_01_dataset_overview(df_all, output_dir, logger)
+        fig_01_dataset_overview(df_all, output_dir, logger)
     if dual_results is not None:
-        figv20_02_forward_parity(dual_results, output_dir, logger)
+        fig_02_forward_parity(dual_results, output_dir, logger)
         if df_all is not None:
-            figv20_03_unseen_generalization(dual_results, df_all, output_dir,
+            fig_03_unseen_generalization(dual_results, df_all, output_dir,
                                             logger, calibration=calibration)
         if val_df_u is not None and scaler_disp_u is not None and enc_u is not None and params_u is not None:
-            figv20_04_physics_calibration(dual_results, calibration, val_df_u,
+            fig_04_physics_calibration(dual_results, calibration, val_df_u,
                                           scaler_disp_u, enc_u, params_u,
                                           output_dir, logger)
-    figv20_05_ill_posedness(jacobian, all_inv, landscape_df, output_dir, logger)
+    fig_05_ill_posedness(jacobian, all_inv, landscape_df, output_dir, logger)
     if clf_diag is not None:
-        figv20_06_classifier(clf_diag, output_dir, logger)
+        fig_06_classifier(clf_diag, output_dir, logger)
     if all_inv and inv_models is not None and df_all is not None:
-        figv20_07_inverse_design(all_inv, df_all, inv_models, inv_sd, inv_en,
+        fig_07_inverse_design(all_inv, df_all, inv_models, inv_sd, inv_en,
                                  inv_p, robust_inv, output_dir, logger)
     if pareto_df is not None and not pareto_df.empty:
-        figv20_08_pareto(pareto_df, landscape_df, output_dir, logger)
+        fig_08_pareto(pareto_df, landscape_df, output_dir, logger)
     if pareto_inv and pareto_tgts:
-        figv20_09_pareto_recovery(pareto_inv, pareto_tgts, output_dir, logger)
-    figv20_10_robustness(lambda_diag, dcommon_diag, clf_ab_diag,
+        fig_09_pareto_recovery(pareto_inv, pareto_tgts, output_dir, logger)
+    fig_10_robustness(lambda_diag, dcommon_diag, clf_ab_diag,
                          output_dir, logger)
 
-    # Appendix figures (reuse v_19 routines, already styled)
-    figv20_appendix_all(forward_state, inverse_state, analysis_state,
+    # Appendix figures (reuse the legacy plotting routines)
+    fig_appendix_all(forward_state, inverse_state, analysis_state,
                         output_dir, logger)
 
 
@@ -11114,10 +11112,10 @@ def replot_v20(source_dir: str, output_dir: str, logger: logging.Logger) -> None
     I = load_inverse_bundle(source_dir, logger) or {}
     A = load_analysis_bundle(source_dir, logger) or {}
     if not (F or I or A):
-        logger.warning(f"  No v_20 bundles found in: {source_dir}")
+        logger.warning(f"  No bundles found in: {source_dir}")
         return
-    _v20_render_all_tables(F, I, A, output_dir, logger)
-    _v20_render_all_figures(F, I, A, output_dir, logger)
+    _render_all_tables(F, I, A, output_dir, logger)
+    _render_all_figures(F, I, A, output_dir, logger)
     # Refresh the output manifest so MANIFEST_outputs.csv reflects the
     # regenerated figures and tables.
     generate_output_manifest(output_dir, logger)
@@ -11126,9 +11124,9 @@ def replot_v20(source_dir: str, output_dir: str, logger: logging.Logger) -> None
 # =============================================================================
 # CLI
 # =============================================================================
-def main_v20() -> None:
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="IPINN Crashworthiness Framework — v_20 (final).  Run modes "
+        description="IPINN Crashworthiness Framework.  Run modes "
                     "let you split forward and inverse training across two "
                     "parallel HPC jobs and merge the outputs in a third quick "
                     "replot step.",
@@ -11168,7 +11166,7 @@ def main_v20() -> None:
     parser.add_argument(
         "--use_pretrained_inverse", type=str, default=None,
         help=("Path to a pretrained inverse-design surrogate bundle produced "
-              "by hpo.merge_inverse_members.  When set with --mode inverse, "
+              "by hpo.inverse_merge.  When set with --mode inverse, "
               "the full-data Hard-PINN training is skipped — the M=20 ensemble "
               "is reconstructed from the bundle's state_dicts and the pipeline "
               "proceeds directly to classifier training, GP-BO target matching, "
@@ -11205,7 +11203,7 @@ def main_v20() -> None:
 
     # Apply dry-run + dependency guards BEFORE the mode dispatch so every
     # mode (not just ``all``) honours ``--dry_run`` and ``--strict_paper``.
-    # Both are idempotent — ``run_pipeline_v20`` may call them again for
+    # Both are idempotent — ``run_pipeline`` may call them again for
     # ``--mode all`` with no effect.
     apply_dry_run_settings(logger)
     set_publication_style()
@@ -11259,8 +11257,8 @@ def main_v20() -> None:
 
     # mode == "all"
     log_runtime_environment(args.output_dir, logger, tag=log_tag)
-    run_pipeline_v20(args.data_dir, args.output_dir, logger=logger)
+    run_pipeline(args.data_dir, args.output_dir, logger=logger)
 
 
 if __name__ == "__main__":
-    main_v20()
+    main()

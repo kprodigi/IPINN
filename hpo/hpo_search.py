@@ -1,107 +1,110 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-TUNE_V20  —  Hyperparameter optimization for v_20's forward training
+HPO SEARCH — Optuna TPE for the three forward-design surrogates
 ================================================================================
-Optuna TPE search over physics-loss weights and key optimizer hyperparameters
-for each of DDNS, Soft-PINN, and Hard-PINN on the unseen-θ=60° protocol.
-Written for HPC submission: SQLite-backed study survives SLURM preemption,
-single-GPU-per-worker, resumable.
+Tunes the hyperparameters of one of the three forward surrogates
+(DDNS / Soft-PINN / Hard-PINN) under the unseen-angle protocol
+(theta_star = 60 deg).  The objective is the mean validation load R^2
+across ``--n_seeds`` independently trained ensemble members for each
+trial.  Designed to run distributed across SLURM workers via a single
+shared SQLite-backed study, with full resume-from-preemption support.
 
-Per-trial budget: M = ``--n_seeds`` (default 2) members trained for at most
-``--hpo_epochs`` epochs each.  This matches v_19's HPO convention.
+Sampling policy
+---------------
+* ``n_startup_trials`` (default 15) are drawn uniformly at random from
+  the per-approach search space.  These give the TPE model a diverse
+  initial set of observations so it does not exploit prematurely.
+* After startup, Optuna's multivariate TPE sampler with grouped
+  categorical parameters proposes subsequent trials.
+* An optional small set of **warm-start** parameter dicts can be
+  enqueued before any TPE proposals so that the search starts with
+  one or more informed prior configurations.  Warm starts use the
+  same parameter names as the search space; missing parameters are
+  freely sampled.  Pass ``--no_warm_starts`` to disable.
 
-Objective: mean validation **load R²** on the unseen protocol — maximised.
-Mirrors v_20's checkpoint metric (load R² only for every approach).
+Per-trial evaluation
+--------------------
+For each trial:
+  1. Patch the parameters into a working configuration dict
+     (deep-copied from ``get_model_config(approach, "unseen")``).
+  2. Train ``--n_seeds`` ensemble members (each with a different seed
+     drawn from ``base_seed + 1000 * k``) on the unseen-angle training
+     split.  Each member uses the same epoch budget controlled by
+     ``--hpo_epochs``.
+  3. Evaluate every member on the validation set (theta_star = 60 deg).
+  4. The trial's reported value is the mean validation load R^2 across
+     the surviving members.
 
-Search space rationale
-----------------------
-We tune the *active* loss weights (``w_phys`` for Soft, ``w_load``/``w_energy``
-/``w_curvature`` for Hard, etc.) plus the optimization knobs that interact
-with them (``lr``, ``weight_decay``, ``dropout``, ``softplus_beta``,
-``smoothl1_beta``).  Architecture (``hidden_layers``) is held fixed at the
-v_19 HPO-found values so this run is a re-tune around the architectural
-``E(0)=0`` BC and the load-only checkpoint, not a rediscovery of arch.
-``w_bc`` is excluded because v_20's architectural correction makes it dead.
+Distributed execution
+---------------------
+The study is persisted in a SQLite file via Optuna's RDB storage.  Many
+workers can attach simultaneously; Optuna serialises trial scheduling
+through SQLite locks so each trial is run by exactly one worker.  Pass
+the same ``--output_dir`` and ``--study_name`` from each worker to
+share the study.
 
 Usage
 -----
-    # one approach per invocation (SLURM-friendly):
-    python tune_v20.py --approach soft  --n_trials 80 --output_dir ./hpo_v20
-    python tune_v20.py --approach hard  --n_trials 100 --output_dir ./hpo_v20
-    python tune_v20.py --approach ddns  --n_trials 60 --output_dir ./hpo_v20
+    # One approach per invocation (SLURM-friendly):
+    python hpo/hpo_search.py --approach soft --n_trials 100 --output_dir ./hpo_out
+    python hpo/hpo_search.py --approach hard --n_trials 120 --output_dir ./hpo_out
+    python hpo/hpo_search.py --approach ddns --n_trials 80  --output_dir ./hpo_out
 
-    # quick local sanity (5 trials, tiny budget, ~5 min):
-    python tune_v20.py --approach soft --n_trials 5 --hpo_epochs 30 --n_seeds 1 \\
-        --output_dir ./hpo_dry --dry_hpo
+    # Quick local smoke (5 trials, tiny budget, ~3 min on CPU):
+    python hpo/hpo_search.py --approach hard --n_trials 5 --hpo_epochs 20 \
+        --n_seeds 1 --output_dir ./hpo_smoke --dry_run
 
-    # resume after preemption — same --output_dir and --study_name picks up
-    # any existing trials from the SQLite DB:
-    python tune_v20.py --approach soft --n_trials 80 --output_dir ./hpo_v20
+    # Resume after preemption — same --output_dir + --study_name picks
+    # up the existing trials:
+    python hpo/hpo_search.py --approach soft --n_trials 100 --output_dir ./hpo_out
 
-    # multiple workers on different GPUs hitting the same study DB:
-    CUDA_VISIBLE_DEVICES=0 python tune_v20.py --approach soft ... &
-    CUDA_VISIBLE_DEVICES=1 python tune_v20.py --approach soft ... &
+    # Multiple workers sharing one study (different GPUs on one node):
+    CUDA_VISIBLE_DEVICES=0 python hpo/hpo_search.py --approach hard --output_dir ./hpo_out &
+    CUDA_VISIBLE_DEVICES=1 python hpo/hpo_search.py --approach hard --output_dir ./hpo_out &
 
-Outputs
--------
-    <output_dir>/
-        ├── tune_v20_study_<approach>.db          ← SQLite study (resumable, per-approach)
-        ├── best_params_<approach>.json           ← copy-pasteable into v_20
-        ├── trial_history_<approach>.csv          ← every trial's params + R²
-        └── hpo_log_<approach>.txt                ← full Optuna log
+Outputs (per ``--output_dir``)
+------------------------------
+    hpo_study_<approach>.db          SQLite study (resumable, per-approach)
+    hpo_best_params_<approach>.json  Best params, copy-pasteable into the
+                                     ``get_model_config`` hard-coded cfg
+    hpo_history_<approach>.csv       Every trial's params + R^2 + status
+    hpo_log_<approach>.txt           Full Optuna log
 ================================================================================
 """
 
+from __future__ import annotations
+
 import argparse
 import copy
+import csv
 import json
 import logging
 import os
 import sys
 import time
 import warnings
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
-import pandas as pd
 
-# Optuna is a required dependency — install with: pip install "optuna>=3.4,<5"
 try:
     import optuna
     from optuna.samplers import TPESampler
-except ImportError as e:  # pragma: no cover
-    sys.stderr.write("Optuna is required for HPO.  Install: pip install 'optuna>=3.4,<5'\n")
+except ImportError:  # pragma: no cover
+    sys.stderr.write(
+        "Optuna is required for HPO.  Install: pip install 'optuna>=3.4,<5'\n"
+    )
     raise
 
-# Reuse v_20's training infrastructure verbatim.  Importing this module also
-# applies its atomic-CSV monkey-patch and warning filters.
-#
-# tune_v20.py lives in ``hpo/``; composite_design.py lives at the repo
-# root.  Insert the parent directory on ``sys.path`` before the import so
-# this script works whether it's invoked as ``python hpo/tune_v20.py`` from
-# the repo root or as ``python tune_v20.py`` from inside ``hpo/``.
 _HPO_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HPO_DIR, os.pardir))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 import composite_design as cd  # noqa: E402
 
-# Silence Optuna's per-trial INFO chatter on stdout — we already log to file.
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 warnings.filterwarnings("ignore", category=UserWarning, module=r"matplotlib")
-
-# Suppress the one-time ExperimentalWarning for TPESampler's
-# ``multivariate=True`` / ``group=True`` arguments — both widely used and
-# stable, but Optuna marks them as experimental.
-#
-# DO NOT suppress the UserWarning about non-primitive categorical choices.
-# Optuna's SQLite layer round-trips str/int/float/bool/None losslessly,
-# but tuples become lists on reload, causing TPE's distribution-compatibility
-# check to raise ``CategoricalDistribution does not support dynamic value
-# space.`` after ``n_startup_trials``.  Earlier we silenced this warning
-# thinking it was cosmetic and the resulting crash burned ~10 GPU-hours.
-# Leave it loud so future tuple regressions surface immediately.
 warnings.filterwarnings(
     "ignore",
     category=optuna.exceptions.ExperimentalWarning,
@@ -110,16 +113,23 @@ warnings.filterwarnings(
 
 
 # =============================================================================
-# SEARCH SPACES — per approach, ranges set 1–2 orders of magnitude around the
-# v_19 HPO-found values so the TPE has room to move but doesn't wander far.
+# SEARCH SPACES
 #
-# Architecture is encoded as a STRING key (e.g. ``"128-64-32"``) rather than a
-# tuple/list of ints.  Optuna's SQLite persistence layer round-trips str/int/
-# float/bool/None losslessly; tuples are silently converted to lists on
-# reload, which then trips ``CategoricalDistribution does not support dynamic
-# value space.`` once TPE's ``multivariate=True, group=True`` engages after
-# ``n_startup_trials`` (the persisted distribution's value type no longer
-# matches the new trial's choice type).  Strings sidestep this entirely.
+# Architecture is encoded as a STRING key (e.g. ``"128-64-32"``) rather than
+# a tuple/list of ints.  Optuna's SQLite persistence layer round-trips
+# str/int/float/bool/None losslessly; tuples are silently converted to lists
+# on reload, which then trips
+# ``CategoricalDistribution does not support dynamic value space.``
+# once TPE's ``multivariate=True, group=True`` engages after the startup
+# trials.  Strings sidestep this entirely.
+#
+# The Soft-PINN search space includes ``w_phys`` (work-energy residual
+# penalty weight) and ``w_bc`` (paired E(0)/F(0) soft-penalty weight) but
+# does NOT include weights for monotonicity / angle-smoothness / curvature —
+# those are not part of the simplified Soft loss formulation.  Similarly,
+# the Hard-PINN search space contains only data-fit and stabilisation
+# hyperparameters since the three core physics constraints are enforced
+# architecturally.
 # =============================================================================
 HL_DDNS_SOFT = {
     "64-32":      [64, 32],
@@ -129,115 +139,111 @@ HL_DDNS_SOFT = {
     "256-128-64": [256, 128, 64],
 }
 HL_HARD = {
-    "32-32":     [32, 32],
-    "64-32":     [64, 32],
-    "64-64":     [64, 64],
-    "64-64-64":  [64, 64, 64],   # added — best old Hard run (R2=0.840) used this
-    "128-64":    [128, 64],
-    "128-64-32": [128, 64, 32],
+    "32-32":      [32, 32],
+    "64-32":      [64, 32],
+    "64-64":      [64, 64],
+    "64-64-64":   [64, 64, 64],
+    "128-64":     [128, 64],
+    "128-64-32":  [128, 64, 32],
 }
 
 
 def suggest_ddns(trial: "optuna.Trial") -> Dict:
-    # DDNS uses SoftPINNNet (same backbone as Soft-PINN) — same architecture
-    # choices.  No physics weights to tune; just data weights, optimization
-    # knobs, and architecture.
+    """Search space for the data-driven baseline (no physics losses)."""
     hl_key = trial.suggest_categorical("hidden_layers", list(HL_DDNS_SOFT.keys()))
     return {
         "hidden_layers":   list(HL_DDNS_SOFT[hl_key]),
         "batch_size":      trial.suggest_categorical("batch_size", [32, 64, 128]),
-        "lr":              trial.suggest_float("lr",            1e-6, 1e-3, log=True),
-        "weight_decay":    trial.suggest_float("weight_decay",  1e-6, 1e-3, log=True),
-        "dropout":         trial.suggest_float("dropout",       0.0,  0.10),
-        "softplus_beta":   trial.suggest_float("softplus_beta", 5.0,  30.0),
-        "smoothl1_beta":   trial.suggest_float("smoothl1_beta", 0.1,  3.0),
-        "w_data_load":     trial.suggest_float("w_data_load",   0.5,  10.0, log=True),
-        "w_data_energy":   trial.suggest_float("w_data_energy", 0.5,  10.0, log=True),
-        "sched_patience":  trial.suggest_int  ("sched_patience", 20,  100),
-        "sched_factor":    trial.suggest_float("sched_factor",  0.2,  0.8),
+        "lr":              trial.suggest_float("lr",             1e-6, 1e-3, log=True),
+        "weight_decay":    trial.suggest_float("weight_decay",   1e-6, 1e-3, log=True),
+        "dropout":         trial.suggest_float("dropout",        0.0,  0.10),
+        "softplus_beta":   trial.suggest_float("softplus_beta",  5.0,  30.0),
+        "smoothl1_beta":   trial.suggest_float("smoothl1_beta",  0.1,  3.0),
+        "w_data_load":     trial.suggest_float("w_data_load",    0.5,  10.0, log=True),
+        "w_data_energy":   trial.suggest_float("w_data_energy",  0.5,  10.0, log=True),
+        "sched_patience":  trial.suggest_int  ("sched_patience", 20,   100),
+        "sched_factor":    trial.suggest_float("sched_factor",   0.2,  0.8),
     }
 
 
 def suggest_soft(trial: "optuna.Trial") -> Dict:
-    # v_19's HPO winner [256, 128] is included so TPE can rediscover it if
-    # it remains optimal under v_20's architectural BC.
+    """Search space for the Soft-PINN.
+
+    The Soft-PINN loss contains the data terms (w_data_load, w_data_energy),
+    the work-energy residual loss (w_phys), and the paired boundary-condition
+    soft penalty (w_bc) that enforces BOTH E(0)=0 AND F(0)=0.  No additional
+    field-wide regularisers (monotonicity, angle smoothness, curvature) are
+    applied: the three core physics constraints common to both PINN
+    variants are exactly the ones searched here.
+    """
     hl_key = trial.suggest_categorical("hidden_layers", list(HL_DDNS_SOFT.keys()))
     return {
         "hidden_layers":   list(HL_DDNS_SOFT[hl_key]),
         "batch_size":      trial.suggest_categorical("batch_size", [32, 64, 128]),
-        "lr":              trial.suggest_float("lr",            1e-5, 5e-2, log=True),
-        "weight_decay":    trial.suggest_float("weight_decay",  1e-6, 5e-3, log=True),
-        "dropout":         trial.suggest_float("dropout",       0.0,  0.05),
-        "softplus_beta":   trial.suggest_float("softplus_beta", 5.0,  25.0),
-        "smoothl1_beta":   trial.suggest_float("smoothl1_beta", 0.1,  3.0),
-        "w_data_load":     trial.suggest_float("w_data_load",   0.5,  10.0, log=True),
-        "w_data_energy":   trial.suggest_float("w_data_energy", 0.1,  10.0, log=True),
-        "w_phys":          trial.suggest_float("w_phys",        0.01, 10.0, log=True),
-        "w_monotonicity":  trial.suggest_float("w_monotonicity", 0.1, 50.0, log=True),
-        "w_angle_smooth":  trial.suggest_float("w_angle_smooth", 1e-3, 1.0, log=True),
-        "smooth_delta_deg": trial.suggest_float("smooth_delta_deg", 1.0, 5.0),
-        "colloc_ratio":    trial.suggest_float("colloc_ratio",  1.0,  6.0),
-        "sched_patience":  trial.suggest_int  ("sched_patience", 20,  100),
-        "sched_factor":    trial.suggest_float("sched_factor",  0.2,  0.8),
+        "lr":              trial.suggest_float("lr",             1e-5, 5e-2, log=True),
+        "weight_decay":    trial.suggest_float("weight_decay",   1e-6, 5e-3, log=True),
+        "dropout":         trial.suggest_float("dropout",        0.0,  0.05),
+        "softplus_beta":   trial.suggest_float("softplus_beta",  5.0,  25.0),
+        "smoothl1_beta":   trial.suggest_float("smoothl1_beta",  0.1,  3.0),
+        "w_data_load":     trial.suggest_float("w_data_load",    0.5,  10.0, log=True),
+        "w_data_energy":   trial.suggest_float("w_data_energy",  0.1,  10.0, log=True),
+        "w_phys":          trial.suggest_float("w_phys",         0.01, 10.0, log=True),
+        "w_bc":            trial.suggest_float("w_bc",           0.01, 5.0,  log=True),
+        "colloc_ratio":    trial.suggest_float("colloc_ratio",   1.0,  6.0),
+        "sched_patience":  trial.suggest_int  ("sched_patience", 20,   100),
+        "sched_factor":    trial.suggest_float("sched_factor",   0.2,  0.8),
     }
 
 
 def suggest_hard(trial: "optuna.Trial") -> Dict:
-    # Hard-PINN architecture choices kept smaller — autograd through dE/dd is
-    # VRAM-bounded so big nets are risky.  ``warmup_epochs`` and ``swa_pct``
-    # are searched in narrow ranges around v_19's stability-tuned values
-    # (80 and 0.20) so we don't leave the regime where Hard-PINN converges.
-    #
-    # ``batch_size`` excludes 8: an empirical Hard trial 0 with batch_size=8
-    # took 5h 35m on a V100 (1102 minibatches/epoch × autograd-through-dE/dd
-    # × 3 seeds × 200 epochs).  16 and 32 stay in the modern-ML regime and
-    # cut per-trial wall by 2–4× without giving up meaningful generalization.
+    """Search space for the Hard-PINN.
+
+    The Hard-PINN loss reduces to the data terms alone (w_load, w_energy)
+    because the three core physics constraints (work-energy identity F = dE/dd
+    via autograd, and the two boundary conditions E(0) = 0 and F(0) = 0 via
+    slope-subtraction) are enforced architecturally and do not appear in the
+    loss.  The remaining hyperparameters are the network architecture,
+    optimisation knobs, and the stabilisation parameters (warmup_epochs,
+    swa_pct) required by the warmup + cosine + SWA training schedule.
+
+    The batch_size choices exclude 8 because empirically a Hard-PINN trial
+    at batch_size=8 takes ~5.5 h per ensemble member, which makes the search
+    impractically slow.  16 and 32 remain in the modern-ML regime and cut
+    per-trial wall-clock by 2-4x without giving up generalisation.
+    """
     hl_key = trial.suggest_categorical("hidden_layers", list(HL_HARD.keys()))
     return {
         "hidden_layers":   list(HL_HARD[hl_key]),
         "batch_size":      trial.suggest_categorical("batch_size", [16, 32]),
-        "lr":              trial.suggest_float("lr",            1e-6, 5e-3, log=True),
-        "weight_decay":    trial.suggest_float("weight_decay",  1e-5, 5e-2, log=True),
-        "dropout":         trial.suggest_float("dropout",       0.0,  0.05),
-        "softplus_beta":   trial.suggest_float("softplus_beta", 5.0,  25.0),
-        "smoothl1_beta":   trial.suggest_float("smoothl1_beta", 0.05, 1.0),
-        "w_load":          trial.suggest_float("w_load",        1.0,  20.0, log=True),
-        "w_energy":        trial.suggest_float("w_energy",      1.0,  20.0, log=True),
-        # Widened ranges below: an old Hard HPO best had w_monotonicity=0.094
-        # (below the previous 0.5 lower bound) and w_curvature=0.010 (at the
-        # previous 1e-2 upper bound).  Excluding those regions risks repeating
-        # the search away from the known optimum.
-        "w_monotonicity":  trial.suggest_float("w_monotonicity", 0.05, 30.0, log=True),
-        "w_angle_smooth":  trial.suggest_float("w_angle_smooth", 1e-3, 0.1, log=True),
-        "w_curvature":     trial.suggest_float("w_curvature",   1e-5, 0.1, log=True),
-        "smooth_delta_deg": trial.suggest_float("smooth_delta_deg", 1.0, 5.0),
-        "colloc_ratio":    trial.suggest_float("colloc_ratio",  1.0,  6.0),
-        "grad_clip":       trial.suggest_float("grad_clip",     0.5,  3.0),
-        "warmup_epochs":   trial.suggest_int  ("warmup_epochs", 40,   150),
-        "swa_pct":         trial.suggest_float("swa_pct",       0.10, 0.35),
+        "lr":              trial.suggest_float("lr",             1e-6, 5e-3, log=True),
+        "weight_decay":    trial.suggest_float("weight_decay",   1e-5, 5e-2, log=True),
+        "dropout":         trial.suggest_float("dropout",        0.0,  0.05),
+        "softplus_beta":   trial.suggest_float("softplus_beta",  5.0,  25.0),
+        "smoothl1_beta":   trial.suggest_float("smoothl1_beta",  0.05, 1.0),
+        "w_load":          trial.suggest_float("w_load",         1.0,  20.0, log=True),
+        "w_energy":        trial.suggest_float("w_energy",       1.0,  20.0, log=True),
+        "grad_clip":       trial.suggest_float("grad_clip",      0.5,  3.0),
+        "warmup_epochs":   trial.suggest_int  ("warmup_epochs",  40,   150),
+        "swa_pct":         trial.suggest_float("swa_pct",        0.10, 0.35),
     }
 
 
+SUGGESTERS = {"ddns": suggest_ddns, "soft": suggest_soft, "hard": suggest_hard}
+HL_BY_APPROACH = {
+    "ddns": HL_DDNS_SOFT,
+    "soft": HL_DDNS_SOFT,
+    "hard": HL_HARD,
+}
+
+
 # =============================================================================
-# WARM-START SEEDS — best params from the prior (v_6 / v_16 / hpo_v3) HPO runs.
-# Each approach gets one or more dicts that are enqueued as the FIRST trials
-# of a fresh study so TPE has strong informed priors instead of rediscovering
-# the good region from scratch.  Skipped on resume.
+# WARM-START SEEDS
 #
-# Sources (from ``Old HPO Files/``):
-#   - DDNS: tune_ddns.db best                       R2=0.7835
-#   - Soft: tune_soft.db best                       R2=0.8012
-#   - Hard: TWO seeds —
-#       (a) v_16 production cfg ([32, 32], 800ep, M=20)            R2=0.849861
-#           This is the highest documented Hard val-load R^2 — full-budget
-#           production retrain of the v_16 hardcoded cfg.
-#       (b) hpo_hardpinn_v3 trial 186 ([32, 32], M=2 seeds)
-#           mean R2=0.8304 with std=0.0106 (lowest seed-to-seed std in the
-#           v_3 study; useful as a stability prior for ensemble members).
-#
-# Param NAMES must match suggester keys exactly; categorical values must
-# match choice strings (e.g. "32-32" not [32, 32]).  Any param missing from
-# a warm-start dict is freely sampled by Optuna for that trial.
+# One informed prior dict per approach is enqueued before any TPE proposals.
+# Parameter names must match the suggester keys exactly; categorical values
+# must match the suggester's choice strings (e.g. ``"32-32"``, not
+# ``[32, 32]``).  Any parameter missing from a warm-start dict is freely
+# sampled by Optuna for that trial.  Pass ``--no_warm_starts`` to skip.
 # =============================================================================
 WARM_START = {
     "ddns": [
@@ -267,479 +273,366 @@ WARM_START = {
             "w_data_load":     3.61,
             "w_data_energy":   1.70,
             "w_phys":          3.69,
-            "w_monotonicity":  4.96,
-            "w_angle_smooth":  0.028,
-            "smooth_delta_deg": 2.0,
+            "w_bc":            0.85,
             "colloc_ratio":    3.70,
             "sched_patience":  71,
             "sched_factor":    0.65,
         },
     ],
     "hard": [
-        # (a) v_16 production cfg — highest documented Hard R^2 (0.849861).
         {
-            "hidden_layers":    "32-32",
-            "batch_size":       16,
-            "lr":               4.0e-05,
-            "weight_decay":     5.27e-04,
-            "dropout":          0.0003,
-            "softplus_beta":    13.82,
-            "smoothl1_beta":    0.143,
-            "w_load":           6.0,
-            "w_energy":         7.0,
-            "grad_clip":        1.63,
-            "w_monotonicity":   5.0,
-            "w_angle_smooth":   0.03,
-            "w_curvature":      0.005,
-            "smooth_delta_deg": 1.38,
-            "colloc_ratio":     1.86,
-            "warmup_epochs":    80,    # v_19 default — not specified in v_16 source
-            "swa_pct":          0.20,  # v_19 default
-            "sched_patience":   73,
-            "sched_factor":     0.37,
-        },
-        # (b) hpo_hardpinn_v3 trial 186 — lowest seed-to-seed std (0.011) at
-        # mean R2=0.8304 across 2 seeds.  Acts as a stability prior.
-        {
-            "hidden_layers":    "32-32",
-            "batch_size":       32,
-            "lr":               1.34e-05,
-            "weight_decay":     0.00495,
-            "dropout":          0.00172,
-            "softplus_beta":    8.87,
-            "smoothl1_beta":    0.229,
-            "w_load":           4.58,
-            "w_energy":         6.56,
-            "grad_clip":        1.95,
-            "w_monotonicity":   2.74,
-            "w_angle_smooth":   0.0192,
-            "w_curvature":      0.00155,
-            "smooth_delta_deg": 2.50,
-            "colloc_ratio":     3.90,
-            "warmup_epochs":    80,
-            "swa_pct":          0.20,
-            "sched_patience":   60,
-            "sched_factor":     0.50,
+            "hidden_layers":   "32-32",
+            "batch_size":      16,
+            "lr":              4.0e-05,
+            "weight_decay":    5.27e-04,
+            "dropout":         0.0003,
+            "softplus_beta":   13.82,
+            "smoothl1_beta":   0.143,
+            "w_load":          6.0,
+            "w_energy":        7.0,
+            "grad_clip":       1.63,
+            "warmup_epochs":   80,
+            "swa_pct":         0.20,
         },
     ],
 }
 
 
-SUGGESTERS = {"ddns": suggest_ddns, "soft": suggest_soft, "hard": suggest_hard}
-
-TRAIN_FNS = {
-    "ddns": cd.train_ddns,
-    "soft": cd.train_soft,
-    "hard": cd.train_hard,
-}
-
-
 # =============================================================================
-# CONTEXT — load data once, share across trials
+# TRIAL EVALUATION
 # =============================================================================
-class HPOContext:
-    """Caches the loaded dataset, train/val splits, and preprocessors so we
-    don't pay the load cost on every trial."""
-
-    def __init__(self, data_dir: str, logger: logging.Logger):
-        logger.info("Loading data + building unseen-θ=60° split (one-time)...")
-        self.df_all = cd.load_data(data_dir, logger)
-        self.train_df_u, self.val_df_u = cd.split_unseen_angle(
-            self.df_all, cd.CFG.theta_star, logger)
-        (self.scaler_disp_u, self.scaler_out_u,
-         self.enc_u, self.params_u) = cd.create_preprocessors(self.train_df_u, logger)
-        logger.info(f"  N_train = {len(self.train_df_u)}  N_val = {len(self.val_df_u)}")
+def _build_trial_cfg(approach: str, params: Dict) -> Dict:
+    """Patch the trial parameters into the production base config."""
+    cfg = copy.deepcopy(cd.get_model_config(approach, "unseen"))
+    cfg.update(params)
+    return cfg
 
 
-# =============================================================================
-# OBJECTIVE — train M=n_seeds members with sampled cfg, return per-seed R²s
-# =============================================================================
-def evaluate_trial(approach: str, cfg: Dict, ctx: HPOContext,
-                   n_seeds: int, base_seed: int,
-                   logger: logging.Logger) -> Tuple[float, list]:
-    """Train n_seeds members with the given cfg and return ``(mean R², list
-    of per-seed R²s)``.  v_20 uses load R² as the checkpoint metric.
+def _train_and_score_member(
+    approach: str,
+    cfg: Dict,
+    seed: int,
+    df_tr,
+    df_val,
+    scaler_disp,
+    scaler_out,
+    enc,
+    params,
+    logger: logging.Logger,
+) -> float:
+    """Train one ensemble member with the trial cfg and return val load R^2."""
+    train_fn = {"ddns": cd.train_ddns, "soft": cd.train_soft, "hard": cd.train_hard}[approach]
+    _orig_get_cfg = cd.get_model_config
 
-    Each member is trained independently; we don't apply the Tukey
-    convergence filter here because the HPO budget is small and we want
-    every trial's mean to reflect the cfg's *typical* behavior, not its
-    best-of-N.
+    def _patched_get_cfg(app, protocol, w_phys_override=None):
+        if app == approach:
+            patched = copy.deepcopy(cfg)
+            if w_phys_override is not None and "w_phys" in patched:
+                patched["w_phys"] = float(w_phys_override)
+            return patched
+        return _orig_get_cfg(app, protocol, w_phys_override)
 
-    Returning the per-seed list (not just the mean) lets the objective
-    record std / min as trial user_attrs.  Low seed-to-seed std is a
-    desirable property for the production retrain (M=20 ensembles), and
-    a robust-mean objective (mean − α·std) is supported via CLI.
-    """
-    train_fn = TRAIN_FNS[approach]
-    r2_list = []
-    for s in range(n_seeds):
-        seed = base_seed + s * 1000
-        cd.set_seed(seed)
-        try:
-            _, _, best_r2, _ = train_fn(
-                ctx.train_df_u, ctx.val_df_u,
-                ctx.scaler_disp_u, ctx.scaler_out_u, ctx.enc_u, ctx.params_u,
-                seed, "unseen", logger,
-            )
-        except Exception as e:
-            logger.warning(f"  Trial seed={seed} failed: {type(e).__name__}: {e}")
-            continue
-        if not np.isfinite(best_r2):
-            continue
-        r2_list.append(float(best_r2))
-
-    if not r2_list:
-        # Optuna treats this as a failed trial; TPE skips it for guidance.
-        raise optuna.exceptions.TrialPruned("No finite R² across all seeds")
-    return float(np.mean(r2_list)), r2_list
+    cd.get_model_config = _patched_get_cfg
+    try:
+        model, history, best_r2, meta = train_fn(
+            df_tr, df_val, scaler_disp, scaler_out, enc, params,
+            seed, "unseen", logger,
+        )
+        metrics = cd.evaluate_model(
+            model, approach, df_val, scaler_disp, scaler_out, enc, params,
+        )
+        return float(metrics["load_r2"])
+    finally:
+        cd.get_model_config = _orig_get_cfg
 
 
-def make_objective(approach: str, ctx: HPOContext, n_seeds: int,
-                   base_seed: int, hpo_epochs: int,
-                   logger: logging.Logger,
-                   objective_mode: str = "mean",
-                   robust_alpha: float = 1.0):
-    """Closure-based objective; monkey-patches ``cd.get_model_config`` for
-    the duration of each trial so v_20's training functions pick up the
-    sampled cfg without modifying their signatures.
-
-    Parameters
-    ----------
-    objective_mode : {"mean", "robust_mean"}
-        ``"mean"`` (default): score = mean of per-seed R² — the same
-        metric v_20's checkpointer uses.
-        ``"robust_mean"``: score = mean − α·std.  Penalises seed-to-seed
-        instability so trials whose ensemble members agree on R² are
-        preferred over volatile ones.  Useful for picking a config that
-        will retrain stably at production M=20.
-    robust_alpha : float
-        Weight on std in robust-mean mode.  α=1.0 means a config with
-        mean=0.85, std=0.05 scores the same (0.80) as mean=0.80, std=0.0.
-    """
-
+def make_objective(
+    approach: str,
+    df_tr,
+    df_val,
+    scaler_disp,
+    scaler_out,
+    enc,
+    params,
+    n_seeds: int,
+    hpo_epochs: int,
+    base_seed: int,
+    logger: logging.Logger,
+):
+    """Build the Optuna objective callable for ``approach``."""
     suggester = SUGGESTERS[approach]
-    original_get_model_config = cd.get_model_config
 
-    def patched_factory(sampled: Dict):
-        """Return a get_model_config replacement that injects ``sampled`` for
-        (approach, 'unseen') trials and falls back to the real cfg otherwise.
+    def objective(trial: "optuna.Trial") -> float:
+        trial_params = suggester(trial)
+        trial_params["epochs"] = int(hpo_epochs)
+        trial_params.setdefault("eval_every", max(1, hpo_epochs // 8))
+        cfg = _build_trial_cfg(approach, trial_params)
 
-        Cap epochs at ``hpo_epochs`` for trial-speed.  Scale ``warmup_epochs``
-        proportionally so the warmup-to-total ratio matches production (where
-        ``epochs=800`` and ``warmup_epochs≈80``).  Without this, a sampled
-        warmup of 150 inside a 200-epoch HPO trial would consume 75% of
-        training — an artifact that would unfairly penalize that hyperparameter
-        choice during HPO even though it works in production.
-        """
-        def patched(a, p, w_phys_override=None):
-            base = original_get_model_config(a, p, w_phys_override)
-            if a != approach or p != "unseen":
-                return base
-            cfg = {**base, **sampled}
-            orig_epochs = int(cfg.get("epochs", hpo_epochs))
-            cfg["epochs"] = min(orig_epochs, int(hpo_epochs))
-            cfg["eval_every"] = max(1, cfg["epochs"] // 8)
-            ratio = cfg["epochs"] / max(1, orig_epochs)
-            if "warmup_epochs" in cfg:
-                # Scale warmup proportionally + clamp to [2, epochs/2] for sanity.
-                scaled = int(round(int(cfg["warmup_epochs"]) * ratio))
-                cfg["warmup_epochs"] = max(2, min(scaled, cfg["epochs"] // 2))
-            # respect dry_run if active
-            if hasattr(cd, "_dry_run_shrink_training_cfg"):
-                cd._dry_run_shrink_training_cfg(cfg)
-            return cfg
-        return patched
-
-    def objective(trial: optuna.Trial) -> float:
-        sampled = suggester(trial)
-        cd.get_model_config = patched_factory(sampled)
-        try:
-            t0 = time.time()
-            r2_mean, r2_list = evaluate_trial(
-                approach, sampled, ctx, n_seeds, base_seed, logger)
-            elapsed = time.time() - t0
-            r2_arr = np.asarray(r2_list, dtype=float)
-            r2_std = float(r2_arr.std(ddof=0)) if r2_arr.size > 1 else 0.0
-            r2_min = float(r2_arr.min())
-            # Always record ensemble-stability metrics for post-hoc analysis.
-            trial.set_user_attr("seconds", elapsed)
-            trial.set_user_attr("r2_per_seed", r2_list)
-            trial.set_user_attr("r2_mean", r2_mean)
-            trial.set_user_attr("r2_std", r2_std)
-            trial.set_user_attr("r2_min", r2_min)
-            # Score depends on the configured objective mode.
-            if objective_mode == "robust_mean":
-                score = r2_mean - robust_alpha * r2_std
-                trial.set_user_attr("robust_score", score)
-            else:
-                score = r2_mean
-            r2 = score
-            seed_str = ", ".join(f"{x:.4f}" for x in r2_list)
-            logger.info(
-                f"  trial {trial.number:3d}  score={r2:.4f}  "
-                f"mean={r2_mean:.4f} std={r2_std:.4f} min={r2_min:.4f}  "
-                f"seeds=[{seed_str}]  ({elapsed:.1f}s)  {sampled}"
+        member_r2s: List[float] = []
+        t_trial = time.time()
+        for k in range(n_seeds):
+            seed_k = base_seed + 1000 * k
+            r2 = _train_and_score_member(
+                approach, cfg, seed_k,
+                df_tr, df_val, scaler_disp, scaler_out, enc, params,
+                logger,
             )
-            return r2
-        finally:
-            cd.get_model_config = original_get_model_config
+            member_r2s.append(r2)
+            logger.info(
+                f"  trial {trial.number:03d}  seed {k+1}/{n_seeds}  "
+                f"val_R2_load={r2:.4f}"
+            )
+            trial.report(float(np.mean(member_r2s)), step=k)
+
+        mean_r2 = float(np.mean(member_r2s))
+        elapsed = time.time() - t_trial
+        logger.info(
+            f"trial {trial.number:03d} DONE  mean_val_R2_load={mean_r2:.4f}  "
+            f"(n_seeds={n_seeds}, wall={elapsed:.0f}s)"
+        )
+        return mean_r2
 
     return objective
 
 
 # =============================================================================
-# RUN
-# =============================================================================
-def run_hpo(approach: str, output_dir: str, *,
-            n_trials: int = 80, n_seeds: int = 2,
-            hpo_epochs: int = 200, base_seed: int = 2026,
-            study_name: Optional[str] = None,
-            data_dir: str = ".",
-            objective_mode: str = "mean",
-            robust_alpha: float = 1.0) -> Dict:
-    """Execute one Optuna study for ``approach``.  Returns the best params
-    dict (already merged onto the v_19 base config so it's drop-in ready).
-
-    ``objective_mode='robust_mean'`` switches the objective from mean R²
-    to ``mean − α·std`` so trials with unstable seed-to-seed performance
-    are penalised.  Useful when the production retrain uses a large
-    ensemble (e.g. M=20) and ensemble stability matters as much as the
-    point estimate.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    log_path = os.path.join(output_dir, f"hpo_log_{approach}.txt")
-    logger = _make_logger(approach, log_path)
-    logger.info("=" * 80)
-    logger.info(
-        f"HPO V_20  approach={approach}  n_trials={n_trials}  "
-        f"n_seeds={n_seeds}  epochs_cap={hpo_epochs}  "
-        f"objective={objective_mode}"
-        + (f"  alpha={robust_alpha}" if objective_mode == "robust_mean" else "")
-    )
-    logger.info("=" * 80)
-
-    cd.refresh_device()
-    cd.set_publication_style()
-    ctx = HPOContext(data_dir, logger)
-
-    if study_name is None:
-        study_name = f"v20_{approach}_unseen"
-    # Per-approach DB file so concurrent SLURM jobs don't race on
-    # alembic schema init in a single shared SQLite file.  Each approach
-    # owns its own DB; resume-after-preemption is unchanged.
-    storage_path = os.path.join(output_dir, f"tune_v20_study_{approach}.db")
-    storage = f"sqlite:///{storage_path}"
-
-    # TPE configuration tuned for our 10–17 dim mixed search:
-    #   - n_startup_trials=15 (default 10): more random trials before TPE
-    #     surrogate kicks in, important when M=3 seed averaging adds noise.
-    #   - n_ei_candidates=50 (default 24): more EI candidates per acquisition
-    #     so TPE doesn't get stuck in a narrow region in higher-dim spaces.
-    #   - multivariate=True + group=True: joint sampling over the categorical
-    #     hidden_layers + batch_size pair (avoids independent-axis pathology).
-    sampler = TPESampler(
-        seed=base_seed,
-        multivariate=True,
-        group=True,
-        n_startup_trials=15,
-        n_ei_candidates=50,
-    )
-    study = optuna.create_study(
-        study_name=study_name, storage=storage, sampler=sampler,
-        direction="maximize", load_if_exists=True,
-    )
-
-    n_done = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
-    logger.info(f"Existing completed trials: {n_done}")
-
-    # Warm-start: enqueue prior-HPO best params as the first N trials of a
-    # fresh study (one or more dicts per approach).  Skipped on resume
-    # (study.trials non-empty) so we don't burn duplicate trials after
-    # preemption.
-    if not study.trials and approach in WARM_START:
-        seeds = WARM_START[approach]
-        for i, seed_params in enumerate(seeds):
-            try:
-                study.enqueue_trial(seed_params, skip_if_exists=True)
-                logger.info(
-                    f"Warm-start #{i} enqueued ({len(seed_params)} params, "
-                    f"approach={approach}); will run as trial {i}."
-                )
-            except Exception as ex:  # pragma: no cover
-                # If a warm-start key/value falls outside the current search
-                # space, Optuna raises at trial-run time, not at enqueue.
-                # Log but don't abort — TPE will still produce trial i from
-                # scratch.
-                logger.warning(f"Warm-start #{i} enqueue failed: {ex}")
-
-    todo = max(0, n_trials - n_done)
-    if todo == 0:
-        logger.info("All requested trials already completed; nothing to do.")
-    else:
-        logger.info(f"Running {todo} new trials (target {n_trials} total)...")
-        objective = make_objective(approach, ctx, n_seeds, base_seed,
-                                   hpo_epochs, logger,
-                                   objective_mode=objective_mode,
-                                   robust_alpha=robust_alpha)
-        study.optimize(objective, n_trials=todo, gc_after_trial=True,
-                       show_progress_bar=False)
-
-    # Best params + drop-in cfg for v_20 ----------------------------------
-    if not study.trials:
-        logger.warning("Study has no trials.")
-        return {}
-    best = study.best_trial
-    logger.info("=" * 80)
-    logger.info(f"Best trial: #{best.number}  load_R2 = {best.value:.4f}")
-    for k, v in best.params.items():
-        logger.info(f"  {k} = {v}")
-
-    # Build a drop-in cfg by merging onto v_20's base config for that approach
-    base_cfg = cd.get_model_config(approach, "unseen")
-    drop_in = {**base_cfg, **best.params}
-    drop_in.pop("w_phys_override", None)
-
-    out_json = os.path.join(output_dir, f"best_params_{approach}.json")
-    with open(out_json, "w", encoding="utf-8") as f:
-        json.dump({
-            "approach": approach,
-            "protocol": "unseen",
-            "best_load_r2_mean": float(best.value),
-            "n_seeds_per_trial": n_seeds,
-            "hpo_epochs_cap": hpo_epochs,
-            "n_trials_completed": len([t for t in study.trials
-                                        if t.state == optuna.trial.TrialState.COMPLETE]),
-            "best_params": best.params,
-            "drop_in_cfg": _json_safe(drop_in),
-        }, f, indent=2, default=str)
-    logger.info(f"Wrote: {out_json}")
-
-    # Also a CSV trial history for plotting / sanity checks.  Includes
-    # ensemble-stability metrics (r2_mean, r2_std, r2_min) so post-hoc
-    # analysis can pick a low-std config near the top, not just the
-    # absolute best mean.  ``score`` is what TPE optimised (mean by
-    # default; mean − α·std under --objective robust_mean); ``r2_mean``
-    # is always the unpenalised mean for cross-mode comparison.
-    rows = []
-    for t in study.trials:
-        if t.state != optuna.trial.TrialState.COMPLETE:
-            continue
-        ua = t.user_attrs
-        seeds = ua.get("r2_per_seed", [])
-        rows.append({
-            "trial":      t.number,
-            "score":      t.value,
-            "r2_mean":    ua.get("r2_mean", t.value),
-            "r2_std":     ua.get("r2_std", float("nan")),
-            "r2_min":     ua.get("r2_min", float("nan")),
-            "r2_per_seed": ";".join(f"{x:.6f}" for x in seeds) if seeds else "",
-            "seconds":    ua.get("seconds", float("nan")),
-            **t.params,
-        })
-    if rows:
-        csv_path = os.path.join(output_dir, f"trial_history_{approach}.csv")
-        pd.DataFrame(rows).to_csv(csv_path, index=False)
-        logger.info(f"Wrote: {csv_path}")
-
-    logger.info("=" * 80)
-    logger.info("HPO COMPLETE")
-    logger.info("=" * 80)
-    return drop_in
-
-
-# =============================================================================
-# Helpers
+# STUDY ORCHESTRATION
 # =============================================================================
 def _make_logger(approach: str, log_path: str) -> logging.Logger:
-    log = logging.getLogger(f"hpo_v20.{approach}")
-    log.setLevel(logging.INFO)
-    log.handlers = []
-    fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    logger = logging.getLogger(f"hpo.{approach}")
+    logger.setLevel(logging.INFO)
+    logger.handlers = []
+    fh = logging.FileHandler(log_path, mode="a", encoding="utf-8")
     ch = logging.StreamHandler(sys.stdout)
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
-                            datefmt="%Y-%m-%d %H:%M:%S")
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     fh.setFormatter(fmt); ch.setFormatter(fmt)
-    log.addHandler(fh); log.addHandler(ch)
-    return log
+    logger.addHandler(fh); logger.addHandler(ch)
+    return logger
 
 
-def _json_safe(obj):
-    """Recursively coerce numpy / pandas scalars to plain Python for json.dump."""
-    if isinstance(obj, dict):
-        return {k: _json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_json_safe(v) for v in obj]
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        return float(obj)
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    return obj
+def _suggester_keys(approach: str) -> List[str]:
+    """Parameter names emitted by the approach's suggester.  Used to filter
+    warm starts so they only carry parameters that are still in the search
+    space."""
+    if approach == "ddns":
+        return [
+            "hidden_layers", "batch_size", "lr", "weight_decay", "dropout",
+            "softplus_beta", "smoothl1_beta", "w_data_load", "w_data_energy",
+            "sched_patience", "sched_factor",
+        ]
+    if approach == "soft":
+        return [
+            "hidden_layers", "batch_size", "lr", "weight_decay", "dropout",
+            "softplus_beta", "smoothl1_beta", "w_data_load", "w_data_energy",
+            "w_phys", "w_bc", "colloc_ratio", "sched_patience", "sched_factor",
+        ]
+    if approach == "hard":
+        return [
+            "hidden_layers", "batch_size", "lr", "weight_decay", "dropout",
+            "softplus_beta", "smoothl1_beta", "w_load", "w_energy",
+            "grad_clip", "warmup_epochs", "swa_pct",
+        ]
+    raise ValueError(f"Unknown approach: {approach}")
+
+
+def _enqueue_warm_starts(
+    study: "optuna.Study", approach: str, logger: logging.Logger,
+) -> None:
+    """Enqueue the WARM_START dicts as the first Optuna trials.
+
+    Skipped on resume if the same params already appear in the study.
+    Warm-start dicts are filtered to keys in the current search space so
+    that an obsolete warm start (e.g. one that referenced a removed
+    regulariser) does not crash the enqueue step.
+    """
+    allowed = set(_suggester_keys(approach))
+    for ws in WARM_START.get(approach, []):
+        ws_filtered = {k: v for k, v in ws.items() if k in allowed}
+        if not ws_filtered:
+            continue
+        try:
+            study.enqueue_trial(ws_filtered, skip_if_exists=True)
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"  warm start skipped: {e}")
+        else:
+            logger.info(
+                f"  enqueued warm start: hidden_layers="
+                f"{ws_filtered.get('hidden_layers', '?')}"
+            )
+
+
+def _export_best(
+    study: "optuna.Study", out_path: str, logger: logging.Logger,
+) -> None:
+    """Write the best trial's params to a JSON file in a copy-pasteable form."""
+    if not study.best_trial:
+        logger.warning("  No completed trials yet; skipping best-params export.")
+        return
+    best = study.best_trial
+    out: Dict = {
+        "approach":      study.user_attrs.get("approach"),
+        "best_value":    float(best.value) if best.value is not None else None,
+        "best_trial":    int(best.number),
+        "best_params":   {k: v for k, v in best.params.items()},
+        "n_trials":      len(study.trials),
+        "n_completed":   sum(
+            1 for t in study.trials
+            if t.state == optuna.trial.TrialState.COMPLETE
+        ),
+    }
+    if "hidden_layers" in best.params:
+        hl_key = best.params["hidden_layers"]
+        hl_map = HL_BY_APPROACH[study.user_attrs.get("approach", "ddns")]
+        out["best_params_resolved"] = dict(best.params)
+        out["best_params_resolved"]["hidden_layers"] = list(hl_map[hl_key])
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(out, fh, indent=2)
+        fh.write("\n")
+    logger.info(f"  Wrote: {out_path}")
+
+
+def _export_history(
+    study: "optuna.Study", out_path: str, logger: logging.Logger,
+) -> None:
+    """Dump every trial's (number, value, state, params) to CSV."""
+    all_param_keys: set = set()
+    for t in study.trials:
+        all_param_keys.update(t.params.keys())
+    param_keys = sorted(all_param_keys)
+    headers = ["trial", "value", "state"] + param_keys
+    with open(out_path, "w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=headers)
+        writer.writeheader()
+        for t in study.trials:
+            row = {
+                "trial": t.number,
+                "value": "" if t.value is None else f"{t.value:.6f}",
+                "state": str(t.state).split(".")[-1],
+            }
+            for k in param_keys:
+                row[k] = t.params.get(k, "")
+            writer.writerow(row)
+    logger.info(f"  Wrote: {out_path}")
 
 
 # =============================================================================
 # CLI
 # =============================================================================
 def main():
-    parser = argparse.ArgumentParser(
-        description="HPO for v_20 forward training (Optuna TPE on unseen-θ=60°).",
+    p = argparse.ArgumentParser(
+        description="Optuna TPE HPO for the unseen-angle forward-design "
+                    "surrogates (DDNS / Soft-PINN / Hard-PINN).",
     )
-    parser.add_argument("--approach", choices=["ddns", "soft", "hard", "all"],
-                        required=True,
-                        help="Which approach to tune.  'all' runs sequential "
-                             "studies for ddns + soft + hard (long).")
-    parser.add_argument("--data_dir",   type=str, default=".")
-    parser.add_argument("--output_dir", type=str, default="./hpo_v20")
-    parser.add_argument("--n_trials",   type=int, default=80,
-                        help="Target number of completed trials (resumed studies "
-                             "subtract already-completed trials).")
-    parser.add_argument("--n_seeds",    type=int, default=3,
-                        help="Members trained per trial; mean load R² is the "
-                             "objective.  Default 3 (v_19 HPO used 2; raised to 3 "
-                             "in v_20 to reduce seed-noise that misled TPE on "
-                             "marginal hyperparameter differences).")
-    parser.add_argument("--hpo_epochs", type=int, default=200,
-                        help="Cap on per-trial training epochs (vs ~600–800 for "
-                             "the production run).  200 is a good balance.")
-    parser.add_argument("--base_seed",  type=int, default=2026)
-    parser.add_argument("--study_name", type=str, default=None,
-                        help="Override the default 'v20_<approach>_unseen' name.")
-    parser.add_argument("--dry_hpo",    action="store_true",
-                        help="Tiny smoke (5 trials × M=1 × 30 epochs).  Use to "
-                             "validate the script locally before SLURM.")
-    parser.add_argument("--objective", choices=["mean", "robust_mean"],
-                        default="mean",
-                        help="'mean' (default) optimises mean load R² across "
-                             "seeds — the v_20 checkpoint metric.  "
-                             "'robust_mean' optimises mean − alpha*std so trials "
-                             "with unstable seed-to-seed performance are "
-                             "penalised.  Useful when the production retrain "
-                             "uses a large ensemble (e.g. M=20) and stability "
-                             "matters as much as the point estimate.")
-    parser.add_argument("--robust_alpha", type=float, default=1.0,
-                        help="Weight on std in --objective robust_mean.  "
-                             "Default 1.0 means a (mean=0.85, std=0.05) trial "
-                             "scores the same (0.80) as (mean=0.80, std=0.0).")
-    args = parser.parse_args()
+    p.add_argument("--approach", choices=["ddns", "soft", "hard"], required=True,
+                   help="Which surrogate's hyperparameters to tune.")
+    p.add_argument("--n_trials", type=int, default=100,
+                   help="Total Optuna trials (including the startup random "
+                        "trials).")
+    p.add_argument("--n_startup_trials", type=int, default=15,
+                   help="Random-search trials before TPE engages.")
+    p.add_argument("--n_seeds", type=int, default=2,
+                   help="Ensemble members trained per trial; the trial's "
+                        "objective is the mean validation load R^2.")
+    p.add_argument("--hpo_epochs", type=int, default=200,
+                   help="Per-trial training epochs (smaller than production "
+                        "to keep the search tractable).")
+    p.add_argument("--data_dir",   default="./data")
+    p.add_argument("--output_dir", default="./hpo_out")
+    p.add_argument("--study_name", default=None,
+                   help="Optuna study name.  Defaults to ``hpo_<approach>`` "
+                        "so multiple approaches do not collide in one "
+                        "--output_dir.")
+    p.add_argument("--seed", type=int, default=2026,
+                   help="Base seed; member k of a trial uses seed + 1000*k.")
+    p.add_argument("--force_cpu", action="store_true")
+    p.add_argument("--dry_run", action="store_true",
+                   help="CI/smoke: shrink training budgets globally via "
+                        "composite_design._dry_run_shrink_training_cfg.")
+    p.add_argument("--no_warm_starts", action="store_true",
+                   help="Disable the WARM_START priors and rely entirely on "
+                        "the random-startup + TPE sampler.")
+    args = p.parse_args()
 
-    if args.dry_hpo:
-        args.n_trials   = min(args.n_trials, 5)
-        args.n_seeds    = 1
-        args.hpo_epochs = 30
+    os.makedirs(args.output_dir, exist_ok=True)
+    log_path = os.path.join(args.output_dir, f"hpo_log_{args.approach}.txt")
+    logger = _make_logger(args.approach, log_path)
 
-    approaches = ["ddns", "soft", "hard"] if args.approach == "all" else [args.approach]
-    for approach in approaches:
-        run_hpo(approach=approach,
-                output_dir=args.output_dir,
-                n_trials=args.n_trials,
-                n_seeds=args.n_seeds,
-                hpo_epochs=args.hpo_epochs,
-                base_seed=args.base_seed,
-                study_name=args.study_name,
-                data_dir=args.data_dir,
-                objective_mode=args.objective,
-                robust_alpha=args.robust_alpha)
+    study_name = args.study_name or f"hpo_{args.approach}"
+    db_path = os.path.join(args.output_dir, f"hpo_study_{args.approach}.db")
+    storage_url = f"sqlite:///{os.path.abspath(db_path)}"
+
+    cd.CFG.force_cpu = bool(args.force_cpu)
+    cd.CFG.dry_run = bool(args.dry_run)
+    cd.refresh_device()
+    cd.set_publication_style()
+
+    logger.info("=" * 80)
+    logger.info(f"HPO SEARCH — approach={args.approach}")
+    logger.info(f"  study_name = {study_name}")
+    logger.info(f"  storage    = {storage_url}")
+    logger.info(f"  n_trials   = {args.n_trials}")
+    logger.info(f"  n_startup  = {args.n_startup_trials}")
+    logger.info(f"  n_seeds    = {args.n_seeds}")
+    logger.info(f"  hpo_epochs = {args.hpo_epochs}")
+    logger.info(f"  seed       = {args.seed}")
+    logger.info("=" * 80)
+
+    df_all = cd.load_data(args.data_dir, logger)
+    train_df, val_df = cd.split_unseen_angle(df_all, cd.CFG.theta_star, logger)
+    scaler_disp, scaler_out, enc, params = cd.create_preprocessors(train_df, logger)
+
+    sampler = TPESampler(
+        n_startup_trials=int(args.n_startup_trials),
+        multivariate=True,
+        group=True,
+        seed=int(args.seed),
+    )
+    study = optuna.create_study(
+        study_name=study_name,
+        storage=storage_url,
+        direction="maximize",
+        sampler=sampler,
+        load_if_exists=True,
+    )
+    study.set_user_attr("approach", args.approach)
+    logger.info(f"  Resumed/created study with {len(study.trials)} prior trial(s).")
+
+    if not args.no_warm_starts:
+        _enqueue_warm_starts(study, args.approach, logger)
+
+    objective = make_objective(
+        args.approach,
+        train_df, val_df, scaler_disp, scaler_out, enc, params,
+        n_seeds=int(args.n_seeds),
+        hpo_epochs=int(args.hpo_epochs),
+        base_seed=int(args.seed),
+        logger=logger,
+    )
+
+    n_done = sum(
+        1 for t in study.trials
+        if t.state == optuna.trial.TrialState.COMPLETE
+    )
+    n_remaining = max(0, int(args.n_trials) - n_done)
+    logger.info(f"  Completed so far: {n_done}; running {n_remaining} more.")
+
+    if n_remaining > 0:
+        study.optimize(objective, n_trials=n_remaining, show_progress_bar=False)
+
+    best_path = os.path.join(args.output_dir, f"hpo_best_params_{args.approach}.json")
+    hist_path = os.path.join(args.output_dir, f"hpo_history_{args.approach}.csv")
+    _export_best(study, best_path, logger)
+    _export_history(study, hist_path, logger)
+
+    logger.info("=" * 80)
+    logger.info("HPO SEARCH COMPLETE")
+    if study.best_trial:
+        logger.info(f"  best_value = {study.best_value:.6f}")
+        logger.info(f"  best_trial = {study.best_trial.number}")
+    logger.info("=" * 80)
 
 
 if __name__ == "__main__":

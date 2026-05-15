@@ -17,9 +17,9 @@ _MOD_NAME = "composite_design_test"
 def m():
     """Load the main module once per test session.
 
-    v_20 supersedes v_19 — every v_19 helper, training function, and physics
-    loss is carried forward verbatim, so tests written against v_19 internals
-    still pass when run against v_20's namespace.
+     supersedes  — every  helper, training function, and physics
+    loss is carried forward verbatim, so tests written against  internals
+    still pass when run against namespace.
     """
     path = os.path.join(ROOT, "composite_design.py")
     spec = importlib.util.spec_from_file_location(_MOD_NAME, path)

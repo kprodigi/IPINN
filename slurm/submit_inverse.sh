@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==========================================================================
-# submit_inverse_hard_array.sh — Parallel inverse-design surrogate training
+# submit_inverse.sh — Parallel inverse-design surrogate training
 # ==========================================================================
 #
 # Trains the M=20 full-data Hard-PINN inverse-design surrogate in parallel
@@ -11,7 +11,7 @@
 #
 # Pipeline (three SLURM jobs, dependency-chained):
 #   1. Array job        hpo/inverse_member.py (one member per array task)
-#   2. Merge job        hpo/merge_inverse_members.py (gather + Tukey filter)
+#   2. Merge job        hpo/inverse_merge.py (gather + Tukey filter)
 #                       writes inverse_pretrained_hard.pt
 #   3. Analysis job     composite_design.py --mode inverse \
 #                       --use_pretrained_inverse <bundle>
@@ -23,7 +23,7 @@
 # + Jacobian + λ-sensitivity adds up).
 #
 # Usage (from the repo root):
-#   bash slurm/submit_inverse_hard_array.sh
+#   bash slurm/submit_inverse.sh
 #
 # Environment overrides:
 #   M_ENSEMBLE=20                  total ensemble size
@@ -64,7 +64,7 @@ SKIP_ANALYSIS="${SKIP_ANALYSIS:-0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 MEMBER_LAUNCHER="$REPO_ROOT/hpo/inverse_member.py"
-MERGE_LAUNCHER="$REPO_ROOT/hpo/merge_inverse_members.py"
+MERGE_LAUNCHER="$REPO_ROOT/hpo/inverse_merge.py"
 ANALYSIS_LAUNCHER="$REPO_ROOT/composite_design.py"
 for f in "$MEMBER_LAUNCHER" "$MERGE_LAUNCHER" "$ANALYSIS_LAUNCHER"; do
     if [[ ! -f "$f" ]]; then echo "ERROR: $f not found"; exit 1; fi

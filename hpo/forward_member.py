@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-STAGE 2 — per-member retrain (one ensemble member per SLURM task)
+FORWARD — per-member retrain (one ensemble member per SLURM task)
 ================================================================================
-Train ONE (or a small list) of the M ensemble members for the Stage 2
+Train ONE (or a small list) of the M ensemble members for the Forward
 production retrain, so the M=20 ensemble can be parallelised across GPU
 nodes via a SLURM array job.
 
-Companion to :mod:`hpo.stage2_v16` (which runs the full M=20 sequentially
-on a single GPU).  Combined with :mod:`hpo.merge_stage2_members` (final
+Companion to :mod:`hpo.forward_member` (which runs the full M=20 sequentially
+on a single GPU).  Combined with :mod:`hpo.forward_merge` (final
 aggregation + Tukey-fence filter + ensemble metrics), this lets us cut the
 wall-clock from ~M × per-member to (M / N_gpus) × per-member.
 
 Reproducibility: each member m uses seed = ``seed + m * 1000`` — identical to
 :func:`composite_design.train_ensemble`'s loop.  So member m trained by
-this launcher matches member m trained by ``stage2_v16.py`` bit-for-bit.
+this launcher matches member m trained by ``forward_member.py`` bit-for-bit.
 
 Outputs (per ``--output_dir``):
     parts_<approach>/member_<idx>.pt   per-member partial bundle (state_dict,
@@ -22,12 +22,12 @@ Outputs (per ``--output_dir``):
     parts_<approach>/member_<idx>.log  per-member training log
 
 Usage (one member per SLURM task):
-    python hpo/stage2_member.py --approach hard --member_idx 0 \\
-        --data_dir ./data --output_dir ./results_stage2_v16
+    python hpo/forward_member.py --approach hard --member_idx 0 \\
+        --data_dir ./data --output_dir ./results_forward
 
 Or train a contiguous range of members in one task (e.g. if you have fewer
 GPUs than M):
-    python hpo/stage2_member.py --approach hard --members 0,1 ...
+    python hpo/forward_member.py --approach hard --members 0,1 ...
 ================================================================================
 """
 
@@ -45,7 +45,7 @@ from typing import Dict, List
 import numpy as np
 import torch
 
-# stage2_member.py lives in ``hpo/``; composite_design.py is at the repo root.
+# forward_member.py lives in ``hpo/``; composite_design.py is at the repo root.
 _HPO_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HPO_DIR, os.pardir))
 if _REPO_ROOT not in sys.path:
@@ -56,7 +56,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module=r"matplotlib")
 
 
 def _make_logger(approach: str, member_idx: int, log_path: str) -> logging.Logger:
-    log = logging.getLogger(f"stage2.{approach}.m{member_idx}")
+    log = logging.getLogger(f"forward.{approach}.m{member_idx}")
     log.setLevel(logging.INFO)
     log.handlers = []
     fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
@@ -75,9 +75,9 @@ def _parse_members(spec: str) -> List[int]:
 
 def main():
     p = argparse.ArgumentParser(
-        description="Stage 2 per-member retrain (one approach, one or more "
+        description="Forward per-member retrain (one approach, one or more "
                     "members, unseen-theta=60deg).  Use with "
-                    "submit_stage2_hard_array.sh.")
+                    "submit_forward.sh.")
     p.add_argument("--approach", choices=["ddns", "soft", "hard"], required=True)
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument("--member_idx", type=int,
@@ -87,10 +87,10 @@ def main():
                        help="Comma-separated list of member indices to train "
                             "in this task (e.g. '0,10' for two members).")
     p.add_argument("--data_dir",   default="./data")
-    p.add_argument("--output_dir", default="./results_stage2_v16")
+    p.add_argument("--output_dir", default="./results_forward")
     p.add_argument("--n_ensemble", type=int, default=20,
                    help="Total ensemble size M (used only for seed allocation; "
-                        "must match what merge_stage2_members.py expects).")
+                        "must match what forward_merge.py expects).")
     p.add_argument("--seed",       type=int, default=2026)
     p.add_argument("--force_cpu",  action="store_true")
     p.add_argument("--dry_run",    action="store_true",
@@ -111,7 +111,7 @@ def main():
     parts_dir = os.path.join(args.output_dir, f"parts_{args.approach}")
     os.makedirs(parts_dir, exist_ok=True)
 
-    # Apply CFG overrides (mirrors stage2_v16.py).  n_ensemble is set to the
+    # Apply CFG overrides (mirrors forward_member.py).  n_ensemble is set to the
     # FULL ensemble size so seed_base * 1000 indexing matches the sequential
     # launcher's bit-for-bit.
     cd.CFG.n_ensemble = int(args.n_ensemble)
@@ -131,7 +131,7 @@ def main():
     )
     setup_logger = _make_logger(args.approach, members[0], setup_log_path)
     setup_logger.info("=" * 80)
-    setup_logger.info(f"STAGE 2 per-member retrain — approach={args.approach}")
+    setup_logger.info(f"FORWARD per-member retrain — approach={args.approach}")
     setup_logger.info(f"  Training members: {members}")
     setup_logger.info(f"  M_total={cd.CFG.n_ensemble}  epochs={cfg['epochs']}  "
                       f"arch={cfg['hidden_layers']}  batch={cfg['batch_size']}")
@@ -215,7 +215,7 @@ def main():
         logger.info(f"  Wrote: {part_path}")
 
     setup_logger.info("=" * 80)
-    setup_logger.info("STAGE 2 PER-MEMBER COMPLETE")
+    setup_logger.info("FORWARD PER-MEMBER COMPLETE")
     setup_logger.info("=" * 80)
 
 

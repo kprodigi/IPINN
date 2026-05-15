@@ -26,7 +26,7 @@ The file is organized in nine top-level blocks, in source order:
 | 426–475 | Color and style constants (Wong-equivalent palette, marker map) |
 | 476–576 | Reproducibility (`set_global_seed`, deterministic torch flags) |
 | 577–698 | `Config`/`Params` dataclasses, default knob values |
-| 699–948  | `get_model_config(approach, protocol, w_phys_override)` — per-approach hyperparameter dictionary; the HPO output is patched in here |
+| 699–948 | `get_model_config(approach, protocol, w_phys_override)` — per-approach hyperparameter dictionary; the HPO output is patched in here |
 
 ## Block 2 — Data loading and preprocessing (950 – 1388)
 
@@ -46,21 +46,22 @@ The file is organized in nine top-level blocks, in source order:
 | 1463–1529 | `HardEnergyNet` — single-output energy network; force is `dE/dd` via `torch.autograd.grad` |
 | 1501–1529 | `HardEnergyNet.configure_zero_bc` — slope-subtraction architectural BC (both `E(0)=0` and `F(0)=0`) |
 
-The architectural BC is the v_20 contribution: it replaces v_19's soft `w_bc`
-penalty with an exact subtraction so `w_bc` is no longer needed in the loss.
-Two flavors:
+The architectural-BC contribution is split across the two PINN
+variants. The Soft-PINN keeps the BC in the loss as a paired penalty
+on both `E(0)=0` and `F(0)=0`; the Hard-PINN enforces both BCs
+exactly by construction via slope subtraction (no `w_bc` term in the
+Hard loss). Two flavours:
 
-- **SoftPINNNet** (two-headed `[F, E]`) corrects each output directly at
-  `d=0`:
-  `F_corr(x) = F_net(x) − F_net(x|d=0) + c_{0,F}`,
-  `E_corr(x) = E_net(x) − E_net(x|d=0) + c_{0,E}`.
-- **HardEnergyNet** (single output `E`, with `F = dE/dd`) must pin BOTH the
-  value AND the d-slope at the boundary to recover `F(0)=0`. Slope
-  subtraction does this:
-  `E_corr(x) = E_net(x) − E_net(x|d=0) − (d_s − d_s0)·∂E_net/∂d_s|_{x|d=0}
-    + c_{0,E}`.
-  Cost: one extra inner `autograd.grad` per forward pass plus a second-order
-  graph during training (~2–3× the value-only correction).
+- **SoftPINNNet** (two-headed `[F, E]`) keeps the standard
+  two-output forward pass; the BC is enforced by a paired soft-MSE
+  loss term `w_bc · (E(0)² + F(0)²)` added to the work-energy
+  residual loss.
+- **HardEnergyNet** (single output `E`, with `F = dE/dd`) pins BOTH the
+  value AND the d-slope at the boundary to recover `F(0) = 0` exactly,
+  via the slope-subtraction construction
+  `E_corr(x) = E_net(x) − E_net(x|d=0) − (d_s − d_s0) · ∂E_net/∂d_s|_{x|d=0} + c_{0,E}`.
+  Cost: one extra inner `autograd.grad` per forward pass plus a
+  second-order graph during training (~2–3× the value-only correction).
 
 ## Block 4 — Physics losses (1530 – 1796) ← paper Section 3.5.2
 
@@ -129,16 +130,16 @@ gridspec/styling discipline:
 
 | Function | Lines | Paper figure |
 |----------|-------|--------------|
-| `figv20_01_dataset_overview` | 9525–9622 | Fig. 1 — dataset summary, layup-angle distribution |
-| `figv20_02_forward_parity` | 9623–9681 | Fig. 2 — parity, residuals, R² boxplots across approaches |
-| `figv20_03_unseen_generalization` | 9682–9758 | Fig. 3 — load/energy curves at unseen θ=60° with conformal bands |
-| `figv20_04_physics_calibration` | 9759–9906 | Fig. 4 — calibration / reliability / coverage |
-| `figv20_05_ill_posedness` | 9907–10007 | Fig. 5 — solution landscape, Jacobian, multiplicity |
-| `figv20_06_classifier` | 10008–10092 | Fig. 6 — LC plausibility classifier diagnostics |
-| `figv20_07_inverse_design` | 10093–10271 | Fig. 7 — inverse-design recovered θ vs target |
-| `figv20_08_pareto` | 10272–10349 | Fig. 8 — Pareto front (EA vs IPF) |
-| `figv20_09_pareto_recovery` | 10350–10419 | Fig. 9 — recovery on Pareto-optimal targets |
-| `figv20_10_robustness` | 10420–10510 | Fig. 10 — robustness, ablation, λ-sensitivity |
+| `fig_01_dataset_overview` | 9525–9622 | Fig. 1 — dataset summary, layup-angle distribution |
+| `fig_02_forward_parity` | 9623–9681 | Fig. 2 — parity, residuals, R² boxplots across approaches |
+| `fig_03_unseen_generalization` | 9682–9758 | Fig. 3 — load/energy curves at unseen θ=60° with conformal bands |
+| `fig_04_physics_calibration` | 9759–9906 | Fig. 4 — calibration / reliability / coverage |
+| `fig_05_ill_posedness` | 9907–10007 | Fig. 5 — solution landscape, Jacobian, multiplicity |
+| `fig_06_classifier` | 10008–10092 | Fig. 6 — LC plausibility classifier diagnostics |
+| `fig_07_inverse_design` | 10093–10271 | Fig. 7 — inverse-design recovered θ vs target |
+| `fig_08_pareto` | 10272–10349 | Fig. 8 — Pareto front (EA vs IPF) |
+| `fig_09_pareto_recovery` | 10350–10419 | Fig. 9 — recovery on Pareto-optimal targets |
+| `fig_10_robustness` | 10420–10510 | Fig. 10 — robustness, ablation, λ-sensitivity |
 
 ### Bundle save/load (9447 – 9524)
 
@@ -154,17 +155,17 @@ emit the matching subset.
 
 ### Appendix figures (10511 – 10844)
 
-`figv20_appendix_all` calls 7 single-purpose appendix wrappers (per-approach
+`fig_appendix_all` calls 7 single-purpose appendix wrappers (per-approach
 training curves, conformal histograms, classifier confusion matrices, etc.).
 
 ### Pipeline and CLI (10845 – 11094)
 
 | Function | Lines | Purpose |
 |----------|-------|---------|
-| `run_pipeline_v20` | 10845–10990 | Threaded logger, mode dispatcher (`forward`/`inverse`/`replot`/`all`) |
-| `main_v20` | 10991–11094 | CLI argparse + dry-run handling + mode dispatch |
+| `run_pipeline` | 10845–10990 | Threaded logger, mode dispatcher (`forward`/`inverse`/`replot`/`all`) |
+| `main` | 10991–11094 | CLI argparse + dry-run handling + mode dispatch |
 
-The HPO knobs that `hpo/tune_v20.py` searches are looked up via
+The HPO knobs that `hpo/hpo_search.py` searches are looked up via
 `get_model_config(approach, protocol, w_phys_override)` (block 1, lines
-699–948) — `tune_v20.py` monkey-patches that function per trial via a
+699–948) — `hpo_search.py` monkey-patches that function per trial via a
 `patched_factory`.

@@ -604,7 +604,7 @@ class TestLCHelpers:
         assert m._lc_label_to_binary("lc2") == 1
 
     def test_val_checkpoint_score(self, m):
-        # v_20 reverted to v_17 semantics: load R² only for all approaches.
+        #  reverted to  semantics: load R² only for all approaches.
         # Energy R² is ignored.
         score = m._val_checkpoint_score(0.8, 0.9)
         assert score == pytest.approx(0.8)
@@ -799,10 +799,10 @@ class TestR2Safe:
 
 
 # =====================================================================
-# _val_checkpoint_score — load R² only for all approaches (v_17 semantics)
+# _val_checkpoint_score — load R² only for all approaches ( semantics)
 # =====================================================================
-# v_20 reverted v_19's "0.5*(load+energy) for DDNS/Soft, load only for Hard"
-# back to v_17's uniform "load R² only" rule.  ``r2_energy`` and ``approach``
+#  reverted "0.5*(load+energy) for DDNS/Soft, load only for Hard"
+# back to uniform "load R² only" rule.  ``r2_energy`` and ``approach``
 # are kept in the signature for call-site compatibility but are unused.
 # These tests pin the new behaviour.
 class TestValCheckpointScore:

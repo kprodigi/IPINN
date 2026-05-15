@@ -183,15 +183,20 @@ IPINN/
     LC1.xlsx, LC2.xlsx
     README.md                 # dataset description and column schema
 
-  hpo/                        # Hyperparameter optimization (Optuna TPE)
-    tune_v20.py               # entry point: --approach {ddns,soft,hard}
-    README.md                 # HPO workflow and 4-stage pipeline
+  hpo/                        # Hyperparameter optimisation + per-member training
+    hpo_search.py             # Optuna TPE entry point: --approach {ddns,soft,hard}
+    forward_member.py         # per-member forward ensemble trainer (1 SLURM task / member)
+    forward_merge.py          # forward-ensemble aggregator (Tukey filter + bundle)
+    inverse_member.py         # per-member inverse-design surrogate trainer
+    inverse_merge.py          # inverse-design pretrained-surrogate aggregator
+    compare_methods.py        # cross-approach physics-correctness comparison
+    README.md                 # HPO + per-member training workflow
 
-  slurm/                      # HPC submission scripts (SDSU/SDSMT cluster)
+  slurm/                      # HPC submission scripts
     submit_pipeline.sh        # full pipeline: 11-job dependency chain
-    submit_hpo_ddns.sh        # Optuna HPO: DDNS
-    submit_hpo_soft.sh        # Optuna HPO: Soft-PINN
-    submit_hpo_hard.sh        # Optuna HPO: Hard-PINN
+    submit_hpo.sh             # Optuna HPO launcher, APPROACH={ddns,soft,hard}
+    submit_forward.sh         # SLURM array launcher for forward per-member training
+    submit_inverse.sh         # SLURM array launcher for inverse per-member + analysis
     hpc_run_stage.py          # per-stage CLI used by submit_pipeline.sh
     README.md                 # HPC submission guide
 

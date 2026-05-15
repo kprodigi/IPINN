@@ -46,13 +46,13 @@ test = ["pytest>=7.4"]
 dev  = ["pytest>=7.4", "scikit-optimize>=0.10.1", "optuna>=3.4,<5"]
 
 [project.scripts]
-ipinn = "composite_design:main_v20"
+ipinn = "composite_design:main"
 
 [project.urls]
 Repository = "https://github.com/kprodigi/IPINN"
 
 # Only the main pipeline module is installed as an importable Python module.
-# The HPO entry point (``hpo/tune_v20.py``) and HPC stage dispatcher
+# The HPO entry point (``hpo/hpo_search.py``) and HPC stage dispatcher
 # (``slurm/hpc_run_stage.py``) are standalone scripts intentionally kept out
 # of the install surface — they are invoked by path from SLURM scripts and
 # do their own ``sys.path`` resolution to import ``composite_design``.

@@ -3,7 +3,7 @@
 ================================================================================
 COMPARE SOFT-PINN vs HARD-PINN — physics-correctness diagnostics
 ================================================================================
-Loads the M=20 ensemble bundles produced by stage2_v16.py for Soft and Hard
+Loads the M=20 ensemble bundles produced by forward_member.py for Soft and Hard
 and computes the metrics that demonstrate the architectural-BC + autograd
 contribution of Hard-PINN beyond R² alone.
 
@@ -34,9 +34,9 @@ guarantees that Soft-PINN can only approximate:
 
 Usage:
     python hpo/compare_soft_vs_hard.py \\
-        --soft_bundle  results_stage2_v16/stage2_soft_bundle.pt \\
-        --hard_bundle  results_stage2_v16/stage2_hard_bundle.pt \\
-        --output_dir   results_stage2_v16/
+        --soft_bundle  results_forward/stage2_soft_bundle.pt \\
+        --hard_bundle  results_forward/stage2_hard_bundle.pt \\
+        --output_dir   results_forward/
 
 Writes:
     soft_vs_hard_comparison.json   per-metric numbers, JSON
@@ -240,7 +240,7 @@ def main():
     p = argparse.ArgumentParser(description="Soft-PINN vs Hard-PINN physics-correctness comparison.")
     p.add_argument("--soft_bundle", required=True, help="Path to stage2_soft_bundle.pt")
     p.add_argument("--hard_bundle", required=True, help="Path to stage2_hard_bundle.pt")
-    p.add_argument("--output_dir",  default="./results_stage2_v16")
+    p.add_argument("--output_dir",  default="./results_forward")
     p.add_argument("--force_cpu",   action="store_true")
     args = p.parse_args()
 

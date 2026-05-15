@@ -29,7 +29,7 @@ Failure handling: members whose part file is missing or that wrote a
 the surviving members provided at least one survived.
 
 Usage:
-    python hpo/merge_inverse_members.py \\
+    python hpo/inverse_merge.py \\
         --data_dir ./data --output_dir ./results_paper --n_ensemble 20
 ================================================================================
 """

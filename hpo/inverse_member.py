@@ -8,7 +8,7 @@ that ``composite_design.train_full_data_hard_pinn`` would otherwise
 produce sequentially.  Parallelise the inverse-design surrogate training
 across GPU nodes via a SLURM array job.
 
-Companion to :mod:`hpo.merge_inverse_members` (the aggregator).  Together
+Companion to :mod:`hpo.inverse_merge` (the aggregator).  Together
 they replace the sequential M=20 loop inside ``train_full_data_hard_pinn``
 with a SLURM array of M independent tasks + one merge job.
 
@@ -100,7 +100,7 @@ def main():
     p = argparse.ArgumentParser(
         description="Inverse-design per-member retrain of the full-data "
                     "Hard-PINN surrogate.  Use with "
-                    "submit_inverse_hard_array.sh.")
+                    "submit_inverse.sh.")
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument("--member_idx", type=int,
                        help="Single member index (0-based).")
@@ -110,7 +110,7 @@ def main():
     p.add_argument("--output_dir", default="./results_paper")
     p.add_argument("--n_ensemble", type=int, default=20,
                    help="Total ensemble size M (used only for seed allocation; "
-                        "must match what merge_inverse_members.py expects).")
+                        "must match what inverse_merge.py expects).")
     p.add_argument("--seed",       type=int, default=2026)
     p.add_argument("--force_cpu",  action="store_true")
     p.add_argument("--dry_run",    action="store_true",

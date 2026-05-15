@@ -1,19 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-STAGE 2 — merge per-member partial bundles into the final ensemble
+FORWARD — merge per-member partial bundles into the final ensemble
 ================================================================================
-Companion to :mod:`hpo.stage2_member` (the per-member training launcher).
+Companion to :mod:`hpo.forward_member` (the per-member training launcher).
 Collects all ``parts_<approach>/member_*.pt`` files produced by parallel
-SLURM array tasks and emits the SAME outputs as :mod:`hpo.stage2_v16`:
+SLURM array tasks and emits the SAME outputs as :mod:`hpo.forward_member`:
 
-    stage2_<approach>_results.json   per-member R², mean ± std, ensemble metrics
-    stage2_<approach>_log.txt        merge log
-    stage2_<approach>_bundle.pt      trained models + scalers (torch.save)
+    forward_<approach>_results.json   per-member R², mean ± std, ensemble metrics
+    forward_<approach>_log.txt        merge log
+    forward_<approach>_bundle.pt      trained models + scalers (torch.save)
 
 The merge applies the same Tukey-fence convergence filter on training-set
 R² as :func:`composite_design.train_ensemble`, so the merged outputs
-match the sequential ``stage2_v16.py`` outputs (modulo non-determinism from
+match the sequential ``forward_member.py`` outputs (modulo non-determinism from
 CUDA kernels across different GPUs — bit-for-bit equality is not
 guaranteed when members are trained on different hardware).
 
@@ -23,8 +23,8 @@ reported and skipped; the merge proceeds with the surviving members
 provided at least one survived.
 
 Usage:
-    python hpo/merge_stage2_members.py --approach hard \\
-        --data_dir ./data --output_dir ./results_stage2_v16 --n_ensemble 20
+    python hpo/forward_merge.py --approach hard \\
+        --data_dir ./data --output_dir ./results_forward --n_ensemble 20
 ================================================================================
 """
 
@@ -51,7 +51,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module=r"matplotlib")
 
 
 def _make_logger(approach: str, log_path: str) -> logging.Logger:
-    log = logging.getLogger(f"stage2.merge.{approach}")
+    log = logging.getLogger(f"forward.merge.{approach}")
     log.setLevel(logging.INFO)
     log.handlers = []
     fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
@@ -94,10 +94,10 @@ def _build_model(approach: str, cfg: Dict, in_d: int) -> torch.nn.Module:
 
 def main():
     p = argparse.ArgumentParser(
-        description="Stage 2 merge step (gather per-member partial bundles).")
+        description="Forward merge step (gather per-member partial bundles).")
     p.add_argument("--approach", choices=["ddns", "soft", "hard"], required=True)
     p.add_argument("--data_dir",   default="./data")
-    p.add_argument("--output_dir", default="./results_stage2_v16")
+    p.add_argument("--output_dir", default="./results_forward")
     p.add_argument("--n_ensemble", type=int, default=20,
                    help="Expected ensemble size M.  Members with missing or "
                         "failed part files are tolerated; this just controls "
@@ -109,7 +109,7 @@ def main():
     args = p.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
-    log_path = os.path.join(args.output_dir, f"stage2_{args.approach}_log.txt")
+    log_path = os.path.join(args.output_dir, f"forward_{args.approach}_log.txt")
     logger = _make_logger(args.approach, log_path)
 
     cd.CFG.n_ensemble = int(args.n_ensemble)
@@ -125,13 +125,13 @@ def main():
     if not os.path.isdir(parts_dir):
         raise FileNotFoundError(
             f"Per-member parts directory not found: {parts_dir}.  "
-            f"Did stage2_member.py run?",
+            f"Did forward_member.py run?",
         )
 
     cfg = cd.get_model_config(args.approach, "unseen")
 
     logger.info("=" * 80)
-    logger.info(f"STAGE 2 MERGE — approach={args.approach}")
+    logger.info(f"FORWARD MERGE — approach={args.approach}")
     logger.info(f"  Expected M={args.n_ensemble}  arch={cfg['hidden_layers']}")
     logger.info(f"  parts_dir={parts_dir}")
     logger.info(f"  output_dir={args.output_dir}")
@@ -251,7 +251,7 @@ def main():
         models, args.approach, val_df, scaler_disp, scaler_out, enc, params,
     )
 
-    # Per-member R² stats (over surviving members, same convention as stage2_v16.py).
+    # Per-member R² stats (over surviving members, same convention as forward_member.py).
     member_load_r2   = [float(p["val_metrics"]["load_r2"])   for p in parts]
     member_energy_r2 = [float(p["val_metrics"].get("energy_r2", float("nan"))) for p in parts]
     mean_load = float(np.mean(member_load_r2))
@@ -264,7 +264,7 @@ def main():
     total_wall = float(np.sum([p["training_time"] for p in parts]))  # sum across parallel tasks
 
     logger.info("\n" + "=" * 80)
-    logger.info(f"STAGE 2 MERGE RESULTS — {args.approach.upper()}")
+    logger.info(f"FORWARD MERGE RESULTS — {args.approach.upper()}")
     logger.info("=" * 80)
     logger.info(f"  Members surviving filter: M_total={M_total}  M_eff={len(models)}")
     logger.info(f"  Per-member load R²:")
@@ -280,7 +280,7 @@ def main():
     logger.info(f"  Avg per-member training:        {avg_training_time:.0f} s")
 
     # Persist results JSON
-    out_json = os.path.join(args.output_dir, f"stage2_{args.approach}_results.json")
+    out_json = os.path.join(args.output_dir, f"forward_{args.approach}_results.json")
     payload = _json_safe({
         "approach":             args.approach,
         "protocol":             "unseen",
@@ -309,7 +309,7 @@ def main():
         fh.write("\n")
     logger.info(f"\n  Wrote: {out_json}")
 
-    # Persist final bundle (same shape as stage2_v16.py writes).
+    # Persist final bundle (same shape as forward_member.py writes).
     bundle = {
         "approach":         args.approach,
         "cfg":              cfg,
@@ -325,11 +325,11 @@ def main():
         "member_metrics":   [p["val_metrics"] for p in parts],
         "ensemble_metrics": ens_metrics,
     }
-    out_pt = os.path.join(args.output_dir, f"stage2_{args.approach}_bundle.pt")
+    out_pt = os.path.join(args.output_dir, f"forward_{args.approach}_bundle.pt")
     torch.save(bundle, out_pt)
     logger.info(f"  Wrote: {out_pt}")
     logger.info("\n" + "=" * 80)
-    logger.info("STAGE 2 MERGE COMPLETE")
+    logger.info("FORWARD MERGE COMPLETE")
     logger.info("=" * 80)
 
 
