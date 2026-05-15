@@ -108,12 +108,46 @@ Each approach writes to `--output_dir` (default `./hpo_out`):
 
 ```
 <output_dir>/
-    hpo_study_<approach>.db          per-approach SQLite study (resumable)
-    hpo_best_params_<approach>.json  copy-pasteable best parameters
-    hpo_history_<approach>.csv       every trial's params + R² + state
-    hpo_log_<approach>.txt           full Optuna log
-    slurm_logs/                      per-task stdout/stderr
+    hpo_study_<approach>.db                  per-approach SQLite study (source of truth)
+    hpo_best_params_<approach>.json          best params so far (rewritten atomically after every completed trial)
+    hpo_history_<approach>.csv               every trial (params + R² + state + datetimes + duration)
+    hpo_run_state_<approach>.json            compact progress snapshot (completed/failed/running counts)
+    hpo_best_snapshots_<approach>/           audit trail of how the best evolved
+        best_at_trial_NNNN.json              one snapshot per new best
+    hpo_log_<approach>.txt                   full Optuna log
+    slurm_logs/                              per-task stdout/stderr
 ```
+
+## Crash / preemption safety
+
+Three layers of resilience let you cancel, resubmit, or lose a worker mid-trial
+without losing search progress:
+
+1. **Per-trial atomic checkpoints.** After every trial completes,
+   `hpo_best_params_<approach>.json`, `hpo_history_<approach>.csv`, and
+   `hpo_run_state_<approach>.json` are rewritten atomically (write to
+   `.tmp` then `os.replace`). A killed write leaves either the old or new
+   file, never a half-written one. The best parameters are therefore
+   always inspectable on disk, current as of the last completed trial.
+
+2. **Heartbeat-based trial revival.** Optuna's `RDBStorage` is configured
+   with `heartbeat_interval=300` s and `grace_period=900` s. Workers ping
+   the SQLite study every 5 minutes; if a worker dies and its trial's
+   heartbeat is older than 15 minutes, Optuna marks the trial `FAILED`
+   and `RetryFailedTrialCallback(max_retry=2)` re-enqueues it so the
+   search picks up exactly where it left off.
+
+3. **Resume-from-DB.** On startup the script counts the `COMPLETE`
+   trials in the SQLite DB and runs only `n_trials − n_done` more.
+   Resubmitting the same SLURM command after a job aborts is enough to
+   continue the search. The first action of the resumed run is to
+   refresh the on-disk JSONs from the current DB state, so monitoring
+   tools see up-to-date values even before any new trial completes.
+
+Additionally, `study.optimize(catch=(...))` keeps the worker alive
+through `RuntimeError`/`ValueError`/`KeyError`/`IndexError`/`MemoryError`
+in any single trial: that trial is marked `FAILED` and TPE continues
+with the next.
 
 ## Objective
 

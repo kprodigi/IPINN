@@ -65,11 +65,43 @@ Usage
 
 Outputs (per ``--output_dir``)
 ------------------------------
-    hpo_study_<approach>.db          SQLite study (resumable, per-approach)
-    hpo_best_params_<approach>.json  Best params, copy-pasteable into the
-                                     ``get_model_config`` hard-coded cfg
-    hpo_history_<approach>.csv       Every trial's params + R^2 + status
-    hpo_log_<approach>.txt           Full Optuna log
+    hpo_study_<approach>.db                 SQLite study (resumable; source of truth)
+    hpo_best_params_<approach>.json         Best params so far — rewritten
+                                            atomically after every completed
+                                            trial; copy-pasteable into the
+                                            ``get_model_config`` cfg
+    hpo_history_<approach>.csv              Every trial (params, R^2, state,
+                                            start/complete datetimes,
+                                            duration); also rewritten after
+                                            every completed trial
+    hpo_run_state_<approach>.json           Compact progress snapshot
+                                            (completed/failed/running counts,
+                                            current best, last trial)
+    hpo_best_snapshots_<approach>/          Audit trail: a JSON copy of the
+        best_at_trial_NNNN.json             best-params dict at the moment
+                                            each new best was set
+    hpo_log_<approach>.txt                  Full Optuna log
+
+Crash / preemption safety
+-------------------------
+Three layers of resilience:
+
+1. **Per-trial atomic checkpoints.** After every trial completes, the
+   best-params JSON, full history CSV, and run-state JSON are rewritten
+   atomically (``write to tmp + os.replace``).  A worker killed mid-write
+   either leaves the OLD file or the NEW file — never a half-written one.
+
+2. **Heartbeat-based trial revival.** Workers ping the SQLite study every
+   ``heartbeat_interval`` seconds (default 300 s).  If a worker dies and
+   its trial's heartbeat is older than ``grace_period`` (default 900 s),
+   Optuna marks the trial FAILED and ``RetryFailedTrialCallback`` re-enqueues
+   it (up to 2 retries) so the search resumes seamlessly.
+
+3. **Resume-from-DB.** On startup the script counts completed trials in
+   the SQLite DB and runs only ``n_trials - n_done`` more.  Resubmitting
+   the same SLURM command after a job aborts is sufficient to continue
+   the search.  The first checkpoint write inside the resumed run also
+   refreshes the on-disk JSONs to reflect the current best.
 ================================================================================
 """
 
@@ -91,6 +123,7 @@ import numpy as np
 try:
     import optuna
     from optuna.samplers import TPESampler
+    from optuna.storages import RDBStorage, RetryFailedTrialCallback
 except ImportError:  # pragma: no cover
     sys.stderr.write(
         "Optuna is required for HPO.  Install: pip install 'optuna>=3.4,<5'\n"
@@ -473,57 +506,227 @@ def _enqueue_warm_starts(
             )
 
 
-def _export_best(
-    study: "optuna.Study", out_path: str, logger: logging.Logger,
-) -> None:
-    """Write the best trial's params to a JSON file in a copy-pasteable form."""
-    if not study.best_trial:
-        logger.warning("  No completed trials yet; skipping best-params export.")
-        return
-    best = study.best_trial
-    out: Dict = {
-        "approach":      study.user_attrs.get("approach"),
+# =============================================================================
+# CHECKPOINTING — atomic writes after every completed trial
+#
+# Optuna's SQLite DB is the source of truth (every trial is committed on
+# completion).  The plain-text checkpoints below mirror that DB on disk so
+# the best parameters and full trial history are inspectable / pasteable
+# without opening the DB, AND so they survive any preemption.
+#
+# Each writer writes to ``<path>.tmp`` then ``os.replace``s the temp file
+# over the final path.  ``os.replace`` is atomic on POSIX and Windows, so
+# a worker killed mid-write either sees the OLD file or the NEW file —
+# never a half-written one.
+# =============================================================================
+def _atomic_write_text(path: str, content: str) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="") as fh:
+        fh.write(content)
+    os.replace(tmp, path)
+
+
+def _safe_best_trial(study: "optuna.Study"):
+    """Return ``study.best_trial`` or ``None`` if no trial has completed.
+
+    Optuna's ``best_trial`` property raises ``ValueError("Record does not
+    exist.")`` (not returns ``None``) when the study has zero COMPLETE
+    trials.  Wrap the access so callers can do a simple ``if best:``.
+    """
+    try:
+        return study.best_trial
+    except ValueError:
+        return None
+
+
+def _best_payload(study: "optuna.Study") -> Optional[Dict]:
+    """Build the best-trial JSON payload.  Returns None if no completed trial."""
+    best = _safe_best_trial(study)
+    if best is None:
+        return None
+    approach = study.user_attrs.get("approach")
+    n_completed = sum(
+        1 for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
+    )
+    n_failed = sum(
+        1 for t in study.trials if t.state == optuna.trial.TrialState.FAIL
+    )
+    n_running = sum(
+        1 for t in study.trials if t.state == optuna.trial.TrialState.RUNNING
+    )
+    payload: Dict = {
+        "approach":      approach,
         "best_value":    float(best.value) if best.value is not None else None,
         "best_trial":    int(best.number),
         "best_params":   {k: v for k, v in best.params.items()},
         "n_trials":      len(study.trials),
-        "n_completed":   sum(
-            1 for t in study.trials
-            if t.state == optuna.trial.TrialState.COMPLETE
-        ),
+        "n_completed":   n_completed,
+        "n_failed":      n_failed,
+        "n_running":     n_running,
+        "last_updated":  time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    if "hidden_layers" in best.params:
+    if "hidden_layers" in best.params and approach in HL_BY_APPROACH:
         hl_key = best.params["hidden_layers"]
-        hl_map = HL_BY_APPROACH[study.user_attrs.get("approach", "ddns")]
-        out["best_params_resolved"] = dict(best.params)
-        out["best_params_resolved"]["hidden_layers"] = list(hl_map[hl_key])
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(out, fh, indent=2)
-        fh.write("\n")
-    logger.info(f"  Wrote: {out_path}")
+        hl_map = HL_BY_APPROACH[approach]
+        if hl_key in hl_map:
+            payload["best_params_resolved"] = dict(best.params)
+            payload["best_params_resolved"]["hidden_layers"] = list(hl_map[hl_key])
+    return payload
 
 
-def _export_history(
-    study: "optuna.Study", out_path: str, logger: logging.Logger,
-) -> None:
-    """Dump every trial's (number, value, state, params) to CSV."""
+def _history_csv_content(study: "optuna.Study") -> str:
+    """Serialise every trial (number, value, state, params, datetimes) to CSV."""
+    import io
     all_param_keys: set = set()
     for t in study.trials:
         all_param_keys.update(t.params.keys())
     param_keys = sorted(all_param_keys)
-    headers = ["trial", "value", "state"] + param_keys
-    with open(out_path, "w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=headers)
-        writer.writeheader()
-        for t in study.trials:
-            row = {
-                "trial": t.number,
-                "value": "" if t.value is None else f"{t.value:.6f}",
-                "state": str(t.state).split(".")[-1],
-            }
-            for k in param_keys:
-                row[k] = t.params.get(k, "")
-            writer.writerow(row)
+    headers = (
+        ["trial", "value", "state", "datetime_start", "datetime_complete",
+         "duration_sec"]
+        + param_keys
+    )
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=headers)
+    writer.writeheader()
+    for t in study.trials:
+        dur = ""
+        if t.datetime_start and t.datetime_complete:
+            dur = f"{(t.datetime_complete - t.datetime_start).total_seconds():.1f}"
+        row = {
+            "trial": t.number,
+            "value": "" if t.value is None else f"{t.value:.6f}",
+            "state": str(t.state).split(".")[-1],
+            "datetime_start":
+                t.datetime_start.isoformat(timespec="seconds") if t.datetime_start else "",
+            "datetime_complete":
+                t.datetime_complete.isoformat(timespec="seconds") if t.datetime_complete else "",
+            "duration_sec": dur,
+        }
+        for k in param_keys:
+            row[k] = t.params.get(k, "")
+        writer.writerow(row)
+    return buf.getvalue()
+
+
+def _run_state_payload(study: "optuna.Study", last_trial: "optuna.trial.FrozenTrial") -> Dict:
+    """Compact JSON describing the current state of the search.  Useful for
+    quick at-a-glance progress checks without parsing the SQLite DB."""
+    n_completed = sum(
+        1 for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
+    )
+    n_failed = sum(
+        1 for t in study.trials if t.state == optuna.trial.TrialState.FAIL
+    )
+    n_running = sum(
+        1 for t in study.trials if t.state == optuna.trial.TrialState.RUNNING
+    )
+    n_pruned = sum(
+        1 for t in study.trials if t.state == optuna.trial.TrialState.PRUNED
+    )
+    last_value = (
+        float(last_trial.value) if last_trial.value is not None else None
+    )
+    best = _safe_best_trial(study)
+    return {
+        "approach":             study.user_attrs.get("approach"),
+        "n_trials_total":       len(study.trials),
+        "n_completed":          n_completed,
+        "n_failed":             n_failed,
+        "n_running":            n_running,
+        "n_pruned":             n_pruned,
+        "best_value":           float(best.value) if best is not None and best.value is not None else None,
+        "best_trial_number":    int(best.number) if best is not None else None,
+        "last_trial_number":    int(last_trial.number),
+        "last_trial_state":     str(last_trial.state).split(".")[-1],
+        "last_trial_value":     last_value,
+        "last_updated":         time.strftime("%Y-%m-%d %H:%M:%S %Z").strip(),
+    }
+
+
+def make_checkpoint_callback(
+    approach: str, output_dir: str, logger: logging.Logger,
+):
+    """Return an ``study.optimize(callbacks=[...])`` callback that runs after
+    every trial and atomically rewrites:
+
+      hpo_best_params_<approach>.json   — best params so far (resumable)
+      hpo_history_<approach>.csv        — every trial's params + R^2 + state
+      hpo_run_state_<approach>.json     — compact progress snapshot
+
+    A best-params snapshot is also written to
+    ``hpo_best_params_<approach>.json.<trial>.snap`` whenever a NEW best is
+    found, so a complete audit trail of how the best evolved is preserved.
+    """
+    best_path     = os.path.join(output_dir, f"hpo_best_params_{approach}.json")
+    history_path  = os.path.join(output_dir, f"hpo_history_{approach}.csv")
+    state_path    = os.path.join(output_dir, f"hpo_run_state_{approach}.json")
+    snap_dir      = os.path.join(output_dir, f"hpo_best_snapshots_{approach}")
+    os.makedirs(snap_dir, exist_ok=True)
+
+    # Track the best-value-so-far across callback invocations so we can
+    # detect "new best" without re-reading the file.
+    state = {"best_value_seen": float("-inf")}
+
+    def _callback(study: "optuna.Study", trial: "optuna.trial.FrozenTrial") -> None:
+        try:
+            # 1) Best params JSON
+            payload = _best_payload(study)
+            if payload is not None:
+                _atomic_write_text(best_path, json.dumps(payload, indent=2) + "\n")
+                # If this trial set a new best, also drop a numbered snapshot
+                # so we have an audit trail.
+                best_value = payload.get("best_value")
+                if best_value is not None and best_value > state["best_value_seen"]:
+                    state["best_value_seen"] = best_value
+                    snap_path = os.path.join(
+                        snap_dir,
+                        f"best_at_trial_{trial.number:04d}.json",
+                    )
+                    _atomic_write_text(snap_path, json.dumps(payload, indent=2) + "\n")
+            # 2) Full trial history CSV
+            _atomic_write_text(history_path, _history_csv_content(study))
+            # 3) Compact run-state JSON
+            _atomic_write_text(
+                state_path,
+                json.dumps(_run_state_payload(study, trial), indent=2) + "\n",
+            )
+            # 4) Concise log line so the user can monitor progress
+            best_for_log = _safe_best_trial(study)
+            best_str = (
+                f"{best_for_log.value:.4f}"
+                if best_for_log is not None and best_for_log.value is not None
+                else "n/a"
+            )
+            logger.info(
+                f"  [checkpoint] trial {trial.number} "
+                f"state={str(trial.state).split('.')[-1]} "
+                f"value={'n/a' if trial.value is None else f'{trial.value:.4f}'} "
+                f"| best_so_far={best_str}"
+            )
+        except Exception as exc:  # pragma: no cover
+            # Never let a checkpointing failure abort the study; the SQLite
+            # DB is the source of truth and will still hold the trial.
+            logger.warning(
+                f"  [checkpoint] write failed for trial {trial.number}: "
+                f"{type(exc).__name__}: {exc}  (continuing; SQLite is intact)",
+            )
+
+    return _callback
+
+
+# Backward-compatible export wrappers, used at the very end of ``main()``.
+def _export_best(study, out_path, logger):
+    payload = _best_payload(study)
+    if payload is None:
+        logger.warning("  No completed trials; skipping best-params export.")
+        return
+    _atomic_write_text(out_path, json.dumps(payload, indent=2) + "\n")
+    logger.info(f"  Wrote: {out_path}")
+
+
+def _export_history(study, out_path, logger):
+    _atomic_write_text(out_path, _history_csv_content(study))
     logger.info(f"  Wrote: {out_path}")
 
 
@@ -599,9 +802,26 @@ def main():
         group=True,
         seed=int(args.seed),
     )
+    # RDBStorage with a heartbeat: every running worker pings the SQLite
+    # study every ``heartbeat_interval`` seconds.  If a worker dies (SLURM
+    # preemption, OOM, hardware fault) and its trial's heartbeat is older
+    # than ``grace_period``, Optuna marks that trial FAILED and the
+    # ``RetryFailedTrialCallback`` re-enqueues it (up to ``max_retry``
+    # times) so the search resumes seamlessly across worker restarts.
+    #
+    # heartbeat_interval=300s and grace_period=900s give Hard-PINN trials
+    # (~3 h each at hpo_epochs=250) plenty of margin: a healthy worker
+    # writes 36 heartbeats per trial; a stalled worker is detected in
+    # under 15 minutes.
+    storage = RDBStorage(
+        url=storage_url,
+        heartbeat_interval=300,
+        grace_period=900,
+        failed_trial_callback=RetryFailedTrialCallback(max_retry=2),
+    )
     study = optuna.create_study(
         study_name=study_name,
-        storage=storage_url,
+        storage=storage,
         direction="maximize",
         sampler=sampler,
         load_if_exists=True,
@@ -628,9 +848,41 @@ def main():
     n_remaining = max(0, int(args.n_trials) - n_done)
     logger.info(f"  Completed so far: {n_done}; running {n_remaining} more.")
 
-    if n_remaining > 0:
-        study.optimize(objective, n_trials=n_remaining, show_progress_bar=False)
+    # If trials already exist in the DB (e.g. resuming after preemption),
+    # write an immediate checkpoint snapshot so the on-disk JSONs reflect
+    # the current state even before any new trial completes in this run.
+    if _safe_best_trial(study) is not None:
+        try:
+            payload = _best_payload(study)
+            _atomic_write_text(
+                os.path.join(args.output_dir, f"hpo_best_params_{args.approach}.json"),
+                json.dumps(payload, indent=2) + "\n",
+            )
+            _atomic_write_text(
+                os.path.join(args.output_dir, f"hpo_history_{args.approach}.csv"),
+                _history_csv_content(study),
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"  initial checkpoint write failed: {exc}")
 
+    checkpoint_cb = make_checkpoint_callback(args.approach, args.output_dir, logger)
+
+    if n_remaining > 0:
+        # ``catch`` keeps the worker alive if a single trial errors out —
+        # the offending trial is marked FAILED in the DB and TPE continues
+        # with the next.  Without this, a single OOM or NaN-grad explosion
+        # would kill the whole worker, leaving 9 / 10 GPUs running and 1
+        # idle.
+        study.optimize(
+            objective,
+            n_trials=n_remaining,
+            callbacks=[checkpoint_cb],
+            catch=(RuntimeError, ValueError, KeyError, IndexError, MemoryError),
+            show_progress_bar=False,
+        )
+
+    # Final exports (same content as the per-trial checkpoints; safe to
+    # rewrite at the end as a sanity guarantee).
     best_path = os.path.join(args.output_dir, f"hpo_best_params_{args.approach}.json")
     hist_path = os.path.join(args.output_dir, f"hpo_history_{args.approach}.csv")
     _export_best(study, best_path, logger)
@@ -638,9 +890,10 @@ def main():
 
     logger.info("=" * 80)
     logger.info("HPO SEARCH COMPLETE")
-    if study.best_trial:
-        logger.info(f"  best_value = {study.best_value:.6f}")
-        logger.info(f"  best_trial = {study.best_trial.number}")
+    best_final = _safe_best_trial(study)
+    if best_final is not None:
+        logger.info(f"  best_value = {best_final.value:.6f}")
+        logger.info(f"  best_trial = {best_final.number}")
     logger.info("=" * 80)
 
 
