@@ -411,19 +411,43 @@ def _train_and_score_member(
 
 def make_objective(
     approach: str,
-    df_tr,
-    df_val,
-    scaler_disp,
-    scaler_out,
-    enc,
-    params,
+    fold_data: List[Dict],
     n_seeds: int,
     hpo_epochs: int,
     base_seed: int,
     logger: logging.Logger,
 ):
-    """Build the Optuna objective callable for ``approach``."""
+    """Build the Optuna objective callable for ``approach``.
+
+    ``fold_data`` is a list of dicts, one per leave-one-angle-out fold:
+
+        {
+          "theta_holdout": float,        # the held-out angle in degrees
+          "df_tr":         pd.DataFrame, # training set (excludes theta_holdout)
+          "df_val":        pd.DataFrame, # validation set (only theta_holdout)
+          "scaler_disp":   StandardScaler,
+          "scaler_out":    StandardScaler,
+          "enc":           OneHotEncoder,
+          "params":        ScalingParams,
+        }
+
+    The objective optimised by Optuna is the **mean val R^2_load across
+    all (fold, seed) combinations**.  When ``len(fold_data) == 1`` the
+    objective is the single-angle val R^2_load (current paper protocol).
+    When len > 1, the objective is the LOAO-mean.
+
+    Per-fold and per-seed metrics are persisted on each trial via
+    ``trial.set_user_attr`` so the history CSV / best-params JSON carry
+    the full breakdown.
+    """
     suggester = SUGGESTERS[approach]
+    n_folds = len(fold_data)
+    fold_thetas = [f["theta_holdout"] for f in fold_data]
+    logger.info(
+        f"  Objective: mean val R^2_load across {n_folds} fold(s) × "
+        f"{n_seeds} seed(s) = {n_folds * n_seeds} trainings per trial; "
+        f"held-out angles: {fold_thetas}"
+    )
 
     def objective(trial: "optuna.Trial") -> float:
         trial_params = suggester(trial)
@@ -431,43 +455,50 @@ def make_objective(
         trial_params.setdefault("eval_every", max(1, hpo_epochs // 8))
         cfg = _build_trial_cfg(approach, trial_params)
 
-        # Per-seed metrics; we average across seeds for the trial summary.
-        per_seed: List[Dict[str, float]] = []
+        # Flat list of every (fold, seed) result.
+        all_results: List[Dict[str, float]] = []
         t_trial = time.time()
-        for k in range(n_seeds):
-            # Use a prime stride (17) shifted by one stride from the base
-            # so HPO trial seeds never coincide with any production-ensemble
-            # member seed.  Forward production uses ``base + 1000 * m``;
-            # inverse production uses ``base + 100 * m``; the prime 17 is
-            # coprime with both 1000 and 100, and the ``+ 17`` shift ensures
-            # ``k = 0`` is also offset from ``base``.  Without this offset,
-            # HPO trials at default ``--seed 2026`` would train on the
-            # identical RNG state as forward member 0 / 1 / 2 ..., biasing
-            # the HPO objective toward those specific trajectories.
-            seed_k = base_seed + 17 * (k + 1)
-            seed_metrics = _train_and_score_member(
-                approach, cfg, seed_k,
-                df_tr, df_val, scaler_disp, scaler_out, enc, params,
-                logger,
-            )
-            per_seed.append(seed_metrics)
-            logger.info(
-                f"  trial {trial.number:03d}  seed {k+1}/{n_seeds}  "
-                f"train_R2_load={seed_metrics['train_load_r2']:.4f}  "
-                f"val_R2_load={seed_metrics['val_load_r2']:.4f}  "
-                f"train_R2_energy={seed_metrics['train_energy_r2']:.4f}  "
-                f"val_R2_energy={seed_metrics['val_energy_r2']:.4f}"
-            )
-            # Report the running mean of the OBJECTIVE (val load R^2) to
-            # Optuna so a pruner could act on the partial trial.
-            running_mean_val_load = float(np.mean(
-                [s["val_load_r2"] for s in per_seed]
-            ))
-            trial.report(running_mean_val_load, step=k)
+        running_eval_idx = 0
+        for fold_idx, fold in enumerate(fold_data):
+            theta = float(fold["theta_holdout"])
+            for k in range(n_seeds):
+                # Prime stride (17) for the seed-k offset, plus a per-fold
+                # offset (23) so different held-out angles also receive
+                # different RNG state.  ``17 * (k+1)`` ensures no HPO seed
+                # coincides with a production-ensemble member seed
+                # (forward stride 1000, inverse stride 100, all coprime
+                # with 17 and 23).
+                seed_k = base_seed + 17 * (k + 1) + 23 * fold_idx
+                metrics = _train_and_score_member(
+                    approach, cfg, seed_k,
+                    fold["df_tr"], fold["df_val"],
+                    fold["scaler_disp"], fold["scaler_out"],
+                    fold["enc"], fold["params"],
+                    logger,
+                )
+                metrics["theta_holdout"] = theta
+                metrics["fold_idx"]      = int(fold_idx)
+                metrics["seed_idx"]      = int(k)
+                metrics["seed"]          = int(seed_k)
+                all_results.append(metrics)
+                logger.info(
+                    f"  trial {trial.number:03d}  "
+                    f"fold {fold_idx+1}/{n_folds} (θ={theta:.1f}°)  "
+                    f"seed {k+1}/{n_seeds}  "
+                    f"train_R2_load={metrics['train_load_r2']:.4f}  "
+                    f"val_R2_load={metrics['val_load_r2']:.4f}  "
+                    f"train_R2_energy={metrics['train_energy_r2']:.4f}  "
+                    f"val_R2_energy={metrics['val_energy_r2']:.4f}"
+                )
+                # Report the running mean of the OBJECTIVE so a pruner
+                # could act on the partial trial.
+                running_eval_idx += 1
+                running_mean = float(np.mean([r["val_load_r2"] for r in all_results]))
+                trial.report(running_mean, step=running_eval_idx)
 
-        # Trial-level summaries: mean and std across seeds for every metric.
+        # Aggregate across all (fold, seed) evaluations.
         def _agg(key: str) -> Tuple[float, float]:
-            vs = np.array([s[key] for s in per_seed], dtype=float)
+            vs = np.array([r[key] for r in all_results], dtype=float)
             return float(vs.mean()), float(vs.std(ddof=0))
 
         mean_val_load,   std_val_load   = _agg("val_load_r2")
@@ -475,31 +506,63 @@ def make_objective(
         mean_val_eng,    std_val_eng    = _agg("val_energy_r2")
         mean_train_eng,  std_train_eng  = _agg("train_energy_r2")
 
-        # Persist all four metrics + the train-vs-val gap on the trial so
-        # the on-disk history CSV and best-params JSON include the full
-        # picture, not just the objective.  ``trial.user_attrs`` round-trips
-        # through Optuna's SQLite storage and is exposed in the history
-        # callback.
-        trial.set_user_attr("mean_val_load_r2",    mean_val_load)
-        trial.set_user_attr("mean_train_load_r2",  mean_train_load)
-        trial.set_user_attr("mean_val_energy_r2",  mean_val_eng)
-        trial.set_user_attr("mean_train_energy_r2", mean_train_eng)
-        trial.set_user_attr("std_val_load_r2",     std_val_load)
-        trial.set_user_attr("std_train_load_r2",   std_train_load)
-        trial.set_user_attr("train_val_load_gap",  mean_train_load - mean_val_load)
-        trial.set_user_attr("per_seed_metrics",    per_seed)
-        trial.set_user_attr("n_seeds_completed",   len(per_seed))
+        # Per-fold means (across seeds): captures whether some folds
+        # underperform — critical for the "worst-fold" generalization
+        # story.
+        per_fold_summary: Dict[float, Dict[str, float]] = {}
+        for fold_idx, fold in enumerate(fold_data):
+            theta = float(fold["theta_holdout"])
+            fold_results = [r for r in all_results if r["fold_idx"] == fold_idx]
+            per_fold_summary[theta] = {
+                "mean_train_load_r2":   float(np.mean([r["train_load_r2"]   for r in fold_results])),
+                "mean_val_load_r2":     float(np.mean([r["val_load_r2"]     for r in fold_results])),
+                "mean_train_energy_r2": float(np.mean([r["train_energy_r2"] for r in fold_results])),
+                "mean_val_energy_r2":   float(np.mean([r["val_energy_r2"]   for r in fold_results])),
+                "n_seeds":              len(fold_results),
+            }
+        # Worst-fold (= robustness lower bound) so reviewers can cite
+        # "no held-out angle worse than X.XX".
+        worst_fold_val_load = min(s["mean_val_load_r2"] for s in per_fold_summary.values())
+        best_fold_val_load  = max(s["mean_val_load_r2"] for s in per_fold_summary.values())
+
+        # Persist all metrics on the trial so the history CSV / best
+        # params JSON / snapshot files include the full picture.
+        trial.set_user_attr("mean_val_load_r2",      mean_val_load)
+        trial.set_user_attr("mean_train_load_r2",    mean_train_load)
+        trial.set_user_attr("mean_val_energy_r2",    mean_val_eng)
+        trial.set_user_attr("mean_train_energy_r2",  mean_train_eng)
+        trial.set_user_attr("std_val_load_r2",       std_val_load)
+        trial.set_user_attr("std_train_load_r2",     std_train_load)
+        trial.set_user_attr("train_val_load_gap",    mean_train_load - mean_val_load)
+        trial.set_user_attr("per_seed_metrics",      all_results)
+        trial.set_user_attr("n_seeds_completed",     len(all_results))
+        trial.set_user_attr("n_folds",               n_folds)
+        trial.set_user_attr("fold_thetas",           fold_thetas)
+        # Per-fold summary keyed by theta (as string for JSON safety).
+        trial.set_user_attr(
+            "per_fold_summary",
+            {f"{theta:.1f}": s for theta, s in per_fold_summary.items()},
+        )
+        trial.set_user_attr("worst_fold_val_load_r2", worst_fold_val_load)
+        trial.set_user_attr("best_fold_val_load_r2",  best_fold_val_load)
 
         elapsed = time.time() - t_trial
         gap = mean_train_load - mean_val_load
         gap_sign = "+" if gap >= 0 else ""
+        per_fold_str = "  ".join(
+            f"θ{theta:g}={s['mean_val_load_r2']:.4f}"
+            for theta, s in per_fold_summary.items()
+        )
         logger.info(
             f"trial {trial.number:03d} DONE  "
             f"mean_train_R2_load={mean_train_load:.4f}  "
             f"mean_val_R2_load={mean_val_load:.4f}  "
+            f"worst_fold={worst_fold_val_load:.4f}  "
+            f"best_fold={best_fold_val_load:.4f}  "
             f"gap={gap_sign}{gap:.4f}  "
-            f"(n_seeds={n_seeds}, wall={elapsed:.0f}s)"
+            f"(n_folds={n_folds}, n_seeds={n_seeds}, wall={elapsed:.0f}s)"
         )
+        logger.info(f"    per-fold val R²_load: {per_fold_str}")
         return mean_val_load
 
     return objective
@@ -637,17 +700,23 @@ def _best_payload(study: "optuna.Study") -> Optional[Dict]:
     # objective.  These let the headline JSON answer "what's the train R^2
     # at the best trial?" without parsing the history CSV.
     metric_keys = [
-        "mean_train_load_r2",   "mean_val_load_r2",
-        "mean_train_energy_r2", "mean_val_energy_r2",
-        "std_train_load_r2",    "std_val_load_r2",
-        "train_val_load_gap",   "n_seeds_completed",
+        "mean_train_load_r2",         "mean_val_load_r2",
+        "mean_train_energy_r2",       "mean_val_energy_r2",
+        "std_train_load_r2",          "std_val_load_r2",
+        "train_val_load_gap",         "n_seeds_completed",
+        "n_folds",                    "fold_thetas",
+        "worst_fold_val_load_r2",     "best_fold_val_load_r2",
     ]
     best_metrics = {
         k: best.user_attrs.get(k) for k in metric_keys if k in best.user_attrs
     }
     if best_metrics:
         payload["best_metrics"] = best_metrics
-    # Full per-seed breakdown for paper-quality reproducibility (small).
+    # Per-fold summary (mean train/val R^2 by held-out angle) — central
+    # for the "decent across angles" claim.
+    if "per_fold_summary" in best.user_attrs:
+        payload["best_per_fold_summary"] = best.user_attrs["per_fold_summary"]
+    # Full per-seed × per-fold breakdown for paper-quality reproducibility.
     if "per_seed_metrics" in best.user_attrs:
         payload["best_per_seed_metrics"] = best.user_attrs["per_seed_metrics"]
     if "hidden_layers" in best.params and approach in HL_BY_APPROACH:
@@ -680,12 +749,27 @@ def _history_csv_content(study: "optuna.Study") -> str:
         all_param_keys.update(t.params.keys())
     param_keys = sorted(all_param_keys)
     # Fixed-order metric columns so the CSV header is stable across runs.
+    # Aggregate metrics first, then per-fold val R^2 columns
+    # ``fold_theta_<theta>_val_load_r2`` for every theta present anywhere
+    # in the study.
     metric_cols = [
         "mean_train_load_r2",   "mean_val_load_r2",
         "mean_train_energy_r2", "mean_val_energy_r2",
         "std_train_load_r2",    "std_val_load_r2",
         "train_val_load_gap",   "n_seeds_completed",
+        "worst_fold_val_load_r2", "best_fold_val_load_r2",
+        "n_folds",
     ]
+    # Discover the union of fold thetas across all completed trials so the
+    # CSV has a stable, fully-populated per-fold-R² column set.
+    all_thetas: set = set()
+    for t in study.trials:
+        pfs = t.user_attrs.get("per_fold_summary")
+        if isinstance(pfs, dict):
+            all_thetas.update(pfs.keys())
+    fold_cols_train = [f"fold_theta_{th}_mean_train_load_r2" for th in sorted(all_thetas, key=float)]
+    fold_cols_val   = [f"fold_theta_{th}_mean_val_load_r2"   for th in sorted(all_thetas, key=float)]
+    metric_cols = metric_cols + fold_cols_train + fold_cols_val
     headers = (
         ["trial", "value", "state", "datetime_start", "datetime_complete",
          "duration_sec"]
@@ -709,12 +793,31 @@ def _history_csv_content(study: "optuna.Study") -> str:
                 t.datetime_complete.isoformat(timespec="seconds") if t.datetime_complete else "",
             "duration_sec": dur,
         }
+        pfs = t.user_attrs.get("per_fold_summary") or {}
         for k in metric_cols:
-            v = t.user_attrs.get(k)
+            # Per-fold columns are nested inside per_fold_summary, keyed
+            # by the formatted theta string (e.g. "60.0").  Other columns
+            # come directly from user_attrs.
+            if k.startswith("fold_theta_"):
+                # Layout: fold_theta_<theta>_<metric_name>
+                rest = k[len("fold_theta_"):]
+                # The theta token is everything up to the last "_mean_"
+                # split.  Keys we emit are: fold_theta_<theta>_mean_train_load_r2
+                # and fold_theta_<theta>_mean_val_load_r2.
+                theta_str, metric_name = rest.rsplit("_mean_", 1)
+                metric_name = "mean_" + metric_name
+                fold_block = pfs.get(theta_str) if isinstance(pfs, dict) else None
+                v = fold_block.get(metric_name) if isinstance(fold_block, dict) else None
+            else:
+                v = t.user_attrs.get(k)
             if v is None:
                 row[k] = ""
             elif isinstance(v, float):
                 row[k] = f"{v:.6f}"
+            elif isinstance(v, (list, tuple)):
+                # Render lists (e.g. fold_thetas) as compact strings so the
+                # CSV stays one row per trial.
+                row[k] = ";".join(str(x) for x in v)
             else:
                 row[k] = v
         for k in param_keys:
@@ -888,7 +991,29 @@ def main():
     p.add_argument("--no_warm_starts", action="store_true",
                    help="Disable the WARM_START priors and rely entirely on "
                         "the random-startup + TPE sampler.")
+    p.add_argument("--loao_folds", type=str, default="60",
+                   help="Comma-separated held-out angles (degrees) for "
+                        "leave-one-angle-out cross-validation HPO.  Default "
+                        "is '60' (single-angle protocol, current paper).  "
+                        "Use e.g. '45,60,70' for a 3-fold subset covering "
+                        "both boundary angles + interior, or "
+                        "'45,50,55,60,65,70' for full 6-fold LOAO. "
+                        "Per-trial cost scales linearly with the number of "
+                        "folds.  The objective is the mean val R^2_load "
+                        "across all (fold × seed) trainings; per-fold "
+                        "metrics are persisted on every trial.")
     args = p.parse_args()
+
+    # Parse the LOAO folds (comma-separated angles in degrees).
+    try:
+        loao_folds = [float(x.strip()) for x in args.loao_folds.split(",") if x.strip()]
+    except ValueError as exc:
+        raise SystemExit(
+            f"--loao_folds must be a comma-separated list of numbers; "
+            f"got {args.loao_folds!r}: {exc}"
+        )
+    if not loao_folds:
+        raise SystemExit("--loao_folds resolved to an empty list.")
 
     os.makedirs(args.output_dir, exist_ok=True)
     log_path = os.path.join(args.output_dir, f"hpo_log_{args.approach}.txt")
@@ -912,11 +1037,29 @@ def main():
     logger.info(f"  n_seeds    = {args.n_seeds}")
     logger.info(f"  hpo_epochs = {args.hpo_epochs}")
     logger.info(f"  seed       = {args.seed}")
+    logger.info(f"  LOAO folds = {loao_folds}  (n_folds = {len(loao_folds)})")
     logger.info("=" * 80)
 
     df_all = cd.load_data(args.data_dir, logger)
-    train_df, val_df = cd.split_unseen_angle(df_all, cd.CFG.theta_star, logger)
-    scaler_disp, scaler_out, enc, params = cd.create_preprocessors(train_df, logger)
+
+    # Build the leave-one-angle-out fold data.  Each fold has its own
+    # train/val split AND its own preprocessors (fitted ONLY on the
+    # fold's training data) so val-set statistics never leak into
+    # training, even across folds.
+    fold_data: List[Dict] = []
+    for theta in loao_folds:
+        logger.info(f"  Building LOAO fold for held-out theta = {theta:.1f}°")
+        df_tr_f, df_val_f = cd.split_unseen_angle(df_all, float(theta), logger)
+        sd_f, so_f, enc_f, params_f = cd.create_preprocessors(df_tr_f, logger)
+        fold_data.append({
+            "theta_holdout": float(theta),
+            "df_tr":         df_tr_f,
+            "df_val":        df_val_f,
+            "scaler_disp":   sd_f,
+            "scaler_out":    so_f,
+            "enc":           enc_f,
+            "params":        params_f,
+        })
 
     sampler = TPESampler(
         n_startup_trials=int(args.n_startup_trials),
@@ -956,7 +1099,7 @@ def main():
 
     objective = make_objective(
         args.approach,
-        train_df, val_df, scaler_disp, scaler_out, enc, params,
+        fold_data,
         n_seeds=int(args.n_seeds),
         hpo_epochs=int(args.hpo_epochs),
         base_seed=int(args.seed),

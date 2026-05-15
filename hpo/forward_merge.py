@@ -36,7 +36,7 @@ import logging
 import os
 import sys
 import warnings
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -106,10 +106,28 @@ def main():
     p.add_argument("--force_cpu",  action="store_true")
     p.add_argument("--dry_run",    action="store_true",
                    help="Smoke mode (matches the per-member launcher's flag).")
+    p.add_argument("--theta_star", type=float, default=None,
+                   help="Held-out angle (degrees) for the unseen-angle "
+                        "protocol.  When set, the merge reads from "
+                        "``parts_<approach>_t<theta>/`` (the per-fold "
+                        "directory written by forward_member.py with the "
+                        "same flag) and writes the resulting bundle as "
+                        "``forward_<approach>_t<theta>_bundle.pt`` so LOAO "
+                        "folds do not overwrite each other.")
     args = p.parse_args()
 
+    # Resolve theta_star and decide the output filename suffix BEFORE
+    # opening the log file, so per-fold logs go to distinct paths.
+    theta_for_paths: Optional[int] = None
+    if args.theta_star is not None:
+        cd.CFG.theta_star = float(args.theta_star)
+        theta_for_paths = int(round(float(args.theta_star)))
+        approach_tag = f"{args.approach}_t{theta_for_paths}"
+    else:
+        approach_tag = args.approach
+
     os.makedirs(args.output_dir, exist_ok=True)
-    log_path = os.path.join(args.output_dir, f"forward_{args.approach}_log.txt")
+    log_path = os.path.join(args.output_dir, f"forward_{approach_tag}_log.txt")
     logger = _make_logger(args.approach, log_path)
 
     cd.CFG.n_ensemble = int(args.n_ensemble)
@@ -121,7 +139,12 @@ def main():
     cd.refresh_device()
     cd.set_publication_style()
 
-    parts_dir = os.path.join(args.output_dir, f"parts_{args.approach}")
+    if theta_for_paths is not None:
+        parts_dir = os.path.join(
+            args.output_dir, f"parts_{args.approach}_t{theta_for_paths}",
+        )
+    else:
+        parts_dir = os.path.join(args.output_dir, f"parts_{args.approach}")
     if not os.path.isdir(parts_dir):
         raise FileNotFoundError(
             f"Per-member parts directory not found: {parts_dir}.  "
@@ -279,8 +302,10 @@ def main():
     logger.info(f"  Cumulative member training time: {total_wall/3600:.2f} h  ({total_wall:.0f} s)")
     logger.info(f"  Avg per-member training:        {avg_training_time:.0f} s")
 
-    # Persist results JSON
-    out_json = os.path.join(args.output_dir, f"forward_{args.approach}_results.json")
+    # Persist results JSON.  When ``--theta_star`` was given, the
+    # ``approach_tag`` already encodes the held-out angle so per-fold LOAO
+    # results never collide.
+    out_json = os.path.join(args.output_dir, f"forward_{approach_tag}_results.json")
     payload = _json_safe({
         "approach":             args.approach,
         "protocol":             "unseen",
@@ -325,7 +350,7 @@ def main():
         "member_metrics":   [p["val_metrics"] for p in parts],
         "ensemble_metrics": ens_metrics,
     }
-    out_pt = os.path.join(args.output_dir, f"forward_{args.approach}_bundle.pt")
+    out_pt = os.path.join(args.output_dir, f"forward_{approach_tag}_bundle.pt")
     torch.save(bundle, out_pt)
     logger.info(f"  Wrote: {out_pt}")
     logger.info("\n" + "=" * 80)

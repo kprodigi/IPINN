@@ -56,6 +56,12 @@ SEED="${SEED:-2026}"
 MEMBER_WALL="${MEMBER_WALL:-24:00:00}"
 MERGE_WALL="${MERGE_WALL:-01:00:00}"
 MEM="${MEM:-32G}"
+# Optional held-out angle for leave-one-angle-out (LOAO) production retrains.
+# When set, members are written to ``parts_<approach>_t<theta>/`` and the
+# merge writes ``forward_<approach>_t<theta>_{bundle.pt,results.json,log.txt}``
+# so multiple folds can coexist in the same OUTPUT_DIR without overwriting.
+# Leave empty for the single-angle (theta_star=60) default protocol.
+THETA_STAR="${THETA_STAR:-}"
 
 # ---- Sanity ---------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,15 +77,30 @@ case "$APPROACH" in
 esac
 LAST_IDX=$((M_ENSEMBLE - 1))
 
+# Build the launcher flag string + the per-fold partials directory name.
+# When THETA_STAR is set, jobs / parts / outputs are tagged with the held-
+# out angle so multiple LOAO folds can run concurrently in the same
+# OUTPUT_DIR without overwriting each other.
+if [[ -n "${THETA_STAR}" ]]; then
+    THETA_INT=$(printf '%d' "${THETA_STAR%.*}")
+    THETA_FLAG="--theta_star ${THETA_STAR}"
+    APPROACH_TAG="${APPROACH}_t${THETA_INT}"
+    PARTS_SUBDIR="parts_${APPROACH}_t${THETA_INT}"
+else
+    THETA_FLAG=""
+    APPROACH_TAG="${APPROACH}"
+    PARTS_SUBDIR="parts_${APPROACH}"
+fi
+
 mkdir -p "${OUTPUT_DIR}/slurm_logs"
-mkdir -p "${OUTPUT_DIR}/parts_${APPROACH}"
+mkdir -p "${OUTPUT_DIR}/${PARTS_SUBDIR}"
 
 # ---- Submit array job (per-member training) -------------------------------
 ARRAY_JOB_ID=$(sbatch --parsable <<EOF
 #!/bin/bash
-#SBATCH --job-name=forward_${APPROACH}_arr
-#SBATCH --output=${OUTPUT_DIR}/slurm_logs/forward_${APPROACH}_m%a_%A.out
-#SBATCH --error=${OUTPUT_DIR}/slurm_logs/forward_${APPROACH}_m%a_%A.err
+#SBATCH --job-name=forward_${APPROACH_TAG}_arr
+#SBATCH --output=${OUTPUT_DIR}/slurm_logs/forward_${APPROACH_TAG}_m%a_%A.out
+#SBATCH --error=${OUTPUT_DIR}/slurm_logs/forward_${APPROACH_TAG}_m%a_%A.err
 #SBATCH --partition=${PARTITION}
 #SBATCH --time=${MEMBER_WALL}
 #SBATCH --mem=${MEM}
@@ -117,7 +138,7 @@ echo "=== Start: \$(date) ==="
 # Single-line invocation: the SDSMT cluster's sbatch eats backslash-newline
 # line-continuations inside unquoted heredocs (see commit d7da39a), making
 # the python call exit silently with "unrecognized arguments".
-"\$PYTHON_BIN" ${MEMBER_LAUNCHER} --approach ${APPROACH} --member_idx \${MEMBER_IDX} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_ensemble ${M_ENSEMBLE} --seed ${SEED}
+"\$PYTHON_BIN" ${MEMBER_LAUNCHER} --approach ${APPROACH} --member_idx \${MEMBER_IDX} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_ensemble ${M_ENSEMBLE} --seed ${SEED} ${THETA_FLAG}
 EXIT_CODE=\$?
 
 echo "=== End: \$(date) Exit: \${EXIT_CODE} ==="
@@ -125,8 +146,8 @@ exit \${EXIT_CODE}
 EOF
 )
 echo "Submitted array job ${ARRAY_JOB_ID} (${M_ENSEMBLE} tasks, up to ${N_CONCURRENT} concurrent)"
-echo " Per-member logs: ${OUTPUT_DIR}/slurm_logs/forward_${APPROACH}_m<idx>_${ARRAY_JOB_ID}.{out,err}"
-echo " Partial bundles: ${OUTPUT_DIR}/parts_${APPROACH}/member_*.pt"
+echo " Per-member logs: ${OUTPUT_DIR}/slurm_logs/forward_${APPROACH_TAG}_m<idx>_${ARRAY_JOB_ID}.{out,err}"
+echo " Partial bundles: ${OUTPUT_DIR}/${PARTS_SUBDIR}/member_*.pt"
 
 # ---- Submit merge job (depends on the whole array succeeding) ------------
 # Use ``afterany`` not ``afterok`` so a single failed member doesn't block
@@ -134,9 +155,9 @@ echo " Partial bundles: ${OUTPUT_DIR}/parts_${APPROACH}/member_*.pt"
 # reports them in the log.
 MERGE_JOB_ID=$(sbatch --parsable --dependency=afterany:${ARRAY_JOB_ID} <<EOF
 #!/bin/bash
-#SBATCH --job-name=forward_${APPROACH}_merge
-#SBATCH --output=${OUTPUT_DIR}/slurm_logs/forward_${APPROACH}_merge_%j.out
-#SBATCH --error=${OUTPUT_DIR}/slurm_logs/forward_${APPROACH}_merge_%j.err
+#SBATCH --job-name=forward_${APPROACH_TAG}_merge
+#SBATCH --output=${OUTPUT_DIR}/slurm_logs/forward_${APPROACH_TAG}_merge_%j.out
+#SBATCH --error=${OUTPUT_DIR}/slurm_logs/forward_${APPROACH_TAG}_merge_%j.err
 #SBATCH --partition=${PARTITION}
 #SBATCH --time=${MERGE_WALL}
 #SBATCH --mem=${MEM}
@@ -157,7 +178,7 @@ echo "=== FORWARD ${APPROACH^^} merge Node: \$(hostname) ==="
 echo "=== Start: \$(date) ==="
 
 # Single-line invocation (see d7da39a / multi-line heredoc continuation bug).
-"\$PYTHON_BIN" ${MERGE_LAUNCHER} --approach ${APPROACH} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_ensemble ${M_ENSEMBLE} --seed ${SEED}
+"\$PYTHON_BIN" ${MERGE_LAUNCHER} --approach ${APPROACH} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_ensemble ${M_ENSEMBLE} --seed ${SEED} ${THETA_FLAG}
 EXIT_CODE=\$?
 
 echo "=== End: \$(date) Exit: \${EXIT_CODE} ==="
@@ -165,10 +186,10 @@ exit \${EXIT_CODE}
 EOF
 )
 echo "Submitted merge job ${MERGE_JOB_ID} (depends on ${ARRAY_JOB_ID})"
-echo " Merge log: ${OUTPUT_DIR}/slurm_logs/forward_${APPROACH}_merge_${MERGE_JOB_ID}.{out,err}"
-echo " Final bundle: ${OUTPUT_DIR}/forward_${APPROACH}_bundle.pt"
-echo " Final results: ${OUTPUT_DIR}/forward_${APPROACH}_results.json"
+echo " Merge log: ${OUTPUT_DIR}/slurm_logs/forward_${APPROACH_TAG}_merge_${MERGE_JOB_ID}.{out,err}"
+echo " Final bundle: ${OUTPUT_DIR}/forward_${APPROACH_TAG}_bundle.pt"
+echo " Final results: ${OUTPUT_DIR}/forward_${APPROACH_TAG}_results.json"
 echo ""
-echo "=== Forward ${APPROACH^^} parallel retrain submitted ==="
+echo "=== Forward ${APPROACH_TAG^^} parallel retrain submitted ==="
 echo " Monitor: squeue -u \$USER"
-echo " Per-member done when: ls ${OUTPUT_DIR}/parts_${APPROACH}/*.pt | wc -l"
+echo " Per-member done when: ls ${OUTPUT_DIR}/${PARTS_SUBDIR}/*.pt | wc -l"

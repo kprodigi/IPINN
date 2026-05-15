@@ -97,6 +97,14 @@ def main():
                    help="Smoke mode: shrinks training budgets via "
                         "composite_design._dry_run_shrink_training_cfg.  "
                         "Useful for CI; NOT for production retrain.")
+    p.add_argument("--theta_star", type=float, default=None,
+                   help="Held-out angle (degrees) for the unseen-angle "
+                        "protocol.  Defaults to ``composite_design.CFG.theta_star`` "
+                        "(60°).  Use a different value to run a leave-one-"
+                        "angle-out (LOAO) production retrain at e.g. "
+                        "--theta_star 45 or 70.  Members are then written "
+                        "to ``parts_<approach>_t<theta>/`` so multiple folds "
+                        "do not collide in one ``--output_dir``.")
     args = p.parse_args()
 
     members = [args.member_idx] if args.member_idx is not None else _parse_members(args.members)
@@ -108,7 +116,18 @@ def main():
                 f"member index {m} is out of range [0, {args.n_ensemble - 1}]."
             )
 
-    parts_dir = os.path.join(args.output_dir, f"parts_{args.approach}")
+    # If a custom theta_star was requested, override the global config
+    # BEFORE selecting parts_dir so the partials directory carries the
+    # held-out angle (preventing collisions between LOAO folds in a
+    # shared output_dir).
+    if args.theta_star is not None:
+        cd.CFG.theta_star = float(args.theta_star)
+        parts_dir = os.path.join(
+            args.output_dir,
+            f"parts_{args.approach}_t{int(round(float(args.theta_star)))}",
+        )
+    else:
+        parts_dir = os.path.join(args.output_dir, f"parts_{args.approach}")
     os.makedirs(parts_dir, exist_ok=True)
 
     # Apply CFG overrides (mirrors forward_member.py).  n_ensemble is set to the

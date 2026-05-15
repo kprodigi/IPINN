@@ -56,6 +56,11 @@ N_TRIALS="${N_TRIALS:-100}"
 N_STARTUP="${N_STARTUP:-15}"
 N_SEEDS="${N_SEEDS:-2}"
 HPO_EPOCHS="${HPO_EPOCHS:-200}"
+# Comma-separated held-out angles for leave-one-angle-out HPO.  Default "60"
+# matches the single-angle paper protocol; "45,60,70" gives a 3-fold subset
+# covering both boundary angles + interior; "45,50,55,60,65,70" gives full
+# 6-fold LOAO.  Per-trial cost scales linearly with the number of folds.
+LOAO_FOLDS="${LOAO_FOLDS:-60}"
 N_WORKERS="${N_WORKERS:-1}"
 SEED="${SEED:-2026}"
 DATA_DIR="${DATA_DIR:-./data}"
@@ -128,7 +133,7 @@ echo "=== Start: \$(date) ==="
 
 # Single-line invocation (heredoc + backslash-newline line continuations are
 # unreliable on this cluster's sbatch — see previous diagnostics).
-"\$PYTHON_BIN" ${LAUNCHER} --approach ${APPROACH} --n_trials ${N_TRIALS} --n_startup_trials ${N_STARTUP} --n_seeds ${N_SEEDS} --hpo_epochs ${HPO_EPOCHS} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --seed ${SEED} ${WARM_FLAG}
+"\$PYTHON_BIN" ${LAUNCHER} --approach ${APPROACH} --n_trials ${N_TRIALS} --n_startup_trials ${N_STARTUP} --n_seeds ${N_SEEDS} --hpo_epochs ${HPO_EPOCHS} --loao_folds ${LOAO_FOLDS} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --seed ${SEED} ${WARM_FLAG}
 EXIT_CODE=\$?
 
 echo "=== End: \$(date)  Exit: \${EXIT_CODE} ==="
