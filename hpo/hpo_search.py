@@ -983,7 +983,14 @@ def main():
                         "so multiple approaches do not collide in one "
                         "--output_dir.")
     p.add_argument("--seed", type=int, default=2026,
-                   help="Base seed; member k of a trial uses seed + 1000*k.")
+                   help="Base seed for the search.  Per-trial training "
+                        "seeds are base + 17*(k+1) + 23*fold_idx, where "
+                        "17 and 23 are coprime with the production strides "
+                        "(forward 1000, inverse 100), so HPO trial seeds "
+                        "never coincide with production-ensemble member "
+                        "seeds.  The TPE sampler additionally adds the "
+                        "worker's SLURM_ARRAY_TASK_ID to its own seed to "
+                        "decorrelate random-startup samples across workers.")
     p.add_argument("--force_cpu", action="store_true")
     p.add_argument("--dry_run", action="store_true",
                    help="CI/smoke: shrink training budgets globally via "
@@ -1061,11 +1068,24 @@ def main():
             "params":        params_f,
         })
 
+    # Per-worker TPE seed differentiation.  All workers share one SQLite
+    # study, but each samples its OWN next-trial parameters from the TPE
+    # posterior.  If every worker uses the same seed, the first ~N_STARTUP
+    # random-startup trials draw identical parameter vectors on multiple
+    # workers — duplicates that waste compute.  Differentiating by SLURM
+    # array task ID (or a process-unique fallback when run outside SLURM)
+    # decorrelates the samplers without harming TPE convergence (the
+    # shared SQLite trial history is what TPE actually models from).
+    worker_id = int(
+        os.environ.get("SLURM_ARRAY_TASK_ID")
+        or os.environ.get("SLURM_PROCID")
+        or os.getpid()
+    )
     sampler = TPESampler(
         n_startup_trials=int(args.n_startup_trials),
         multivariate=True,
         group=True,
-        seed=int(args.seed),
+        seed=int(args.seed) + int(worker_id),
     )
     # RDBStorage with a heartbeat: every running worker pings the SQLite
     # study every ``heartbeat_interval`` seconds.  If a worker dies (SLURM
@@ -1138,10 +1158,22 @@ def main():
         # with the next.  Without this, a single OOM or NaN-grad explosion
         # would kill the whole worker, leaving 9 / 10 GPUs running and 1
         # idle.
+        #
+        # ``MaxTrialsCallback`` enforces a GLOBAL completed-trial cap across
+        # all concurrent workers.  Optuna's ``n_trials`` argument is a
+        # per-process count, so without this callback N workers would each
+        # run up to ``args.n_trials`` trials, inflating the total study
+        # size by up to N×.  With the callback, every worker checks the
+        # shared SQLite study and stops once ``args.n_trials`` COMPLETE
+        # trials are recorded total.
+        global_cap_cb = optuna.study.MaxTrialsCallback(
+            int(args.n_trials),
+            states=(optuna.trial.TrialState.COMPLETE,),
+        )
         study.optimize(
             objective,
             n_trials=n_remaining,
-            callbacks=[checkpoint_cb],
+            callbacks=[checkpoint_cb, global_cap_cb],
             catch=(RuntimeError, ValueError, KeyError, IndexError, MemoryError),
             show_progress_bar=False,
         )

@@ -82,7 +82,15 @@ LAST_IDX=$((M_ENSEMBLE - 1))
 # out angle so multiple LOAO folds can run concurrently in the same
 # OUTPUT_DIR without overwriting each other.
 if [[ -n "${THETA_STAR}" ]]; then
-    THETA_INT=$(printf '%d' "${THETA_STAR%.*}")
+    # Round to nearest integer (printf '%.0f') so the shell tag matches
+    # what Python's int(round(float(theta))) produces inside
+    # forward_member.py / forward_merge.py.  Using truncation
+    # (``${THETA_STAR%.*}``) instead would mean THETA_STAR=59.7 → shell
+    # tag _t59 but Python tag _t60, and the merge job would not find the
+    # member partials.  For the planned integer θ values (45..70) the
+    # two are equivalent; this only matters if a fractional θ is ever
+    # passed.
+    THETA_INT=$(printf '%.0f' "${THETA_STAR}")
     THETA_FLAG="--theta_star ${THETA_STAR}"
     APPROACH_TAG="${APPROACH}_t${THETA_INT}"
     PARTS_SUBDIR="parts_${APPROACH}_t${THETA_INT}"
