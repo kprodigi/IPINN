@@ -61,18 +61,6 @@ HPO_EPOCHS="${HPO_EPOCHS:-200}"
 # covering both boundary angles + interior; "45,50,55,60,65,70" gives full
 # 6-fold LOAO.  Per-trial cost scales linearly with the number of folds.
 LOAO_FOLDS="${LOAO_FOLDS:-60}"
-# Hard-PINN parameterisation: "energy" (HardEnergyNet, F = dE/dd by autograd
-# with slope-subtraction BC; the paper's default) or "load" (HardLoadNet,
-# F = net(x) with d-gate BC + E = trapezoid(F); kept as an ablation).  We
-# tested the flipped form on local smoke runs (theta=60 at 400 epochs ×
-# 2 seeds: median val_R2_load = +0.64 vs HardEnergyNet HPO best ~+0.74;
-# theta=65 at 200 epochs × 2 seeds: median val_R2_load = -1.59 vs
-# HardEnergyNet -1.39) and found it consistently worse with shared HPs.
-# The energy-primary form's derivative-based F has a meaningful regularising
-# effect that the load-primary form lacks under our HP budget.  Default is
-# "energy"; pass HARD_PARAM=load to re-test as an ablation.  Ignored when
-# APPROACH is not "hard".
-HARD_PARAM="${HARD_PARAM:-energy}"
 N_WORKERS="${N_WORKERS:-1}"
 SEED="${SEED:-2026}"
 DATA_DIR="${DATA_DIR:-./data}"
@@ -145,7 +133,7 @@ echo "=== Start: \$(date) ==="
 
 # Single-line invocation (heredoc + backslash-newline line continuations are
 # unreliable on this cluster's sbatch — see previous diagnostics).
-"\$PYTHON_BIN" ${LAUNCHER} --approach ${APPROACH} --n_trials ${N_TRIALS} --n_startup_trials ${N_STARTUP} --n_seeds ${N_SEEDS} --hpo_epochs ${HPO_EPOCHS} --loao_folds ${LOAO_FOLDS} --hard_param ${HARD_PARAM} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --seed ${SEED} ${WARM_FLAG}
+"\$PYTHON_BIN" ${LAUNCHER} --approach ${APPROACH} --n_trials ${N_TRIALS} --n_startup_trials ${N_STARTUP} --n_seeds ${N_SEEDS} --hpo_epochs ${HPO_EPOCHS} --loao_folds ${LOAO_FOLDS} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --seed ${SEED} ${WARM_FLAG}
 EXIT_CODE=\$?
 
 echo "=== End: \$(date)  Exit: \${EXIT_CODE} ==="

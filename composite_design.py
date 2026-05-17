@@ -1068,120 +1068,6 @@ def hard_pinn_predict_load_energy(
     return np.concatenate(f_parts), np.concatenate(e_parts)
 
 
-# Default number of trapezoidal integration nodes for HardLoadNet's
-# E = ∫F integration.  64 is empirically sufficient: doubling to 128 changes
-# E_raw by <0.1% on smooth crashworthiness curves, and trapezoid error is
-# O(h²) for smooth integrands so the K=64 grid is well past the diminishing-
-# returns elbow.
-HARD_LOAD_K_INTEGRATION = 64
-
-
-def hard_load_compute_energy(
-    model: nn.Module,
-    X: torch.Tensor,
-    params: ScalingParams,
-    K_integration: int = HARD_LOAD_K_INTEGRATION,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Compute ``(F_n, E_n)`` for a :class:`HardLoadNet`.
-
-    F is taken directly from the network output at the row's displacement.
-    E is obtained by trapezoidal integration of the *raw* (un-normalized)
-    load over ``[0, d_i]`` on a uniform grid of ``K_integration`` nodes::
-
-        E_raw(d_i)  =  ∫₀^{d_i} F_raw(δ; design) dδ
-                    ≈  Δd_i · ( ½F[0] + F[1] + … + F[K−2] + ½F[K−1] )
-
-    where ``Δd_i = d_i / (K_integration − 1)``.  Because ``F_raw(0) = 0`` is
-    enforced architecturally (:meth:`HardLoadNet.configure_zero_bc`), the
-    ``F[0]`` term vanishes and the trapezoidal rule is exact at the left
-    boundary.
-
-    The whole grid is evaluated in a single forward pass of size
-    ``B · K_integration``; autograd flows back through every grid evaluation,
-    so the resulting loss on ``E_n`` updates the network parameters at every
-    quadrature node — which is what gives the load-primary architecture its
-    robustness to derivative noise.
-
-    Returns
-    -------
-    F_n : Tensor, shape [B, 1]
-        Normalized load at the row's displacement.
-    E_n : Tensor, shape [B, 1]
-        Normalized energy obtained by trapezoidal integration.
-    """
-    B = X.shape[0]
-    d_scaled_target = X[:, U_COL:U_COL + 1]                    # [B, 1]
-    # Convert to raw mm displacement; clamp at 0 because integration from a
-    # negative reference is physically meaningless and would mirror across
-    # the BC point.
-    d_raw_target = (d_scaled_target * params.sig_d + params.mu_d).clamp_min(0.0)  # [B, 1]
-
-    # Uniform alpha grid [0, 1/(K-1), …, 1].  alpha[K-1] = 1 places the last
-    # grid point exactly at the target displacement, so F_n at the target is
-    # the K-1-th column of F_n_grid below — no separate forward pass needed.
-    alpha = torch.linspace(0.0, 1.0, K_integration, device=X.device, dtype=X.dtype)  # [K]
-    d_raw_grid = d_raw_target * alpha.view(1, -1)               # [B, K]
-
-    # Convert grid back to scaled space for the model.
-    d_scaled_grid = (d_raw_grid - params.mu_d) / max(1e-12, params.sig_d)  # [B, K]
-
-    # Repeat the (sin θ, cos θ, LC) columns K times so each grid node carries
-    # the same (θ, LC) as its row's target point — only d varies.
-    X_fixed = X[:, U_COL + 1:]                                  # [B, F-1]
-    X_fixed_rep = X_fixed.unsqueeze(1).expand(-1, K_integration, -1)  # [B, K, F-1]
-    X_grid = torch.cat([d_scaled_grid.unsqueeze(-1), X_fixed_rep], dim=-1)  # [B, K, F]
-    X_grid_flat = X_grid.reshape(B * K_integration, -1)         # [B·K, F]
-
-    # One batched forward pass over the entire integration grid.
-    F_n_grid = model(X_grid_flat).view(B, K_integration)        # [B, K]
-
-    # Trapezoidal integration in *raw* F-space so the result is raw E (Joules).
-    F_raw_grid = F_n_grid * params.sig_F + params.mu_F          # [B, K]
-    delta_d = d_raw_target / max(1, K_integration - 1)          # [B, 1]
-    weights = torch.ones(K_integration, device=X.device, dtype=X.dtype)
-    weights[0] = 0.5
-    weights[-1] = 0.5
-    E_raw = (F_raw_grid * weights.view(1, -1)).sum(dim=1, keepdim=True) * delta_d  # [B, 1]
-
-    # Back to normalized space for loss computation.
-    E_n = (E_raw - params.mu_E) / max(1e-12, params.sig_E)      # [B, 1]
-    F_n_at_target = F_n_grid[:, -1:].contiguous()               # [B, 1]
-    return F_n_at_target, E_n
-
-
-def hard_load_predict_load_energy(
-    model: nn.Module,
-    X: torch.Tensor,
-    params: ScalingParams,
-    K_integration: int = HARD_LOAD_K_INTEGRATION,
-    batch_size: int = HARD_PINN_EVAL_BATCH,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Batched :class:`HardLoadNet` forward: raw load (kN) and energy (J).
-
-    Equivalent of :func:`hard_pinn_predict_load_energy` for the flipped
-    parameterization.  Per-row cost is ``K_integration`` × a single forward
-    pass, so ``batch_size`` is scaled down accordingly to keep the effective
-    GPU memory footprint comparable.
-    """
-    model.eval()
-    n = int(X.shape[0])
-    f_parts: List[np.ndarray] = []
-    e_parts: List[np.ndarray] = []
-    # Each row expands to K_integration grid points internally, so the
-    # batched-flat size becomes batch_size · K_integration.  Shrink to keep
-    # the effective batch comparable to HARD_PINN_EVAL_BATCH.
-    eval_bs = max(1, batch_size // max(1, K_integration))
-    with torch.no_grad():
-        for start in range(0, n, eval_bs):
-            Xb = X[start : start + eval_bs]
-            F_n, E_n = hard_load_compute_energy(model, Xb, params, K_integration)
-            Fb = (F_n * params.sig_F + params.mu_F).cpu().numpy().reshape(-1)
-            Eb = (E_n * params.sig_E + params.mu_E).cpu().numpy().reshape(-1)
-            f_parts.append(Fb)
-            e_parts.append(Eb)
-    return np.concatenate(f_parts), np.concatenate(e_parts)
-
-
 
 def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> Tuple[List[nn.Module], StandardScaler, StandardScaler, OneHotEncoder, ScalingParams]:
     """
@@ -1711,141 +1597,10 @@ class HardEnergyNet(nn.Module):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
-class HardLoadNet(nn.Module):
-    """Load-primary Hard-PINN ablation (outputs F directly; E via integration).
-
-    Empirically NOT the default — see paragraph at the bottom of this docstring.
-
-    The physical inverse of :class:`HardEnergyNet`::
-
-        HardEnergyNet:  E_n = net(x);  F = ∂E_raw/∂d            (energy primary, default)
-        HardLoadNet:    F_n = net(x);  E_raw = ∫₀^d F_raw(δ) dδ  (load primary, ablation)
-
-    Original motivation: in the energy-primary architecture, F = ∂E/∂d is a
-    *derivative* of the network output and inherits any high-frequency noise
-    that the integrated E_n hides under its L² fit.  Small high-frequency
-    errors in Ê(d) amplify when you take ∂/∂d, which is the classic L²-vs-H¹
-    PINN failure mode (energy R² high, load R² low).  In the load-primary
-    architecture, F is the network output directly and E is the *integrated*,
-    smoother quantity — robust to small F errors and harder to mis-predict.
-    This also matches measurement physics: F is what's recorded by the load
-    cell, E is computed by integration of the force-displacement curve.
-
-    Both BCs are enforced architecturally:
-
-    * ``F(d=0) = 0`` via subtraction-at-zero in normalized space::
-
-          F_n(x) = net(x) − net(x|d=0) + c_{0,F},   c_{0,F} = −μ_F/σ_F
-
-      At ``x = x|d=0`` the first two terms cancel, leaving raw F = 0 for every
-      (θ, LC).  This is the load-only analogue of the slope-subtraction trick
-      used in :class:`HardEnergyNet`.
-
-    * ``E(d=0) = 0`` is automatic from ``∫₀⁰ = 0`` — the integral lower limit
-      is the reference configuration by construction.
-
-    The work-energy identity ``E = ∫F`` is therefore *exact in the
-    discretization used at evaluation* (trapezoidal rule with ``K_integration``
-    nodes), not enforced by any penalty term.  No auxiliary regularizers
-    (monotonicity, curvature, angle smoothness) are required.
-
-    Cost: each forward pass evaluates the backbone at ``K_integration`` grid
-    points along [0, d_i] for every input row, replacing the single forward +
-    autograd-derivative call of :class:`HardEnergyNet`.  With K ≈ 64 and the
-    small backbones our HPO favours, the wall-clock cost is roughly 5–10× a
-    single :class:`HardEnergyNet` forward — paid once per loss eval, not
-    per-batch-element.
-
-    Empirical status (2026-05): tested on local smoke runs (θ=60 single-fold,
-    400 epochs × 2 seeds: median val_R²_load = +0.64; θ=65 single-fold,
-    200 epochs × 2 seeds: median val_R²_load = −1.59), both **worse** than the
-    energy-primary HardEnergyNet (HPO best at θ=60: +0.74; θ=65: −1.39) with
-    the same HPs.  Two reasons:
-
-    1. **The HPs need re-tuning for this architecture.**  HardEnergyNet's
-       tuned HPs (lr ≈ 4e-5, weight_decay ≈ 5e-4, SWA over last 20%) were
-       fitted to a model where F is derived from E by autograd; load-primary
-       gradient dynamics are different and want different regularisation.
-       With the energy-primary HPs, load-primary overfits past ~ep 100.
-    2. **The θ=65 catastrophe is data-structural, not architectural.**  Even
-       train R²_F is near zero at θ=65 (one-sided neighbourhood: only 70° as
-       adjacent training data).  No reparameterisation of the output head
-       fixes that.
-
-    Kept in the codebase as an ablation for the manuscript's Section 5
-    discussion — *not* the default Hard parameterisation.  Activate via
-    ``cfg["hard_param"] = "load"`` or ``HARD_PARAM=load`` on the SLURM
-    launcher.  Default everywhere is ``"energy"``.
-    """
-
-    def __init__(self, in_d: int, hidden_layers: List[int], dropout: float,
-                 softplus_beta: float):
-        super().__init__()
-        layers = []
-        d = in_d
-        for h in hidden_layers:
-            layers.append(nn.Linear(d, h))
-            layers.append(nn.Softplus(beta=softplus_beta))
-            if dropout > 0:
-                layers.append(nn.Dropout(dropout))
-            d = h
-        layers.append(nn.Linear(d, 1))
-        self.net = nn.Sequential(*layers)
-        self._init_weights()
-        # Architectural F(d=0)=0 correction (inactive by default).
-        self._zero_bc_active = False
-        self.register_buffer("_d_scaled_at_zero", torch.zeros(1))
-        self.register_buffer("_c0_F", torch.zeros(1))
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-    def configure_zero_bc(self, params: "ScalingParams", enabled: bool = True) -> None:
-        """Activate (or disable) the architectural F(d=0)=0 correction.
-
-        After ``configure_zero_bc(params)`` returns, ``forward(x)`` produces
-        a normalized load whose un-normalized value is exactly zero whenever
-        the displacement column of ``x`` equals ``-μ_d/σ_d`` (raw d = 0), for
-        any (θ, LC).  E(d=0) = 0 is automatic from the integration lower limit
-        and does not require any model-side correction.
-        """
-        self._zero_bc_active = bool(enabled)
-        if not enabled:
-            return
-        self._d_scaled_at_zero.fill_(-params.mu_d / max(1e-12, params.sig_d))
-        self._c0_F.fill_(-params.mu_F / max(1e-12, params.sig_F))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Return normalized load ``F_n`` with the F(d=0)=0 BC enforced.
-
-        Unlike :class:`HardEnergyNet`, no inner autograd call is needed —
-        F is the network's direct output.  The E counterpart is obtained
-        externally via :func:`hard_load_compute_energy` (trapezoidal rule
-        over a per-row integration grid).
-        """
-        out = self.net(x)
-        if not self._zero_bc_active:
-            return out
-        # Build x|d=0 = same (θ, LC) but displacement column replaced by scaled zero.
-        d0 = self._d_scaled_at_zero.view(1, 1).expand(x.size(0), 1)
-        x0 = torch.cat([d0, x[:, U_COL + 1:]], dim=1)
-        out0 = self.net(x0)
-        # Subtract-at-zero with offset:  F_n(x) = net(x) − net(x|d=0) + c_{0,F}.
-        # At x = x|d=0 the first two terms cancel exactly → raw F = 0 ✓.
-        return out - out0 + self._c0_F
-
-    def count_parameters(self) -> int:
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
-
-
 # =============================================================================
 # PHYSICS LOSS FUNCTIONS
 # =============================================================================
-def compute_physics_residual(Xin: torch.Tensor, F_n: torch.Tensor, E_n: torch.Tensor,
+def compute_physics_residual(Xin: torch.Tensor, F_n: torch.Tensor, E_n: torch.Tensor, 
                              params: ScalingParams) -> torch.Tensor:
     """Compute physics residual: dE/dd - F."""
     dE_dX = torch.autograd.grad(E_n, Xin, torch.ones_like(E_n), create_graph=True)[0]
@@ -2357,8 +2112,7 @@ def train_soft(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
 
 def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: StandardScaler,
                scaler_out: StandardScaler, enc: OneHotEncoder, params: ScalingParams,
-               seed: int, protocol: str, logger: logging.Logger,
-               cfg_override: Optional[Dict] = None) -> Tuple:
+               seed: int, protocol: str, logger: logging.Logger) -> Tuple:
     """Train Hard-PINN model with enhanced regularization.
 
     The third return value is the best epoch's mean validation R²,
@@ -2370,17 +2124,9 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     - Monotonicity constraint (F = dE/dd ≥ 0)
     - Curvature regularization (smooth force curves via d²E/dd²)
     - Stabilized training: LR warmup + cosine annealing + SWA
-
-    ``cfg_override``: optional dict of HPs to override the protocol defaults
-    returned by :func:`get_model_config`.  Used (a) by HPO to inject sampled
-    configurations and (b) by smoke / ablation scripts to switch between the
-    energy-primary and load-primary parameterisations via ``"hard_param":
-    "energy" | "load"``.
     """
     set_seed(seed)
     cfg = get_model_config("hard", protocol)
-    if cfg_override:
-        cfg = {**cfg, **cfg_override}
     t0 = time.time()
     rng = np.random.default_rng(seed + 300)
     
@@ -2388,20 +2134,8 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     ytr = to_tensor(build_targets(train_df, scaler_out))
     Xv = to_tensor(build_features(val_df, scaler_disp, enc))
     y_val = val_df[["load_kN", "energy_J"]].values
-
-    # hard_param selects which scalar the network outputs.
-    #   "energy" (legacy): outputs E_n; F derived as ∂E/∂d via autograd
-    #                      (HardEnergyNet + slope-subtraction BC).
-    #   "load"   (flipped): outputs F_n directly; E derived by trapezoidal
-    #                       integration of F_raw over [0, d_i] (HardLoadNet).
-    # The flipped variant is more robust to the classic L²-vs-H¹ PINN failure
-    # mode where a high-R² E coexists with a low-R² ∂E/∂d.
-    hard_param = str(cfg.get("hard_param", "energy")).lower()
-    K_integration = int(cfg.get("K_integration", HARD_LOAD_K_INTEGRATION))
-    if hard_param == "load":
-        model = HardLoadNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
-    else:
-        model = HardEnergyNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
+    
+    model = HardEnergyNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
     model.configure_zero_bc(params)
     opt = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"]) if cfg.get("optimizer", "adamw").lower() == "adam" else optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     
@@ -2450,18 +2184,11 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
         model.train()
         loss_sum, nb = 0.0, 0
         for Xb, yb in loader:
-            if hard_param == "load":
-                # Flipped parameterization: F_n is the direct output; E_n is
-                # the trapezoidal integral of F_raw over [0, d_i].  No
-                # autograd.grad call — gradients to the backbone flow through
-                # all K_integration evaluations of the model inside the loss.
-                F_n, E_n = hard_load_compute_energy(model, Xb, params, K_integration)
-            else:
-                Xb.requires_grad_(True)
-                E_n = model(Xb)
-                dE = torch.autograd.grad(E_n, Xb, torch.ones_like(E_n), create_graph=True)[0]
-                F_phys = dE[:, U_COL:U_COL + 1] * params.grad_factor
-                F_n = (F_phys - params.mu_F) / params.sig_F
+            Xb.requires_grad_(True)
+            E_n = model(Xb)
+            dE = torch.autograd.grad(E_n, Xb, torch.ones_like(E_n), create_graph=True)[0]
+            F_phys = dE[:, U_COL:U_COL+1] * params.grad_factor
+            F_n = (F_phys - params.mu_F) / params.sig_F
             loss = cfg["w_load"] * sl1(F_n, yb[:, 0:1]) + cfg["w_energy"] * mse(E_n, yb[:, 1:2])
             
             # Collocation-based physics regularization
@@ -2501,10 +2228,7 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
             # Evaluate SWA model if active, otherwise base model
             eval_model = swa_model.module if (use_stabilized and swa_active) else model
             eval_model.eval()
-            if hard_param == "load":
-                Fv, Ev = hard_load_predict_load_energy(eval_model, Xv, params, K_integration)
-            else:
-                Fv, Ev = hard_pinn_predict_load_energy(eval_model, Xv, params)
+            Fv, Ev = hard_pinn_predict_load_energy(eval_model, Xv, params)
             r2_l = r2_safe(y_val[:, 0], Fv)
             r2_e = r2_safe(y_val[:, 1], Ev)
             val_score = _val_checkpoint_score(r2_l, r2_e, approach="hard")
@@ -2531,10 +2255,7 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     # Final SWA evaluation
     if use_stabilized and swa_active:
         swa_model.module.eval()
-        if hard_param == "load":
-            Fv, Ev = hard_load_predict_load_energy(swa_model.module, Xv, params, K_integration)
-        else:
-            Fv, Ev = hard_pinn_predict_load_energy(swa_model.module, Xv, params)
+        Fv, Ev = hard_pinn_predict_load_energy(swa_model.module, Xv, params)
         r2_swa = _val_checkpoint_score(
             float(r2_safe(y_val[:, 0], Fv)),
             float(r2_safe(y_val[:, 1], Ev)),

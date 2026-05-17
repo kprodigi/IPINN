@@ -344,18 +344,10 @@ WARM_START = {
 # =============================================================================
 # TRIAL EVALUATION
 # =============================================================================
-def _build_trial_cfg(approach: str, params: Dict, fixed_overrides: Optional[Dict] = None) -> Dict:
-    """Patch the trial parameters into the production base config.
-
-    ``fixed_overrides`` are set on every trial of the run (e.g. the
-    ``hard_param="load"`` selector that switches the Hard-PINN to the
-    load-primary HardLoadNet architecture).  Applied after the trial's TPE
-    parameters so they cannot be overwritten by sampled values.
-    """
+def _build_trial_cfg(approach: str, params: Dict) -> Dict:
+    """Patch the trial parameters into the production base config."""
     cfg = copy.deepcopy(cd.get_model_config(approach, "unseen"))
     cfg.update(params)
-    if fixed_overrides:
-        cfg.update(fixed_overrides)
     return cfg
 
 
@@ -424,7 +416,6 @@ def make_objective(
     hpo_epochs: int,
     base_seed: int,
     logger: logging.Logger,
-    fixed_cfg_overrides: Optional[Dict] = None,
 ):
     """Build the Optuna objective callable for ``approach``.
 
@@ -462,7 +453,7 @@ def make_objective(
         trial_params = suggester(trial)
         trial_params["epochs"] = int(hpo_epochs)
         trial_params.setdefault("eval_every", max(1, hpo_epochs // 8))
-        cfg = _build_trial_cfg(approach, trial_params, fixed_overrides=fixed_cfg_overrides)
+        cfg = _build_trial_cfg(approach, trial_params)
 
         # Flat list of every (fold, seed) result.
         all_results: List[Dict[str, float]] = []
@@ -1018,15 +1009,6 @@ def main():
                         "folds.  The objective is the mean val R^2_load "
                         "across all (fold × seed) trainings; per-fold "
                         "metrics are persisted on every trial.")
-    p.add_argument("--hard_param", choices=["energy", "load"], default="energy",
-                   help="Hard-PINN parameterisation: 'energy' (legacy, "
-                        "HardEnergyNet with slope-subtraction BC, F = "
-                        "dE/dd by autograd) or 'load' (flipped, HardLoadNet "
-                        "with d-gate on F, E = integral(F) by trapezoid). "
-                        "The load-primary form sidesteps the L^2-vs-H^1 "
-                        "PINN failure mode where E fits well but its "
-                        "derivative F does not.  Ignored when "
-                        "--approach is not 'hard'.")
     args = p.parse_args()
 
     # Parse the LOAO folds (comma-separated angles in degrees).
@@ -1135,15 +1117,6 @@ def main():
     if not args.no_warm_starts:
         _enqueue_warm_starts(study, args.approach, logger)
 
-    # Fixed cfg overrides applied to every trial.  For --approach=hard this
-    # carries the parameterisation selector ``hard_param`` so the whole sweep
-    # uses one architecture consistently — every trial is comparable.
-    fixed_overrides: Dict = {}
-    if args.approach == "hard":
-        fixed_overrides["hard_param"] = str(args.hard_param)
-        logger.info(f"  Hard-PINN parameterisation: hard_param={args.hard_param} "
-                    f"({'HardLoadNet (load-primary)' if args.hard_param == 'load' else 'HardEnergyNet (energy-primary, legacy)'})")
-
     objective = make_objective(
         args.approach,
         fold_data,
@@ -1151,7 +1124,6 @@ def main():
         hpo_epochs=int(args.hpo_epochs),
         base_seed=int(args.seed),
         logger=logger,
-        fixed_cfg_overrides=fixed_overrides,
     )
 
     n_done = sum(
