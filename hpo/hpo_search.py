@@ -241,33 +241,54 @@ def suggest_soft(trial: "optuna.Trial") -> Dict:
 def suggest_hard(trial: "optuna.Trial") -> Dict:
     """Search space for the Hard-PINN.
 
-    The Hard-PINN loss reduces to the data terms alone (w_load, w_energy)
-    because the three core physics constraints (work-energy identity F = dE/dd
-    via autograd, and the two boundary conditions E(0) = 0 and F(0) = 0 via
-    slope-subtraction) are enforced architecturally and do not appear in the
-    loss.  The remaining hyperparameters are the network architecture,
-    optimisation knobs, and the stabilisation parameters (warmup_epochs,
-    swa_pct) required by the warmup + cosine + SWA training schedule.
+    The Hard-PINN loss reduces to the data terms (w_load, w_energy) plus an
+    optional curvature smoothness penalty (``w_curvature``) — see
+    ``train_hard`` for the full loss formulation.  The boundary conditions
+    E(0) = 0 and F(0) = 0 are enforced architecturally by slope-subtraction
+    and do not appear in the loss.
+
+    Three changes from the 100-trial post-mortem:
+
+    1. ``lr`` range narrowed to ``[5e-5, 5e-3]`` — the wider [1e-6, 5e-3]
+       range allowed TPE to converge to a slow-LR under-fit basin where
+       train_R²_F was only +0.43 even after 250 epochs.
+    2. ``w_load`` upper bound raised to 50 (was 20) — the post-mortem
+       showed val_R²_F monotonically improves with higher w_load/w_energy
+       ratios, but the 1–20 range capped the achievable ratio.
+    3. Two new dimensions:
+         * ``w_curvature`` — Sobolev smoothness penalty on ∂F/∂d, directly
+           constrains the autograd derivative.
+         * ``F_warmup_frac`` — curriculum: fraction of epochs spent on F-only
+           loss before w_energy is introduced.  Forces the optimiser to
+           learn F's fine structure before the smoother E loss dominates.
 
     The batch_size choices exclude 8 because empirically a Hard-PINN trial
     at batch_size=8 takes ~5.5 h per ensemble member, which makes the search
-    impractically slow.  16 and 32 remain in the modern-ML regime and cut
-    per-trial wall-clock by 2-4x without giving up generalisation.
+    impractically slow.  16, 32 and 64 are competitive in the modern-ML
+    regime; 64 added to give TPE a faster-converging option for the longer
+    training budget.
     """
     hl_key = trial.suggest_categorical("hidden_layers", list(HL_HARD.keys()))
     return {
-        "hidden_layers":   list(HL_HARD[hl_key]),
-        "batch_size":      trial.suggest_categorical("batch_size", [16, 32]),
-        "lr":              trial.suggest_float("lr",             1e-6, 5e-3, log=True),
-        "weight_decay":    trial.suggest_float("weight_decay",   1e-5, 5e-2, log=True),
-        "dropout":         trial.suggest_float("dropout",        0.0,  0.05),
-        "softplus_beta":   trial.suggest_float("softplus_beta",  5.0,  25.0),
-        "smoothl1_beta":   trial.suggest_float("smoothl1_beta",  0.05, 1.0),
-        "w_load":          trial.suggest_float("w_load",         1.0,  20.0, log=True),
-        "w_energy":        trial.suggest_float("w_energy",       1.0,  20.0, log=True),
-        "grad_clip":       trial.suggest_float("grad_clip",      0.5,  3.0),
-        "warmup_epochs":   trial.suggest_int  ("warmup_epochs",  40,   150),
-        "swa_pct":         trial.suggest_float("swa_pct",        0.10, 0.35),
+        "hidden_layers":     list(HL_HARD[hl_key]),
+        "batch_size":        trial.suggest_categorical("batch_size", [16, 32, 64]),
+        "lr":                trial.suggest_float("lr",             5e-5, 5e-3, log=True),
+        "weight_decay":      trial.suggest_float("weight_decay",   1e-5, 5e-2, log=True),
+        "dropout":           trial.suggest_float("dropout",        0.0,  0.05),
+        "softplus_beta":     trial.suggest_float("softplus_beta",  5.0,  25.0),
+        "smoothl1_beta":     trial.suggest_float("smoothl1_beta",  0.05, 1.0),
+        "w_load":            trial.suggest_float("w_load",         5.0,  50.0, log=True),
+        "w_energy":          trial.suggest_float("w_energy",       1.0,  20.0, log=True),
+        "grad_clip":         trial.suggest_float("grad_clip",      0.5,  3.0),
+        "warmup_epochs":     trial.suggest_int  ("warmup_epochs",  40,   150),
+        "swa_pct":           trial.suggest_float("swa_pct",        0.10, 0.35),
+        "w_curvature":       trial.suggest_float("w_curvature",    0.0,  0.10),
+        "F_warmup_frac":     trial.suggest_float("F_warmup_frac",  0.0,  0.40),
+        # Collocation sampler is active whenever w_curvature > 0; pin
+        # extrapolate_angles=True so the smoothness penalty extends to the
+        # held-out LOAO angle (cannot be tuned by Optuna — boolean infra).
+        "colloc_ratio":      1.0,
+        "extrapolate_angles": True,
     }
 
 
@@ -323,19 +344,43 @@ WARM_START = {
         },
     ],
     "hard": [
+        # Warm-start seed 1: previous documented good config, lifted into the
+        # new search space.  lr lifted from 4e-5 to the new lower bound 5e-5
+        # so TPE doesn't immediately re-explore the under-fit basin.
         {
             "hidden_layers":   "32-32",
             "batch_size":      16,
-            "lr":              4.0e-05,
+            "lr":              5.0e-05,
             "weight_decay":    5.27e-04,
             "dropout":         0.0003,
             "softplus_beta":   13.82,
             "smoothl1_beta":   0.143,
-            "w_load":          6.0,
-            "w_energy":        7.0,
+            "w_load":          10.0,
+            "w_energy":        5.0,
             "grad_clip":       1.63,
             "warmup_epochs":   80,
             "swa_pct":         0.20,
+            "w_curvature":     0.02,
+            "F_warmup_frac":   0.25,
+        },
+        # Warm-start seed 2: a faster-LR, larger-batch alternative — the
+        # post-mortem suggested the slow-LR basin was the bottleneck, so
+        # we prime TPE with a sample from the medium-LR region too.
+        {
+            "hidden_layers":   "64-64",
+            "batch_size":      64,
+            "lr":              5.0e-04,
+            "weight_decay":    1e-3,
+            "dropout":         0.01,
+            "softplus_beta":   10.0,
+            "smoothl1_beta":   0.5,
+            "w_load":          20.0,
+            "w_energy":        4.0,
+            "grad_clip":       1.5,
+            "warmup_epochs":   100,
+            "swa_pct":         0.25,
+            "w_curvature":     0.03,
+            "F_warmup_frac":   0.30,
         },
     ],
 }

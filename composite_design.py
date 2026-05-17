@@ -796,14 +796,37 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
             "softplus_beta": 13.82, "smoothl1_beta": 0.143,
             "w_load": 6.0, "w_energy": 7.0,
             "grad_clip": 1.63,
-            "epochs": 800, "eval_every": 20,
+            # Production-retrain budget: 1500 epochs (was 800).  Matches
+            # train_full_data_hard_pinn's full-data setting and gives the
+            # slow-LR HPO basin enough optimisation budget to converge on F
+            # (the issue diagnosed in the 100-trial HPO post-mortem:
+            # train_R²_F = +0.43 at 250 ep is still under-fit).
+            "epochs": 1500, "eval_every": 20,
             "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
             "sched_patience": 73, "sched_factor": 0.37,
             # Stabilization params: warmup + cosine + SWA.  These are
             # numerical-stability mechanisms, not physics, and are kept.
-            "warmup_epochs": 80,
+            # warmup_epochs scaled proportionally to total epochs
+            # (was 80/800 = 10%, now 150/1500 = 10%).
+            "warmup_epochs": 150,
             "swa_pct": 0.20,
             "eta_min": 1e-6,
+            # Curvature smoothness penalty on F = dE/dd.  Re-introduced
+            # to constrain the autograd ∂E/∂d to be piecewise-smooth in d,
+            # which is the physical assumption for stable progressive
+            # crushing.  Addresses the L²-vs-H¹ failure mode where a
+            # low-MSE Ê has an oscillatory autograd derivative.  The
+            # collocation sampler runs over the full angle range so the
+            # constraint extends to the held-out fold under LOAO.
+            "w_curvature": 0.02,
+            "colloc_ratio": 1.0,
+            "extrapolate_angles": True,
+            # F-first curriculum: train F-only for the first 25% of
+            # epochs, then ramp w_energy back to full over the next 10%.
+            # Forces the model to learn F's fine structure before the
+            # smoother E loss takes over and over-regularises it.
+            "F_warmup_frac": 0.25,
+            "F_warmup_ramp_frac": 0.10,
         }
     else:
         cfg_soft = {
@@ -2112,7 +2135,8 @@ def train_soft(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
 
 def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: StandardScaler,
                scaler_out: StandardScaler, enc: OneHotEncoder, params: ScalingParams,
-               seed: int, protocol: str, logger: logging.Logger) -> Tuple:
+               seed: int, protocol: str, logger: logging.Logger,
+               cfg_override: Optional[Dict] = None) -> Tuple:
     """Train Hard-PINN model with enhanced regularization.
 
     The third return value is the best epoch's mean validation R²,
@@ -2124,9 +2148,25 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     - Monotonicity constraint (F = dE/dd ≥ 0)
     - Curvature regularization (smooth force curves via d²E/dd²)
     - Stabilized training: LR warmup + cosine annealing + SWA
+    - F-first curriculum: for the first ``F_warmup_frac`` of epochs the loss
+      uses only the F (load) data term (``w_energy`` is masked to 0); over the
+      next ``F_warmup_ramp_frac`` of epochs ``w_energy`` linearly ramps back
+      up to its full configured value; for the remainder both terms are
+      active.  This forces the optimiser to learn F's fine structure before
+      the smoother (and intrinsically easier) E loss takes over — directly
+      addressing the L²-vs-H¹ failure mode in which a low-energy-MSE solution
+      can hide an oscillatory autograd ∂E/∂d.  Disabled by default
+      (``F_warmup_frac = 0``).
+
+    ``cfg_override`` (optional dict): keys override the protocol defaults
+    returned by :func:`get_model_config`.  Used by smoke / ablation scripts
+    and by HPO trial driving so callers can inject specific HPs without
+    touching the global config.
     """
     set_seed(seed)
     cfg = get_model_config("hard", protocol)
+    if cfg_override:
+        cfg = {**cfg, **cfg_override}
     t0 = time.time()
     rng = np.random.default_rng(seed + 300)
     
@@ -2161,11 +2201,40 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     smooth_delta = cfg.get("smooth_delta_deg", 1.5)
     colloc_ratio = cfg.get("colloc_ratio", 0.0)
 
+    # F-first curriculum (epoch-indexed ramp on w_energy).  ``F_warmup_frac``
+    # is the fraction of total epochs over which the model trains with the F
+    # loss alone (``w_energy_eff = 0``); ``F_warmup_ramp_frac`` is the
+    # additional fraction over which ``w_energy_eff`` linearly ramps back
+    # to its full configured value.  Defaults reproduce the legacy behaviour.
+    F_warmup_frac = float(cfg.get("F_warmup_frac", 0.0))
+    F_warmup_ramp_frac = float(cfg.get("F_warmup_ramp_frac", 0.1))
+    total_epochs = int(cfg["epochs"])
+    F_warmup_end = max(0, int(F_warmup_frac * total_epochs))
+    F_ramp_end = min(total_epochs, F_warmup_end + max(1, int(F_warmup_ramp_frac * total_epochs)))
+
+    def _effective_w_energy(ep: int) -> float:
+        """Ramp w_energy from 0 to cfg['w_energy'] across the curriculum."""
+        if ep <= F_warmup_end:
+            return 0.0
+        if ep >= F_ramp_end:
+            return float(cfg["w_energy"])
+        # linear ramp from 0 at F_warmup_end+1 to cfg["w_energy"] at F_ramp_end
+        denom = max(1, F_ramp_end - F_warmup_end)
+        return float(cfg["w_energy"]) * (ep - F_warmup_end) / denom
+
     # Create collocation sampler if any physics regularization is active
     colloc_sampler = None
     if w_mono > 0 or w_smooth > 0 or w_curv > 0:
         extrapolate = cfg.get("extrapolate_angles", False)
         colloc_sampler = create_collocation_sampler(train_df, scaler_disp, enc, extrapolate_angles=extrapolate)
+        if F_warmup_frac > 0:
+            logger.info(f"    F-first curriculum: w_energy=0 for ep<={F_warmup_end}, "
+                        f"linear ramp to {cfg['w_energy']:.3f} by ep {F_ramp_end}, "
+                        f"full for the remainder of {total_epochs} epochs.")
+        if w_curv > 0:
+            logger.info(f"    Curvature smoothness penalty active: w_curvature={w_curv:.4f}, "
+                        f"colloc_ratio={colloc_ratio if colloc_ratio > 0 else 'auto (batch/2)'}, "
+                        f"extrapolate_angles={extrapolate}")
 
     rng_b = np.random.default_rng(seed)
     idx = rng_b.integers(0, Xtr.shape[0], Xtr.shape[0]) if CFG.bootstrap else np.arange(Xtr.shape[0])
@@ -2181,6 +2250,11 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     es = None if use_stabilized else EarlyStopping(cfg["earlystop_patience_evals"], cfg["earlystop_min_delta"])
     
     for ep in range(1, cfg["epochs"] + 1):
+        # F-first curriculum: mask w_energy down to 0 during the early F-only
+        # phase, ramp it back up, then run the rest with the full configured
+        # balance.  When F_warmup_frac == 0 this is a no-op and w_energy_eff
+        # is exactly cfg["w_energy"] every epoch (legacy behaviour).
+        w_energy_eff = _effective_w_energy(ep)
         model.train()
         loss_sum, nb = 0.0, 0
         for Xb, yb in loader:
@@ -2189,7 +2263,7 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
             dE = torch.autograd.grad(E_n, Xb, torch.ones_like(E_n), create_graph=True)[0]
             F_phys = dE[:, U_COL:U_COL+1] * params.grad_factor
             F_n = (F_phys - params.mu_F) / params.sig_F
-            loss = cfg["w_load"] * sl1(F_n, yb[:, 0:1]) + cfg["w_energy"] * mse(E_n, yb[:, 1:2])
+            loss = cfg["w_load"] * sl1(F_n, yb[:, 0:1]) + w_energy_eff * mse(E_n, yb[:, 1:2])
             
             # Collocation-based physics regularization
             if colloc_sampler is not None:

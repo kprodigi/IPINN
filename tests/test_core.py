@@ -337,15 +337,26 @@ class TestCurvatureRegularizationHard:
         # though the production cfg does not invoke it.
         assert hasattr(m, "curvature_regularization_hard")
 
-    def test_hard_unseen_config_excludes_auxiliary_regularizers(self, m):
+    def test_hard_unseen_config_curvature_active_only(self, m):
+        """Hard-PINN cfg: curvature smoothness penalty is the only auxiliary
+        regulariser permitted.  It is a Sobolev-style constraint on the
+        autograd derivative ∂Ê/∂d that directly addresses the L²-vs-H¹
+        failure mode (high E R², low F R²) diagnosed in the 100-trial
+        post-mortem.  Monotonicity (F ≥ 0) and angle smoothness remain
+        excluded.
+        """
         cfg = m.get_model_config("hard", "unseen")
-        # The production Hard-PINN cfg must NOT contain auxiliary
-        # field-wide regularizer weights; physics enforcement in Hard is
-        # exclusively architectural (Section 3.2.3 of the manuscript).
-        for key in ("w_curvature", "w_monotonicity", "w_angle_smooth"):
+        # Curvature is enabled at a small positive weight.
+        assert "w_curvature" in cfg, "w_curvature must be set in production Hard cfg"
+        assert cfg["w_curvature"] > 0, (
+            f"w_curvature must be positive (got {cfg['w_curvature']!r}); "
+            f"it is the Sobolev penalty addressing the L^2-vs-H^1 disconnect."
+        )
+        # Monotonicity and angle-smoothness still excluded.
+        for key in ("w_monotonicity", "w_angle_smooth"):
             assert key not in cfg, (
                 f"{key} must not be set in production Hard cfg; "
-                f"auxiliary regularizers are omitted by design."
+                f"only the curvature smoothness penalty is permitted."
             )
 
     def test_soft_unseen_config_excludes_auxiliary_regularizers(self, m):
