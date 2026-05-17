@@ -29,6 +29,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -128,10 +129,20 @@ def main():
     ap.add_argument("--data_dir", default="./data")
     ap.add_argument("--theta_star", type=float, default=60.0)
     ap.add_argument("--epochs", type=int, default=150)
-    ap.add_argument("--seed", type=int, default=2026)
+    ap.add_argument("--seed", type=int, default=2026,
+                    help="Single seed (used when --seeds is not given).")
+    ap.add_argument("--seeds", type=str, default=None,
+                    help="Comma-separated seeds for multi-seed evaluation, "
+                         "e.g. '2026,2027,2028'.  When given, each seed is run "
+                         "independently and the table reports per-seed numbers "
+                         "plus mean/median across seeds.")
     ap.add_argument("--skip_energy", action="store_true",
                     help="Skip the HardEnergyNet baseline (use prior published numbers instead)")
     args = ap.parse_args()
+    seeds = (
+        [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
+        if args.seeds else [args.seed]
+    )
 
     logger = setup_logger()
     logger.info("=" * 78)
@@ -140,34 +151,53 @@ def main():
 
     df = load_data(Path(args.data_dir), logger)
 
-    results = {}
-    if not args.skip_energy:
-        logger.info("")
-        logger.info("[1/2] Training HardEnergyNet (legacy, energy-primary)...")
-        results["energy"] = run_one("energy", df, args.theta_star, args.epochs, args.seed, logger)
+    # Accumulate per-architecture, per-seed records.
+    records: Dict[str, List[dict]] = {"energy": [], "load": []}
+    arch_list = ["energy", "load"] if not args.skip_energy else ["load"]
 
-    logger.info("")
-    logger.info("[2/2] Training HardLoadNet (flipped, load-primary)...")
-    results["load"] = run_one("load", df, args.theta_star, args.epochs, args.seed, logger)
+    for arch in arch_list:
+        for s in seeds:
+            logger.info("")
+            logger.info(f"[{arch}] seed={s} ...")
+            records[arch].append(run_one(arch, df, args.theta_star, args.epochs, s, logger))
 
-    # Summary
+    # Per-seed table + cross-seed aggregate.
     logger.info("")
     logger.info("=" * 78)
-    logger.info("RESULTS")
+    logger.info(f"RESULTS  (theta*={args.theta_star}, epochs={args.epochs}, "
+                f"K_seeds={len(seeds)})")
     logger.info("=" * 78)
-    logger.info(f"  {'param':>8s}  {'train_R2_F':>10s}  {'val_R2_F':>10s}  "
-                f"{'train_R2_E':>10s}  {'val_R2_E':>10s}  {'time_s':>7s}  {'n_par':>6s}")
-    for ap_name, r in results.items():
-        logger.info(
-            f"  {ap_name:>8s}  {r['train_R2_load']:+10.4f}  {r['val_R2_load']:+10.4f}  "
-            f"{r['train_R2_energy']:+10.4f}  {r['val_R2_energy']:+10.4f}  "
-            f"{r['elapsed_sec']:7.1f}  {r['n_params']:6d}"
-        )
+    header = (f"  {'param':>7s}  {'seed':>5s}  {'train_R2_F':>10s}  "
+              f"{'val_R2_F':>10s}  {'train_R2_E':>10s}  {'val_R2_E':>10s}  "
+              f"{'time_s':>7s}")
+    logger.info(header)
+    for arch in arch_list:
+        for r, s in zip(records[arch], seeds):
+            logger.info(
+                f"  {arch:>7s}  {s:>5d}  {r['train_R2_load']:+10.4f}  "
+                f"{r['val_R2_load']:+10.4f}  {r['train_R2_energy']:+10.4f}  "
+                f"{r['val_R2_energy']:+10.4f}  {r['elapsed_sec']:7.1f}"
+            )
+        # cross-seed summary (median + mean ± std)
+        if len(records[arch]) >= 2:
+            vals = [r["val_R2_load"] for r in records[arch]]
+            med = float(np.median(vals))
+            mu = float(np.mean(vals))
+            sd = float(np.std(vals))
+            logger.info(
+                f"  {arch:>7s}  agg   {'':>10s}  median={med:+.4f}  "
+                f"mean={mu:+.4f} ± {sd:.4f}"
+            )
 
-    # One-line verdict for log-grep
-    load_v = results["load"]["val_R2_load"]
-    if "energy" in results:
-        energy_v = results["energy"]["val_R2_load"]
+    # One-line verdict for log-grep.
+    def _agg(arch: str) -> float:
+        vals = [r["val_R2_load"] for r in records[arch]]
+        return float(np.median(vals)) if vals else float("nan")
+
+    load_v = _agg("load")
+    logger.info("")
+    if "energy" in records and records["energy"]:
+        energy_v = _agg("energy")
         delta = load_v - energy_v
         if delta > 0.02:
             tag = "BETTER"
@@ -175,15 +205,18 @@ def main():
             tag = "COMPARABLE"
         else:
             tag = "WORSE"
-        logger.info("")
         logger.info(
-            f"VERDICT: HardLoadNet val_R2_load={load_v:+.4f} vs "
-            f"HardEnergyNet {energy_v:+.4f}  delta={delta:+.4f}  -> {tag}"
+            f"VERDICT theta*={args.theta_star}: HardLoadNet median={load_v:+.4f}  "
+            f"vs HardEnergyNet median={energy_v:+.4f}  delta={delta:+.4f}  -> {tag}"
         )
         return 0 if tag != "WORSE" else 1
     else:
-        logger.info("")
-        logger.info(f"VERDICT: HardLoadNet val_R2_load={load_v:+.4f}  (no energy baseline this run)")
+        # No energy baseline this run; reference value from prior HPO (trial #57)
+        ref = {60.0: 0.74, 65.0: -1.39, 45.0: 0.59, 70.0: -0.08}.get(args.theta_star)
+        ref_str = f"vs HardEnergyNet HPO best ~{ref:+.2f}" if ref is not None else ""
+        logger.info(
+            f"VERDICT theta*={args.theta_star}: HardLoadNet median val_R2_load={load_v:+.4f}  {ref_str}"
+        )
         return 0
 
 

@@ -1712,22 +1712,24 @@ class HardEnergyNet(nn.Module):
 
 
 class HardLoadNet(nn.Module):
-    """MLP for Hard-PINN with flipped parameterization (outputs F directly; E via integration).
+    """Load-primary Hard-PINN ablation (outputs F directly; E via integration).
+
+    Empirically NOT the default — see paragraph at the bottom of this docstring.
 
     The physical inverse of :class:`HardEnergyNet`::
 
-        HardEnergyNet:  E_n = net(x);  F = ∂E_raw/∂d            (energy primary)
-        HardLoadNet:    F_n = net(x);  E_raw = ∫₀^d F_raw(δ) dδ  (load primary)
+        HardEnergyNet:  E_n = net(x);  F = ∂E_raw/∂d            (energy primary, default)
+        HardLoadNet:    F_n = net(x);  E_raw = ∫₀^d F_raw(δ) dδ  (load primary, ablation)
 
-    Motivation: in the energy-primary architecture, F = ∂E/∂d is a *derivative*
-    of the network output and inherits all the high-frequency noise that the
-    integrated E_n hides under its L² fit.  Small high-frequency errors in Ê(d)
-    amplify when you take ∂/∂d, which is the classic L²-vs-H¹ PINN failure
-    mode (energy R² high, load R² low).  In the load-primary architecture, F
-    is the network output directly and E is the *integrated*, smoother quantity
-    — robust to small F errors and harder to mis-predict.  This also matches
-    measurement physics: F is what's recorded by the load cell, E is computed
-    by integration of the force-displacement curve.
+    Original motivation: in the energy-primary architecture, F = ∂E/∂d is a
+    *derivative* of the network output and inherits any high-frequency noise
+    that the integrated E_n hides under its L² fit.  Small high-frequency
+    errors in Ê(d) amplify when you take ∂/∂d, which is the classic L²-vs-H¹
+    PINN failure mode (energy R² high, load R² low).  In the load-primary
+    architecture, F is the network output directly and E is the *integrated*,
+    smoother quantity — robust to small F errors and harder to mis-predict.
+    This also matches measurement physics: F is what's recorded by the load
+    cell, E is computed by integration of the force-displacement curve.
 
     Both BCs are enforced architecturally:
 
@@ -1753,6 +1755,27 @@ class HardLoadNet(nn.Module):
     small backbones our HPO favours, the wall-clock cost is roughly 5–10× a
     single :class:`HardEnergyNet` forward — paid once per loss eval, not
     per-batch-element.
+
+    Empirical status (2026-05): tested on local smoke runs (θ=60 single-fold,
+    400 epochs × 2 seeds: median val_R²_load = +0.64; θ=65 single-fold,
+    200 epochs × 2 seeds: median val_R²_load = −1.59), both **worse** than the
+    energy-primary HardEnergyNet (HPO best at θ=60: +0.74; θ=65: −1.39) with
+    the same HPs.  Two reasons:
+
+    1. **The HPs need re-tuning for this architecture.**  HardEnergyNet's
+       tuned HPs (lr ≈ 4e-5, weight_decay ≈ 5e-4, SWA over last 20%) were
+       fitted to a model where F is derived from E by autograd; load-primary
+       gradient dynamics are different and want different regularisation.
+       With the energy-primary HPs, load-primary overfits past ~ep 100.
+    2. **The θ=65 catastrophe is data-structural, not architectural.**  Even
+       train R²_F is near zero at θ=65 (one-sided neighbourhood: only 70° as
+       adjacent training data).  No reparameterisation of the output head
+       fixes that.
+
+    Kept in the codebase as an ablation for the manuscript's Section 5
+    discussion — *not* the default Hard parameterisation.  Activate via
+    ``cfg["hard_param"] = "load"`` or ``HARD_PARAM=load`` on the SLURM
+    launcher.  Default everywhere is ``"energy"``.
     """
 
     def __init__(self, in_d: int, hidden_layers: List[int], dropout: float,
