@@ -61,6 +61,12 @@ HPO_EPOCHS="${HPO_EPOCHS:-200}"
 # covering both boundary angles + interior; "45,50,55,60,65,70" gives full
 # 6-fold LOAO.  Per-trial cost scales linearly with the number of folds.
 LOAO_FOLDS="${LOAO_FOLDS:-60}"
+# Hard-PINN parameterisation: "energy" (legacy HardEnergyNet, F = dE/dd by
+# autograd) or "load" (HardLoadNet, F direct + E = trapezoid(F)).  Default
+# "load" — the smoke comparison at theta=60 showed val_R2_load = 0.56 at 100
+# epochs vs 0.21 at 800 epochs for the energy-primary form, so the flipped
+# architecture is the right default for new runs.  Ignored for soft/ddns.
+HARD_PARAM="${HARD_PARAM:-load}"
 N_WORKERS="${N_WORKERS:-1}"
 SEED="${SEED:-2026}"
 DATA_DIR="${DATA_DIR:-./data}"
@@ -133,7 +139,7 @@ echo "=== Start: \$(date) ==="
 
 # Single-line invocation (heredoc + backslash-newline line continuations are
 # unreliable on this cluster's sbatch — see previous diagnostics).
-"\$PYTHON_BIN" ${LAUNCHER} --approach ${APPROACH} --n_trials ${N_TRIALS} --n_startup_trials ${N_STARTUP} --n_seeds ${N_SEEDS} --hpo_epochs ${HPO_EPOCHS} --loao_folds ${LOAO_FOLDS} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --seed ${SEED} ${WARM_FLAG}
+"\$PYTHON_BIN" ${LAUNCHER} --approach ${APPROACH} --n_trials ${N_TRIALS} --n_startup_trials ${N_STARTUP} --n_seeds ${N_SEEDS} --hpo_epochs ${HPO_EPOCHS} --loao_folds ${LOAO_FOLDS} --hard_param ${HARD_PARAM} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --seed ${SEED} ${WARM_FLAG}
 EXIT_CODE=\$?
 
 echo "=== End: \$(date)  Exit: \${EXIT_CODE} ==="
