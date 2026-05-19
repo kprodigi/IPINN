@@ -1,0 +1,15 @@
+# Core scientific stack (Python >= 3.10 recommended)
+numpy>=1.26,<3
+pandas>=2.0
+scipy>=1.11
+matplotlib>=3.8
+scikit-learn>=1.3
+
+# Deep learning
+torch>=2.1,<3
+
+# Inverse design GP-BO (joint theta + LC)
+scikit-optimize>=0.10.1
+
+# Tests (optional for end users; required for CI)
+pytest>=7.4
