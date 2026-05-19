@@ -1,4 +1,4 @@
-# IPINN — Physics-Informed Neural Networks for Crashworthiness
+# IPINN — Physics-Informed Inverse Design for Crashworthiness Optimization
 
 [![CI](https://github.com/kprodigi/IPINN/actions/workflows/ci.yml/badge.svg)](https://github.com/kprodigi/IPINN/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
