@@ -192,12 +192,18 @@ HL_HARD = {
 
 
 def suggest_ddns(trial: "optuna.Trial") -> Dict:
-    """Search space for the data-driven baseline (no physics losses)."""
+    """Search space for the data-driven baseline (no physics losses).
+
+    ``lr`` lower bound tightened from 1e-6 to 1e-5 to avoid the slow-LR
+    under-fit basin observed in earlier Hard-PINN HPOs.  The documented
+    DDNS best (val_R²_load = 0.78) used lr = 4.21e-5, so the tighter
+    range still includes the proven optimum.
+    """
     hl_key = trial.suggest_categorical("hidden_layers", list(HL_DDNS_SOFT.keys()))
     return {
         "hidden_layers":   list(HL_DDNS_SOFT[hl_key]),
         "batch_size":      trial.suggest_categorical("batch_size", [32, 64, 128]),
-        "lr":              trial.suggest_float("lr",             1e-6, 1e-3, log=True),
+        "lr":              trial.suggest_float("lr",             1e-5, 1e-3, log=True),
         "weight_decay":    trial.suggest_float("weight_decay",   1e-6, 1e-3, log=True),
         "dropout":         trial.suggest_float("dropout",        0.0,  0.10),
         "softplus_beta":   trial.suggest_float("softplus_beta",  5.0,  30.0),
@@ -249,14 +255,15 @@ def suggest_hard(trial: "optuna.Trial") -> Dict:
     optimisation knobs, and the stabilisation parameters (warmup_epochs,
     swa_pct) required by the warmup + cosine + SWA training schedule.
 
-    Three minor tightenings from the documented post-mortem:
+    One tightening from the documented post-mortem:
 
-    1. ``lr`` range narrowed from ``[1e-6, 5e-3]`` to ``[1e-5, 1e-3]`` — the
-       wider lower bound allowed TPE to converge to a slow-LR under-fit
-       basin (train_R²_F = 0.43 at 250 epochs).
-    2. ``softplus_beta`` upper bound dropped from 25 to 12 — high β
-       approaches ReLU, which has zero second derivative; the autograd
-       derivative ∂E/∂d is cleaner with smoother activations.
+    * ``lr`` range narrowed from ``[1e-6, 5e-3]`` to ``[1e-5, 1e-3]`` — the
+      wider lower bound allowed TPE to converge to a slow-LR under-fit
+      basin (train_R²_F = 0.43 at 250 epochs).
+
+    Other ranges include the documented production HPs that achieved
+    val_R²_load = 0.85 (M=20 ensemble × 800 epochs), so TPE can both
+    re-discover the proven optimum and explore around it.
 
     The batch_size choices exclude 8 because empirically a Hard-PINN trial
     at batch_size=8 takes ~5.5 h per ensemble member, which makes the search
@@ -270,7 +277,7 @@ def suggest_hard(trial: "optuna.Trial") -> Dict:
         "lr":              trial.suggest_float("lr",             1e-5, 1e-3, log=True),
         "weight_decay":    trial.suggest_float("weight_decay",   1e-5, 5e-2, log=True),
         "dropout":         trial.suggest_float("dropout",        0.0,  0.05),
-        "softplus_beta":   trial.suggest_float("softplus_beta",  3.0,  12.0),
+        "softplus_beta":   trial.suggest_float("softplus_beta",  3.0,  25.0),
         "smoothl1_beta":   trial.suggest_float("smoothl1_beta",  0.05, 1.0),
         "w_load":          trial.suggest_float("w_load",         1.0,  20.0, log=True),
         "w_energy":        trial.suggest_float("w_energy",       1.0,  20.0, log=True),
@@ -333,16 +340,16 @@ WARM_START = {
     ],
     "hard": [
         # Warm-start: documented Hard-PINN production HPs (val R²_load = 0.85
-        # at θ*=60° with M=20 ensemble × 800 epochs).  Re-enqueued so TPE
-        # starts from a known-good prior; softplus_beta clipped to the new
-        # upper bound 12.0 to keep the warm-start inside the search space.
+        # at θ*=60° with M=20 ensemble × 800 epochs).  Exact values from
+        # get_model_config("hard", "unseen") so TPE evaluates the proven
+        # configuration as trial 1.
         {
             "hidden_layers":   "32-32",
             "batch_size":      16,
-            "lr":              1.0e-04,
+            "lr":              4.0e-05,
             "weight_decay":    5.27e-04,
             "dropout":         0.0003,
-            "softplus_beta":   12.0,
+            "softplus_beta":   13.82,
             "smoothl1_beta":   0.143,
             "w_load":          6.0,
             "w_energy":        7.0,
