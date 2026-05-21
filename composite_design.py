@@ -741,41 +741,47 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
     """
 
     if protocol == "unseen":
-        # ---- cfg_ddns (Best val load R² = 0.7835, arch [128, 64, 32]) ----
+        # ---- cfg_ddns (HPO best trial #131, val_R²_load = 0.7378, arch [256,128,64]) ----
+        # New clean-methodology HPO (150 trials, 3 seeds, 800 epochs).
+        # mean_train_load_r2 = 0.547, mean_val_load_r2 = 0.738,
+        # mean_val_energy_r2 = 0.983, std_val_load_r2 = 0.009.
         cfg_ddns = {
-            "optimizer": "adam", "lr": 4.2123162503e-05,
-            "weight_decay": 3.1582563297e-05, "batch_size": 64,
-            "hidden_layers": [128, 64, 32], "dropout": 0.016401,
-            "softplus_beta": 18.9027, "smoothl1_beta": 1.0838,
-            "w_data_load": 3.568932, "w_data_energy": 3.451798,
+            "optimizer": "adam", "lr": 1.0135181205e-05,
+            "weight_decay": 1.5517296599e-05, "batch_size": 128,
+            "hidden_layers": [256, 128, 64], "dropout": 0.014112,
+            "softplus_beta": 18.6592, "smoothl1_beta": 1.0086,
+            "w_data_load": 5.606619, "w_data_energy": 1.424624,
             "w_phys": 0.0, "w_bc": 0.0, "colloc_ratio": 0.0,
-            "epochs": 600, "eval_every": 25,
+            "epochs": 800, "eval_every": 25,
             "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
-            "sched_patience": 58, "sched_factor": 0.4589,
+            "sched_patience": 87, "sched_factor": 0.5965,
         }
 
-        # ---- Soft-PINN cfg (arch [256, 128, 64]) ----
+        # ---- Soft-PINN cfg (HPO best trial #103, val_R²_load = 0.7796, arch [256,128]) ----
+        # New clean-methodology HPO (150 trials, 3 seeds, 800 epochs).
+        # mean_train_load_r2 = 0.541, mean_val_load_r2 = 0.780,
+        # mean_val_energy_r2 = 0.988.
         # The Soft-PINN loss contains the data terms (w_data_load,
         # w_data_energy), the work-energy residual loss (w_phys), and the
         # boundary-condition soft penalty (w_bc) which enforces BOTH
         # E(0) = 0 AND F(0) = 0 via a paired MSE on the network's E and F
         # outputs at d = 0 (Section 3.2.2).  Auxiliary field-wide
-        # regularizers (monotonicity, angle smoothness) are intentionally
-        # NOT applied so the Soft–Hard comparison isolates the three core
-        # physics constraints (work-energy + two BCs) under different
-        # enforcement mechanisms.
+        # regularizers (monotonicity, angle smoothness, curvature) are
+        # intentionally NOT applied so the Soft–Hard comparison isolates
+        # the three core physics constraints (work-energy + two BCs)
+        # under different enforcement mechanisms.
         cfg_soft = {
-            "optimizer": "adam", "lr": 4.2358412564e-03,
-            "weight_decay": 1.5707123457e-04, "batch_size": 32,
-            "hidden_layers": [256, 128, 64], "dropout": 0.000137,
-            "softplus_beta": 11.0650, "smoothl1_beta": 1.1584,
-            "w_data_load": 3.609280, "w_data_energy": 1.704464,
-            "w_phys": 3.689334 if w_phys_override is None else w_phys_override,
-            "w_bc": 0.851661, "colloc_ratio": 3.697626,
+            "optimizer": "adam", "lr": 1.3217112008e-05,
+            "weight_decay": 2.4409132901e-06, "batch_size": 64,
+            "hidden_layers": [256, 128], "dropout": 0.014463,
+            "softplus_beta": 21.1837, "smoothl1_beta": 0.610540,
+            "w_data_load": 4.805743, "w_data_energy": 1.075164,
+            "w_phys": 0.781504 if w_phys_override is None else w_phys_override,
+            "w_bc": 2.282421, "colloc_ratio": 4.840252,
             "extrapolate_angles": True,
             "epochs": 800, "eval_every": 25,
             "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
-            "sched_patience": 71, "sched_factor": 0.6547,
+            "sched_patience": 25, "sched_factor": 0.290325,
         }
 
         # ---- Hard-PINN cfg (arch [32, 32]) ----
