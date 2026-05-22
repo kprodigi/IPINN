@@ -452,9 +452,26 @@ WARM_START = {
 # TRIAL EVALUATION
 # =============================================================================
 def _build_trial_cfg(approach: str, params: Dict) -> Dict:
-    """Patch the trial parameters into the production base config."""
+    """Patch the trial parameters into the production base config.
+
+    Also tightens the per-seed early-stopping patience to ~200 epochs
+    (HPO-only) so slow-converging Soft/DDNS trials don't burn the full
+    ``--hpo_epochs`` budget when their val R^2 plateaus.  Hard-PINN
+    training disables EarlyStopping in stabilized mode (warmup + cosine
+    + SWA needs the full epoch budget), so this only affects Soft and
+    DDNS.  Cross-trial pruning of clearly-losing trials is handled
+    separately by Optuna's MedianPruner (see ``optuna.create_study`` in
+    ``main``).
+    """
     cfg = copy.deepcopy(cd.get_model_config(approach, "unseen"))
     cfg.update(params)
+    # 200-epoch early-stop patience for HPO trials.  ``eval_every``
+    # defaults to ``hpo_epochs // 8`` (= 50 at HPO_EPOCHS=400), so the
+    # default production patience of 15 evals × 50 = 750 epochs would
+    # never trigger inside the 400-epoch HPO budget.  Cap patience so
+    # ``patience × eval_every`` ≈ 200 epochs, never below 4 evals.
+    eval_every = int(cfg.get("eval_every", 25))
+    cfg["earlystop_patience_evals"] = max(4, 200 // max(1, eval_every))
     return cfg
 
 
@@ -597,11 +614,23 @@ def make_objective(
                     f"train_R2_energy={metrics['train_energy_r2']:.4f}  "
                     f"val_R2_energy={metrics['val_energy_r2']:.4f}"
                 )
-                # Report the running mean of the OBJECTIVE so a pruner
-                # could act on the partial trial.
+                # Report the running mean of the OBJECTIVE to the pruner
+                # so clearly-losing trials can be killed before all
+                # ``n_seeds`` × ``n_folds`` trainings complete.  The
+                # MedianPruner (configured in main()) prunes a trial if
+                # its running mean falls below the median of all completed
+                # trials at the same step, but only after n_warmup_steps=1
+                # so a noisy seed 1 can't kill a borderline-good trial.
                 running_eval_idx += 1
                 running_mean = float(np.mean([r["val_load_r2"] for r in all_results]))
                 trial.report(running_mean, step=running_eval_idx)
+                if trial.should_prune():
+                    logger.info(
+                        f"  trial {trial.number:03d} PRUNED at step "
+                        f"{running_eval_idx} (running_mean_val_R2={running_mean:.4f} "
+                        f"< median of completed trials at this step)"
+                    )
+                    raise optuna.TrialPruned()
 
         # Aggregate across all (fold, seed) evaluations.
         def _agg(key: str) -> Tuple[float, float]:
@@ -1229,11 +1258,32 @@ def main():
         grace_period=900,
         failed_trial_callback=RetryFailedTrialCallback(max_retry=2),
     )
+    # MedianPruner — across-trial protection against compute waste.  After
+    # ``n_startup_trials`` trials have completed, any trial whose running
+    # objective at the current step is below the median objective of all
+    # completed trials at the same step gets pruned.  Configured here as:
+    #   * n_startup_trials = same as TPE startup (30): don't prune during
+    #     random exploration; the pruner needs a population of completed
+    #     trials to compute a meaningful median.
+    #   * n_warmup_steps = 1: never prune after seed 1; require at least
+    #     2 seed evaluations before pruning so single-seed noise can't kill
+    #     a borderline-good trial.
+    #   * interval_steps = 1: check after every (fold, seed) report.
+    # Hard-PINN trials disable EarlyStopping in stabilized mode (SWA needs
+    # the full epoch budget), so the pruner is the PRIMARY protection
+    # against compute waste on losing Hard trials.  Soft / DDNS trials
+    # additionally use the 200-epoch patience set in _build_trial_cfg.
+    pruner = optuna.pruners.MedianPruner(
+        n_startup_trials=int(args.n_startup_trials),
+        n_warmup_steps=1,
+        interval_steps=1,
+    )
     study = optuna.create_study(
         study_name=study_name,
         storage=storage,
         direction="maximize",
         sampler=sampler,
+        pruner=pruner,
         load_if_exists=True,
     )
     study.set_user_attr("approach", args.approach)
