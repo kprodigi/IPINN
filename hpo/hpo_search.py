@@ -12,16 +12,30 @@ shared SQLite-backed study, with full resume-from-preemption support.
 
 Sampling policy
 ---------------
-* ``n_startup_trials`` (default 15) are drawn uniformly at random from
-  the per-approach search space.  These give the TPE model a diverse
-  initial set of observations so it does not exploit prematurely.
-* After startup, Optuna's multivariate TPE sampler with grouped
-  categorical parameters proposes subsequent trials.
-* An optional small set of **warm-start** parameter dicts can be
-  enqueued before any TPE proposals so that the search starts with
-  one or more informed prior configurations.  Warm starts use the
-  same parameter names as the search space; missing parameters are
-  freely sampled.  Pass ``--no_warm_starts`` to disable.
+* **Warm start (trial 0):** one informed prior dict (the documented
+  production HPs) is enqueued *before* the random-startup phase, so
+  TPE has a high-quality anchor point from the first observation.
+  Pass ``--no_warm_starts`` to disable.
+* **Random startup (trials 1 .. n_startup_trials):** ``n_startup_trials``
+  (default 30) are drawn uniformly at random from the per-approach
+  search space.  For a ~19-dimensional search space, 30 random trials
+  satisfy the rule of thumb of ~1.5× dimensions, giving TPE enough
+  diverse observations to model the posterior before it starts
+  exploiting.  Choosing too few random trials makes TPE collapse onto
+  whatever the warm start anchors to; too many wastes budget on pure
+  random search.
+* **TPE phase (remaining trials):** Optuna's multivariate TPE sampler
+  with grouped categorical parameters proposes subsequent trials based
+  on the full random+warm-start history.  ``multivariate=True`` makes
+  TPE model joint dependencies between hyperparameters (e.g. larger
+  networks pairing with lower LR); ``group=True`` keeps categorical
+  groups (architecture, batch size) coherent in the proposal.
+
+So the effective sequence for 150 trials with the default n_startup=30:
+``[warm-start] -> [30 random] -> [119 TPE]`` — i.e., ~20% random,
+~80% TPE.  Each worker's random sampler is additionally decorrelated
+by ``SLURM_ARRAY_TASK_ID`` so concurrent workers don't draw identical
+random startup samples.
 
 Per-trial evaluation
 --------------------
@@ -249,7 +263,7 @@ def suggest_soft(trial: "optuna.Trial") -> Dict:
         #  Hard: w_monotonicity=7.72, w_angle_smooth=0.016, w_curvature=0.0013,
         #  smooth_delta=1.93°).  Same ranges in suggest_hard for identical
         #  priors.
-        "w_monotonicity":   trial.suggest_float("w_monotonicity",  0.01,   10.0, log=True),
+        "w_monotonicity":   trial.suggest_float("w_monotonicity",  0.01,   30.0, log=True),
         "w_angle_smooth":   trial.suggest_float("w_angle_smooth",  0.001,  10.0, log=True),
         "w_curvature":      trial.suggest_float("w_curvature",     0.0001, 0.1,  log=True),
         "smooth_delta_deg": trial.suggest_float("smooth_delta_deg", 1.0,   4.0),
@@ -302,7 +316,7 @@ def suggest_hard(trial: "optuna.Trial") -> Dict:
         "weight_decay":    trial.suggest_float("weight_decay",   1e-5, 5e-2, log=True),
         "dropout":         trial.suggest_float("dropout",        0.0,  0.05),
         "softplus_beta":   trial.suggest_float("softplus_beta",  3.0,  25.0),
-        "smoothl1_beta":   trial.suggest_float("smoothl1_beta",  0.05, 1.0),
+        "smoothl1_beta":   trial.suggest_float("smoothl1_beta",  0.01, 1.0),
         "w_load":          trial.suggest_float("w_load",         1.0,  20.0, log=True),
         "w_energy":        trial.suggest_float("w_energy",       1.0,  20.0, log=True),
         "grad_clip":       trial.suggest_float("grad_clip",      0.5,  3.0),
@@ -313,8 +327,11 @@ def suggest_hard(trial: "optuna.Trial") -> Dict:
         # ranges as Soft so the architectural-vs-soft comparison is over
         # identical priors.  Ranges are wide enough to include the
         # documented production HPs (w_monotonicity=7.72, w_angle_smooth=
-        # 0.016, w_curvature=0.0013, smooth_delta_deg=1.93°).
-        "w_monotonicity":   trial.suggest_float("w_monotonicity",  0.01,   10.0, log=True),
+        # 0.016, w_curvature=0.0013, smooth_delta_deg=1.93°).  Upper bound
+        # on w_monotonicity widened from 10 to 30 because the documented
+        # Hard value 7.72 sits at 96% of [0.01, 10.0] log, leaving no room
+        # for TPE to push higher if the true optimum is >10.
+        "w_monotonicity":   trial.suggest_float("w_monotonicity",  0.01,   30.0, log=True),
         "w_angle_smooth":   trial.suggest_float("w_angle_smooth",  0.001,  10.0, log=True),
         "w_curvature":      trial.suggest_float("w_curvature",     0.0001, 0.1,  log=True),
         "smooth_delta_deg": trial.suggest_float("smooth_delta_deg", 1.0,   4.0),
@@ -1043,8 +1060,13 @@ def main():
     p.add_argument("--n_trials", type=int, default=100,
                    help="Total Optuna trials (including the startup random "
                         "trials).")
-    p.add_argument("--n_startup_trials", type=int, default=15,
-                   help="Random-search trials before TPE engages.")
+    p.add_argument("--n_startup_trials", type=int, default=30,
+                   help="Random-search trials before TPE engages.  Default "
+                        "30 satisfies the rule-of-thumb ~1.5x search-space "
+                        "dimensionality (Soft has 19 dims, Hard has 18) so "
+                        "TPE has a diverse posterior before it starts "
+                        "exploiting.  Lower this for very small searches; "
+                        "raise it (e.g. to 50) if you want more exploration.")
     p.add_argument("--n_seeds", type=int, default=2,
                    help="Ensemble members trained per trial; the trial's "
                         "objective is the mean validation load R^2.")

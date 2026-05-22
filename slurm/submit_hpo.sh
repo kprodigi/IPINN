@@ -53,7 +53,7 @@ esac
 
 # ---- Defaults ------------------------------------------------------------
 N_TRIALS="${N_TRIALS:-100}"
-N_STARTUP="${N_STARTUP:-15}"
+N_STARTUP="${N_STARTUP:-30}"
 N_SEEDS="${N_SEEDS:-2}"
 HPO_EPOCHS="${HPO_EPOCHS:-200}"
 # Comma-separated held-out angles for leave-one-angle-out HPO.  Default "60"
