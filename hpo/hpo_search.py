@@ -219,11 +219,15 @@ def suggest_soft(trial: "optuna.Trial") -> Dict:
     """Search space for the Soft-PINN.
 
     The Soft-PINN loss contains the data terms (w_data_load, w_data_energy),
-    the work-energy residual loss (w_phys), and the paired boundary-condition
-    soft penalty (w_bc) that enforces BOTH E(0)=0 AND F(0)=0.  No additional
-    field-wide regularisers (monotonicity, angle smoothness, curvature) are
-    applied: the three core physics constraints common to both PINN
-    variants are exactly the ones searched here.
+    the three core physics soft penalties (work-energy residual w_phys, paired
+    BC penalty w_bc enforcing both E(0)=0 and F(0)=0), AND three auxiliary
+    soft physics regularisers — monotonicity (F >= 0), angle smoothness
+    (dF/dtheta), and curvature (d^2E/dd^2).  These three are tunable here
+    because they materially affect ensemble-mean R^2 (see the Hard #152 vs
+    #124 post-mortem: without aux constraints, the M=20 production ensemble
+    fell ~0.04 below documented baselines).  They are applied uniformly to
+    Soft and Hard so the architectural-vs-soft comparison is over identical
+    auxiliary priors, not different ones.
     """
     hl_key = trial.suggest_categorical("hidden_layers", list(HL_DDNS_SOFT.keys()))
     return {
@@ -237,8 +241,19 @@ def suggest_soft(trial: "optuna.Trial") -> Dict:
         "w_data_load":     trial.suggest_float("w_data_load",    0.5,  10.0, log=True),
         "w_data_energy":   trial.suggest_float("w_data_energy",  0.1,  10.0, log=True),
         "w_phys":          trial.suggest_float("w_phys",         0.01, 10.0, log=True),
-        "w_bc":            trial.suggest_float("w_bc",           0.01, 5.0,  log=True),
-        "colloc_ratio":    trial.suggest_float("colloc_ratio",   1.0,  6.0),
+        "w_bc":             trial.suggest_float("w_bc",            0.01, 5.0,  log=True),
+        "colloc_ratio":     trial.suggest_float("colloc_ratio",    1.0,  6.0),
+        # Auxiliary soft physics regularisers — tuned by HPO on ranges
+        # wide enough to comfortably include the documented best values
+        # (Soft: w_monotonicity=4.10, w_angle_smooth=0.019, smooth_delta=2.66°;
+        #  Hard: w_monotonicity=7.72, w_angle_smooth=0.016, w_curvature=0.0013,
+        #  smooth_delta=1.93°).  Same ranges in suggest_hard for identical
+        #  priors.
+        "w_monotonicity":   trial.suggest_float("w_monotonicity",  0.01,   10.0, log=True),
+        "w_angle_smooth":   trial.suggest_float("w_angle_smooth",  0.001,  10.0, log=True),
+        "w_curvature":      trial.suggest_float("w_curvature",     0.0001, 0.1,  log=True),
+        "smooth_delta_deg": trial.suggest_float("smooth_delta_deg", 1.0,   3.0),
+        "extrapolate_angles": True,
         "sched_patience":  trial.suggest_int  ("sched_patience", 20,   100),
         "sched_factor":    trial.suggest_float("sched_factor",   0.2,  0.8),
     }
@@ -247,23 +262,29 @@ def suggest_soft(trial: "optuna.Trial") -> Dict:
 def suggest_hard(trial: "optuna.Trial") -> Dict:
     """Search space for the Hard-PINN.
 
-    The Hard-PINN loss reduces to the data terms alone (w_load, w_energy)
-    because the three core physics constraints (work-energy identity F = dE/dd
-    via autograd, and the two boundary conditions E(0) = 0 and F(0) = 0 via
-    slope-subtraction) are enforced architecturally and do not appear in the
-    loss.  The remaining hyperparameters are the network architecture,
-    optimisation knobs, and the stabilisation parameters (warmup_epochs,
-    swa_pct) required by the warmup + cosine + SWA training schedule.
+    The Hard-PINN architecturally enforces the three core physics
+    constraints (work-energy identity F = dE/dd via autograd, and the two
+    boundary conditions E(0) = 0 and F(0) = 0 via slope-subtraction), so
+    no soft penalties are needed for those.  The data terms (w_load,
+    w_energy) drive the fit, while the warmup + cosine + SWA schedule
+    (warmup_epochs, swa_pct) stabilises training.
 
-    One tightening from the documented post-mortem:
+    In addition — for parity with the Soft-PINN search space — the three
+    auxiliary soft regularisers (monotonicity F >= 0, angle smoothness
+    dF/dtheta, curvature d^2E/dd^2) are tuned here on the same ranges as
+    in ``suggest_soft``.  Hard-vs-Soft is therefore an architectural-vs-
+    soft comparison of the CORE three constraints, with identical auxiliary
+    priors in both — not a comparison muddled by different auxiliary
+    formulations.  The Hard #152 vs #124 post-mortem showed that without
+    these auxiliaries the M=20 production ensemble falls ~0.04 below the
+    documented baseline (val_R²_load ≈ 0.85), so re-introducing them is
+    necessary to recover the proven optimum.
 
-    * ``lr`` range narrowed from ``[1e-6, 5e-3]`` to ``[1e-5, 1e-3]`` — the
-      wider lower bound allowed TPE to converge to a slow-LR under-fit
-      basin (train_R²_F = 0.43 at 250 epochs).
-
-    Other ranges include the documented production HPs that achieved
-    val_R²_load = 0.85 (M=20 ensemble × 800 epochs), so TPE can both
-    re-discover the proven optimum and explore around it.
+    ``lr`` is widened back to ``[1e-6, 5e-3]`` (from the earlier narrow
+    ``[1e-5, 1e-3]``) so TPE can re-discover the documented best (lr =
+    4.0e-5).  The wider lower bound risks the slow-LR under-fit basin
+    seen in earlier runs, but with the aux constraints back in the loss
+    that basin is less likely to dominate.
 
     The batch_size choices exclude 8 because empirically a Hard-PINN trial
     at batch_size=8 takes ~5.5 h per ensemble member, which makes the search
@@ -274,7 +295,7 @@ def suggest_hard(trial: "optuna.Trial") -> Dict:
     return {
         "hidden_layers":   list(HL_HARD[hl_key]),
         "batch_size":      trial.suggest_categorical("batch_size", [16, 32]),
-        "lr":              trial.suggest_float("lr",             1e-5, 1e-3, log=True),
+        "lr":              trial.suggest_float("lr",             1e-6, 5e-3, log=True),
         "weight_decay":    trial.suggest_float("weight_decay",   1e-5, 5e-2, log=True),
         "dropout":         trial.suggest_float("dropout",        0.0,  0.05),
         "softplus_beta":   trial.suggest_float("softplus_beta",  3.0,  25.0),
@@ -284,6 +305,17 @@ def suggest_hard(trial: "optuna.Trial") -> Dict:
         "grad_clip":       trial.suggest_float("grad_clip",      0.5,  3.0),
         "warmup_epochs":   trial.suggest_int  ("warmup_epochs",  40,   150),
         "swa_pct":         trial.suggest_float("swa_pct",        0.10, 0.35),
+        "colloc_ratio":     trial.suggest_float("colloc_ratio",    1.0,  6.0),
+        # Auxiliary soft physics regularisers — tuned by HPO on the same
+        # ranges as Soft so the architectural-vs-soft comparison is over
+        # identical priors.  Ranges are wide enough to include the
+        # documented production HPs (w_monotonicity=7.72, w_angle_smooth=
+        # 0.016, w_curvature=0.0013, smooth_delta_deg=1.93°).
+        "w_monotonicity":   trial.suggest_float("w_monotonicity",  0.01,   10.0, log=True),
+        "w_angle_smooth":   trial.suggest_float("w_angle_smooth",  0.001,  10.0, log=True),
+        "w_curvature":      trial.suggest_float("w_curvature",     0.0001, 0.1,  log=True),
+        "smooth_delta_deg": trial.suggest_float("smooth_delta_deg", 1.0,   3.0),
+        "extrapolate_angles": True,
     }
 
 
@@ -321,41 +353,55 @@ WARM_START = {
         },
     ],
     "soft": [
+        # Warm-start: documented Soft-PINN production HPs (val R²_load = 0.80
+        # at θ*=60° with M=20 ensemble × 800 epochs).  Same aux constraint
+        # values that the documented baseline used; w_curvature was 0 in the
+        # documented baseline so we seed at the lower bound 1e-4.
         {
-            "hidden_layers":   "256-128-64",
-            "batch_size":      32,
-            "lr":              4.24e-03,
-            "weight_decay":    1.57e-04,
-            "dropout":         1.4e-04,
-            "softplus_beta":   11.06,
-            "smoothl1_beta":   1.16,
-            "w_data_load":     3.61,
-            "w_data_energy":   1.70,
-            "w_phys":          3.69,
-            "w_bc":            0.85,
-            "colloc_ratio":    3.70,
-            "sched_patience":  71,
-            "sched_factor":    0.65,
+            "hidden_layers":    "256-128",
+            "batch_size":       64,
+            "lr":               8.07e-03,
+            "weight_decay":     6.84e-04,
+            "dropout":          0.0077,
+            "softplus_beta":    12.08,
+            "smoothl1_beta":    1.03,
+            "w_data_load":      2.97,
+            "w_data_energy":    0.95,
+            "w_phys":           0.519,
+            "w_bc":             0.599,
+            "colloc_ratio":     3.67,
+            "w_monotonicity":   4.097,
+            "w_angle_smooth":   0.019,
+            "w_curvature":      1.0e-04,
+            "smooth_delta_deg": 2.66,
+            "sched_patience":   55,
+            "sched_factor":     0.46,
         },
     ],
     "hard": [
         # Warm-start: documented Hard-PINN production HPs (val R²_load = 0.85
-        # at θ*=60° with M=20 ensemble × 800 epochs).  Exact values from
-        # get_model_config("hard", "unseen") so TPE evaluates the proven
-        # configuration as trial 1.
+        # at θ*=60° with M=20 ensemble × 800 epochs).  These HPs were tuned
+        # with the same three auxiliary soft constraints we are now re-adding
+        # to the search space, so TPE evaluates the proven configuration as
+        # trial 1.
         {
-            "hidden_layers":   "32-32",
-            "batch_size":      16,
-            "lr":              4.0e-05,
-            "weight_decay":    5.27e-04,
-            "dropout":         0.0003,
-            "softplus_beta":   13.82,
-            "smoothl1_beta":   0.143,
-            "w_load":          6.0,
-            "w_energy":        7.0,
-            "grad_clip":       1.63,
-            "warmup_epochs":   80,
-            "swa_pct":         0.20,
+            "hidden_layers":    "128-64",
+            "batch_size":       16,
+            "lr":               9.95e-05,
+            "weight_decay":     3.75e-03,
+            "dropout":          0.0055,
+            "softplus_beta":    11.67,
+            "smoothl1_beta":    0.118,
+            "w_load":           6.80,
+            "w_energy":         8.65,
+            "grad_clip":        0.983,
+            "warmup_epochs":    80,
+            "swa_pct":          0.20,
+            "colloc_ratio":     3.58,
+            "w_monotonicity":   7.720,
+            "w_angle_smooth":   0.016,
+            "w_curvature":      0.00128,
+            "smooth_delta_deg": 1.93,
         },
     ],
 }
@@ -620,13 +666,19 @@ def _suggester_keys(approach: str) -> List[str]:
         return [
             "hidden_layers", "batch_size", "lr", "weight_decay", "dropout",
             "softplus_beta", "smoothl1_beta", "w_data_load", "w_data_energy",
-            "w_phys", "w_bc", "colloc_ratio", "sched_patience", "sched_factor",
+            "w_phys", "w_bc", "colloc_ratio",
+            "w_monotonicity", "w_angle_smooth", "w_curvature",
+            "smooth_delta_deg",
+            "sched_patience", "sched_factor",
         ]
     if approach == "hard":
         return [
             "hidden_layers", "batch_size", "lr", "weight_decay", "dropout",
             "softplus_beta", "smoothl1_beta", "w_load", "w_energy",
             "grad_clip", "warmup_epochs", "swa_pct",
+            "colloc_ratio",
+            "w_monotonicity", "w_angle_smooth", "w_curvature",
+            "smooth_delta_deg",
         ]
     raise ValueError(f"Unknown approach: {approach}")
 
