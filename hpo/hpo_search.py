@@ -234,7 +234,7 @@ def suggest_soft(trial: "optuna.Trial") -> Dict:
         "hidden_layers":   list(HL_DDNS_SOFT[hl_key]),
         "batch_size":      trial.suggest_categorical("batch_size", [32, 64, 128]),
         "lr":              trial.suggest_float("lr",             1e-5, 5e-2, log=True),
-        "weight_decay":    trial.suggest_float("weight_decay",   1e-6, 5e-3, log=True),
+        "weight_decay":    trial.suggest_float("weight_decay",   1e-6, 1e-2, log=True),
         "dropout":         trial.suggest_float("dropout",        0.0,  0.05),
         "softplus_beta":   trial.suggest_float("softplus_beta",  5.0,  25.0),
         "smoothl1_beta":   trial.suggest_float("smoothl1_beta",  0.1,  3.0),
@@ -252,7 +252,7 @@ def suggest_soft(trial: "optuna.Trial") -> Dict:
         "w_monotonicity":   trial.suggest_float("w_monotonicity",  0.01,   10.0, log=True),
         "w_angle_smooth":   trial.suggest_float("w_angle_smooth",  0.001,  10.0, log=True),
         "w_curvature":      trial.suggest_float("w_curvature",     0.0001, 0.1,  log=True),
-        "smooth_delta_deg": trial.suggest_float("smooth_delta_deg", 1.0,   3.0),
+        "smooth_delta_deg": trial.suggest_float("smooth_delta_deg", 1.0,   4.0),
         "extrapolate_angles": True,
         "sched_patience":  trial.suggest_int  ("sched_patience", 20,   100),
         "sched_factor":    trial.suggest_float("sched_factor",   0.2,  0.8),
@@ -282,19 +282,22 @@ def suggest_hard(trial: "optuna.Trial") -> Dict:
 
     ``lr`` is widened back to ``[1e-6, 5e-3]`` (from the earlier narrow
     ``[1e-5, 1e-3]``) so TPE can re-discover the documented best (lr =
-    4.0e-5).  The wider lower bound risks the slow-LR under-fit basin
+    9.95e-5).  The wider lower bound risks the slow-LR under-fit basin
     seen in earlier runs, but with the aux constraints back in the loss
     that basin is less likely to dominate.
 
-    The batch_size choices exclude 8 because empirically a Hard-PINN trial
-    at batch_size=8 takes ~5.5 h per ensemble member, which makes the search
-    impractically slow.  16 and 32 remain in the modern-ML regime and cut
-    per-trial wall-clock by 2-4x without giving up generalisation.
+    ``batch_size`` includes 8 even though a Hard-PINN trial at
+    batch_size=8 takes ~5.5 h per ensemble member — the documented
+    production best (val_R²_load = 0.85) used batch_size=8 with 8816
+    training samples, so excluding 8 from the search space makes the
+    documented optimum unreachable.  Choices are [8, 16, 32].  Allow
+    extra wall-time (96-120h) when launching this HPO to absorb the
+    longer batch_size=8 trials.
     """
     hl_key = trial.suggest_categorical("hidden_layers", list(HL_HARD.keys()))
     return {
         "hidden_layers":   list(HL_HARD[hl_key]),
-        "batch_size":      trial.suggest_categorical("batch_size", [16, 32]),
+        "batch_size":      trial.suggest_categorical("batch_size", [8, 16, 32]),
         "lr":              trial.suggest_float("lr",             1e-6, 5e-3, log=True),
         "weight_decay":    trial.suggest_float("weight_decay",   1e-5, 5e-2, log=True),
         "dropout":         trial.suggest_float("dropout",        0.0,  0.05),
@@ -314,7 +317,7 @@ def suggest_hard(trial: "optuna.Trial") -> Dict:
         "w_monotonicity":   trial.suggest_float("w_monotonicity",  0.01,   10.0, log=True),
         "w_angle_smooth":   trial.suggest_float("w_angle_smooth",  0.001,  10.0, log=True),
         "w_curvature":      trial.suggest_float("w_curvature",     0.0001, 0.1,  log=True),
-        "smooth_delta_deg": trial.suggest_float("smooth_delta_deg", 1.0,   3.0),
+        "smooth_delta_deg": trial.suggest_float("smooth_delta_deg", 1.0,   4.0),
         "extrapolate_angles": True,
     }
 
@@ -386,7 +389,7 @@ WARM_START = {
         # trial 1.
         {
             "hidden_layers":    "128-64",
-            "batch_size":       16,
+            "batch_size":       8,
             "lr":               9.95e-05,
             "weight_decay":     3.75e-03,
             "dropout":          0.0055,
