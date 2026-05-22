@@ -202,6 +202,7 @@ HL_HARD = {
     "64-64-64":   [64, 64, 64],
     "128-64":     [128, 64],
     "128-64-32":  [128, 64, 32],
+    "256-128":    [256, 128],
 }
 
 
@@ -247,15 +248,23 @@ def suggest_soft(trial: "optuna.Trial") -> Dict:
     return {
         "hidden_layers":   list(HL_DDNS_SOFT[hl_key]),
         "batch_size":      trial.suggest_categorical("batch_size", [32, 64, 128]),
-        "lr":              trial.suggest_float("lr",             1e-5, 5e-2, log=True),
-        "weight_decay":    trial.suggest_float("weight_decay",   1e-6, 1e-2, log=True),
+        # lr upper widened from 5e-2 to 1e-1 — documented Soft 8.07e-3 was
+        # at 79% of [1e-5, 5e-2] log; now at 73% of [1e-5, 1e-1] log.
+        "lr":              trial.suggest_float("lr",             1e-5, 1e-1, log=True),
+        # weight_decay lower shifted from 1e-6 to 1e-5 — documented Soft
+        # 6.84e-4 was at 71% of [1e-6, 1e-2] log; now at 61% of
+        # [1e-5, 1e-2] log.  The 1e-6 lower bound was unrealistically
+        # small for Adam anyway.
+        "weight_decay":    trial.suggest_float("weight_decay",   1e-5, 1e-2, log=True),
         "dropout":         trial.suggest_float("dropout",        0.0,  0.05),
         "softplus_beta":   trial.suggest_float("softplus_beta",  5.0,  25.0),
         "smoothl1_beta":   trial.suggest_float("smoothl1_beta",  0.1,  3.0),
         "w_data_load":     trial.suggest_float("w_data_load",    0.5,  10.0, log=True),
         "w_data_energy":   trial.suggest_float("w_data_energy",  0.1,  10.0, log=True),
         "w_phys":          trial.suggest_float("w_phys",         0.01, 10.0, log=True),
-        "w_bc":             trial.suggest_float("w_bc",            0.01, 5.0,  log=True),
+        # w_bc upper widened from 5.0 to 10.0 — documented Soft 0.599 was
+        # at 66%; now at 59%.
+        "w_bc":             trial.suggest_float("w_bc",            0.01, 10.0, log=True),
         "colloc_ratio":     trial.suggest_float("colloc_ratio",    1.0,  6.0),
         # Auxiliary soft physics regularisers — tuned by HPO on ranges
         # wide enough to comfortably include the documented best values
@@ -263,7 +272,10 @@ def suggest_soft(trial: "optuna.Trial") -> Dict:
         #  Hard: w_monotonicity=7.72, w_angle_smooth=0.016, w_curvature=0.0013,
         #  smooth_delta=1.93°).  Same ranges in suggest_hard for identical
         #  priors.
-        "w_monotonicity":   trial.suggest_float("w_monotonicity",  0.01,   30.0, log=True),
+        # w_monotonicity upper widened to 100 to match Hard — documented
+        # Soft 4.10 was at 75% of [0.01, 30.0] log; now at 65% of
+        # [0.01, 100.0] log.
+        "w_monotonicity":   trial.suggest_float("w_monotonicity",  0.01,   100.0, log=True),
         "w_angle_smooth":   trial.suggest_float("w_angle_smooth",  0.001,  10.0, log=True),
         "w_curvature":      trial.suggest_float("w_curvature",     0.0001, 0.1,  log=True),
         "smooth_delta_deg": trial.suggest_float("smooth_delta_deg", 1.0,   4.0),
@@ -316,10 +328,18 @@ def suggest_hard(trial: "optuna.Trial") -> Dict:
         "weight_decay":    trial.suggest_float("weight_decay",   1e-5, 5e-2, log=True),
         "dropout":         trial.suggest_float("dropout",        0.0,  0.05),
         "softplus_beta":   trial.suggest_float("softplus_beta",  3.0,  25.0),
-        "smoothl1_beta":   trial.suggest_float("smoothl1_beta",  0.01, 1.0),
-        "w_load":          trial.suggest_float("w_load",         1.0,  20.0, log=True),
-        "w_energy":        trial.suggest_float("w_energy",       1.0,  20.0, log=True),
-        "grad_clip":       trial.suggest_float("grad_clip",      0.5,  3.0),
+        # smoothl1_beta on log scale — documented Hard value 0.118 sits at
+        # 11% of linear [0.01, 1.0] but at 54% of log [0.01, 1.0].
+        "smoothl1_beta":   trial.suggest_float("smoothl1_beta",  0.01, 1.0,  log=True),
+        # w_load and w_energy widened from [1, 20] to [0.5, 50] — documented
+        # Hard values 6.80, 8.65 sat at 64% and 72% of the narrow range.
+        # The widened range puts them at 57% and 60%, giving TPE room to
+        # push higher if data weights drive a better fit.
+        "w_load":          trial.suggest_float("w_load",         0.5,  50.0, log=True),
+        "w_energy":        trial.suggest_float("w_energy",       0.5,  50.0, log=True),
+        # grad_clip retightened from [0.5, 3.0] to [0.3, 2.0] — documented
+        # 0.983 sat at 19%; now at 40%.
+        "grad_clip":       trial.suggest_float("grad_clip",      0.3,  2.0),
         "warmup_epochs":   trial.suggest_int  ("warmup_epochs",  40,   150),
         "swa_pct":         trial.suggest_float("swa_pct",        0.10, 0.35),
         "colloc_ratio":     trial.suggest_float("colloc_ratio",    1.0,  6.0),
@@ -328,10 +348,11 @@ def suggest_hard(trial: "optuna.Trial") -> Dict:
         # identical priors.  Ranges are wide enough to include the
         # documented production HPs (w_monotonicity=7.72, w_angle_smooth=
         # 0.016, w_curvature=0.0013, smooth_delta_deg=1.93°).  Upper bound
-        # on w_monotonicity widened from 10 to 30 because the documented
-        # Hard value 7.72 sits at 96% of [0.01, 10.0] log, leaving no room
-        # for TPE to push higher if the true optimum is >10.
-        "w_monotonicity":   trial.suggest_float("w_monotonicity",  0.01,   30.0, log=True),
+        # on w_monotonicity widened to 100 because documented Hard value
+        # 7.72 still sat at 83% of log [0.01, 30.0] — TPE needs room to
+        # push higher if the true optimum is >10.  Same change applied to
+        # Soft for parity.
+        "w_monotonicity":   trial.suggest_float("w_monotonicity",  0.01,   100.0, log=True),
         "w_angle_smooth":   trial.suggest_float("w_angle_smooth",  0.001,  10.0, log=True),
         "w_curvature":      trial.suggest_float("w_curvature",     0.0001, 0.1,  log=True),
         "smooth_delta_deg": trial.suggest_float("smooth_delta_deg", 1.0,   4.0),
