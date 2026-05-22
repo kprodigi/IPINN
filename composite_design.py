@@ -784,10 +784,29 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
             "sched_patience": 25, "sched_factor": 0.290325,
         }
 
-        # ---- Hard-PINN cfg (HPO best trial #152, val_R²_load = 0.7970, arch [32,32]) ----
-        # New clean-methodology HPO (155 trials, 3 seeds, 800 epochs).
-        # mean_train_load_r2 = 0.500, mean_val_load_r2 = 0.797,
-        # mean_val_energy_r2 = 0.980, std_val_load_r2 = 0.032.
+        # ---- Hard-PINN cfg (HPO trial #124, arch [64,64,64]) ----
+        # Selected from the top-5 HPO trials by ensemble-friendliness criteria
+        # rather than raw HPO val-R² rank.  HPO selected trial #152 as #1
+        # (val_R²_load = 0.797, mean of 3 seeds, weight_decay = 0.0211), but
+        # its M=20 bootstrap ensemble underperformed (0.7566) because the
+        # heavy regularization that smoothed the 3-seed objective also
+        # under-fit each bootstrap member (mean train_R² = 0.50).
+        #
+        # Trial #124 has:
+        #   - top-5 HPO val (0.7710)
+        #   - 33× lower weight_decay (6.4e-4 vs 2.1e-2) → bootstrap
+        #     members can actually fit their ~63% data subsets
+        #   - +0.06 higher mean train_R² (0.560 vs 0.500) → indicates
+        #     each member converges meaningfully
+        #   - Deeper architecture [64,64,64] → more representational
+        #     capacity to support bootstrap diversity
+        #
+        # HPO stats for trial #124:
+        #   mean_train_load_r2 = 0.560
+        #   mean_val_load_r2   = 0.771
+        #   mean_val_energy_r2 = 0.978
+        #   std_val_load_r2    = 0.032
+        #
         # The Hard-PINN loss contains ONLY the data terms (w_load, w_energy).
         # The work-energy identity F = dE/dd, the boundary conditions
         # E(0) = 0 and F(0) = 0, and force non-negativity at d = 0 are
@@ -799,19 +818,18 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
         # exactly the three core physics constraints (work-energy + two
         # BCs) under different enforcement mechanisms.
         cfg_hard = {
-            "optimizer": "adamw", "lr": 2.8246810000e-05,
-            "weight_decay": 2.1117000000e-02, "batch_size": 16,
-            "hidden_layers": [32, 32], "dropout": 0.00163906,
-            "softplus_beta": 11.2557, "smoothl1_beta": 0.567626,
-            "w_load": 6.89916, "w_energy": 3.04777,
-            "grad_clip": 1.82636,
+            "optimizer": "adamw", "lr": 1.0673230867e-05,
+            "weight_decay": 6.4267667838e-04, "batch_size": 32,
+            "hidden_layers": [64, 64, 64], "dropout": 0.028048945,
+            "softplus_beta": 20.351957, "smoothl1_beta": 0.928943,
+            "w_load": 10.191384, "w_energy": 6.262209,
+            "grad_clip": 1.823925,
             "epochs": 800, "eval_every": 20,
             "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
             "sched_patience": 73, "sched_factor": 0.37,
-            # Stabilization params: warmup + cosine + SWA.  These are
-            # numerical-stability mechanisms, not physics, and are kept.
-            "warmup_epochs": 115,
-            "swa_pct": 0.127743,
+            # Stabilization params: warmup + cosine + SWA.
+            "warmup_epochs": 124,
+            "swa_pct": 0.144055,
             "eta_min": 1e-6,
         }
     else:
