@@ -1256,12 +1256,57 @@ def main():
     # (~3 h each at hpo_epochs=250) plenty of margin: a healthy worker
     # writes 36 heartbeats per trial; a stalled worker is detected in
     # under 15 minutes.
-    storage = RDBStorage(
-        url=storage_url,
-        heartbeat_interval=300,
-        grace_period=900,
-        failed_trial_callback=RetryFailedTrialCallback(max_retry=2),
-    )
+    #
+    # SQLite race-condition mitigation: when N workers start
+    # simultaneously and the .db file doesn't yet exist, Optuna's
+    # ``RDBStorage.__init__`` calls ``Metadata.create_all`` on the SQLite
+    # engine — and two workers calling create_all at the same instant
+    # race over the CREATE TABLE statement, with one winning and the
+    # losers crashing with ``sqlite3.OperationalError: table studies
+    # already exists``.  Two complementary mitigations:
+    #
+    # (1) Worker-ID-based startup stagger: worker N sleeps N * 1.5 seconds
+    #     before touching the DB, so workers do not all hit it at once.
+    #     A 15-worker array stretches startup over ~20 s, which is
+    #     negligible against a 168-h wall budget.
+    # (2) Catch the OperationalError and retry up to 10 times with
+    #     exponential-backoff + jitter.  Idempotent: on retry the tables
+    #     exist, ``create_all(checkfirst=True)`` is a no-op, and the
+    #     storage initialises successfully.
+    import random as _random
+    import sqlalchemy.exc as _sa_exc
+    if worker_id > 0:
+        stagger = float(worker_id) * 1.5
+        logger.info(f"  worker stagger: sleeping {stagger:.1f}s before DB init")
+        time.sleep(stagger)
+    storage = None
+    last_exc: Optional[Exception] = None
+    for attempt in range(10):
+        try:
+            storage = RDBStorage(
+                url=storage_url,
+                heartbeat_interval=300,
+                grace_period=900,
+                failed_trial_callback=RetryFailedTrialCallback(max_retry=2),
+            )
+            break
+        except _sa_exc.OperationalError as e:
+            msg = str(e).lower()
+            if "already exists" in msg or "locked" in msg or "busy" in msg:
+                last_exc = e
+                backoff = min(0.5 * (2 ** attempt), 5.0) + _random.uniform(0.0, 0.5)
+                logger.warning(
+                    f"  DB init race (attempt {attempt+1}/10): "
+                    f"{type(e).__name__}; sleeping {backoff:.2f}s then retrying"
+                )
+                time.sleep(backoff)
+                continue
+            raise
+    if storage is None:
+        raise RuntimeError(
+            f"Failed to initialise RDBStorage after 10 retries; last error: "
+            f"{type(last_exc).__name__}: {last_exc}"
+        )
     # MedianPruner — across-trial protection against compute waste.  After
     # ``n_startup_trials`` trials have completed, any trial whose running
     # objective at the current step is below the median objective of all
@@ -1285,14 +1330,37 @@ def main():
         n_warmup_steps=0,
         interval_steps=1,
     )
-    study = optuna.create_study(
-        study_name=study_name,
-        storage=storage,
-        direction="maximize",
-        sampler=sampler,
-        pruner=pruner,
-        load_if_exists=True,
-    )
+    # Same retry pattern around create_study to handle the rare case where
+    # two workers race on the INSERT into the ``studies`` table (the
+    # storage tables exist but the named study row doesn't yet, and two
+    # workers both try to insert it).  load_if_exists=True normally
+    # handles this, but a torn read between SELECT and INSERT can still
+    # race.
+    study = None
+    for attempt in range(10):
+        try:
+            study = optuna.create_study(
+                study_name=study_name,
+                storage=storage,
+                direction="maximize",
+                sampler=sampler,
+                pruner=pruner,
+                load_if_exists=True,
+            )
+            break
+        except _sa_exc.OperationalError as e:
+            msg = str(e).lower()
+            if "locked" in msg or "busy" in msg or "already exists" in msg:
+                backoff = min(0.5 * (2 ** attempt), 5.0) + _random.uniform(0.0, 0.5)
+                logger.warning(
+                    f"  create_study race (attempt {attempt+1}/10): "
+                    f"{type(e).__name__}; sleeping {backoff:.2f}s then retrying"
+                )
+                time.sleep(backoff)
+                continue
+            raise
+    if study is None:
+        raise RuntimeError("Failed to create/load study after 10 retries")
     study.set_user_attr("approach", args.approach)
     logger.info(f"  Resumed/created study with {len(study.trials)} prior trial(s).")
 
