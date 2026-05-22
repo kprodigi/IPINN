@@ -1122,14 +1122,18 @@ def main():
                         "objective is the mean validation load R^2.  3 is "
                         "the sweet spot: 2 seeds give a very noisy mean; 5 "
                         "seeds halves the std but at 67%% more wall.")
-    p.add_argument("--hpo_epochs", type=int, default=400,
-                   help="Per-trial training epochs.  Default 400 is 50%% "
-                        "of the production 800-epoch budget — the sweet "
-                        "spot for trial ranking accuracy: 200 epochs risks "
-                        "ranking trials by early-training behaviour that "
-                        "doesn't match the 800-epoch winner; 600+ epochs "
-                        "gives marginal ranking improvement at ~50%% more "
-                        "wall-time.")
+    p.add_argument("--hpo_epochs", type=int, default=800,
+                   help="Per-trial training epochs.  Default 800 matches "
+                        "the production retrain budget so trial ranking "
+                        "reflects production deployment behaviour exactly "
+                        "(no epoch-mismatch regret).  Wall-time is "
+                        "controlled by (a) the 200-epoch HPO-only "
+                        "EarlyStopping patience set in _build_trial_cfg "
+                        "for Soft/DDNS, and (b) the MedianPruner that "
+                        "kills clearly-losing trials cross-trial.  Hard "
+                        "cannot use per-trial ES (SWA needs the full "
+                        "budget) so its trials run the full 800 epochs "
+                        "unless pruned cross-trial.")
     p.add_argument("--data_dir",   default="./data")
     p.add_argument("--output_dir", default="./hpo_out")
     p.add_argument("--study_name", default=None,
@@ -1265,9 +1269,12 @@ def main():
     #   * n_startup_trials = same as TPE startup (30): don't prune during
     #     random exploration; the pruner needs a population of completed
     #     trials to compute a meaningful median.
-    #   * n_warmup_steps = 1: never prune after seed 1; require at least
-    #     2 seed evaluations before pruning so single-seed noise can't kill
-    #     a borderline-good trial.
+    #   * n_warmup_steps = 0: prune as soon as the first seed of a trial
+    #     completes if it's below median.  At HPO_EPOCHS=800 this is
+    #     critical for Hard — without it a Hard trial at bs=8 burns
+    #     16.5h (3 seeds × 5.5h) even when clearly losing.  Single-seed
+    #     noise risk is mitigated by the fact that we only prune when
+    #     STRICTLY below median (not just close to it).
     #   * interval_steps = 1: check after every (fold, seed) report.
     # Hard-PINN trials disable EarlyStopping in stabilized mode (SWA needs
     # the full epoch budget), so the pruner is the PRIMARY protection
@@ -1275,7 +1282,7 @@ def main():
     # additionally use the 200-epoch patience set in _build_trial_cfg.
     pruner = optuna.pruners.MedianPruner(
         n_startup_trials=int(args.n_startup_trials),
-        n_warmup_steps=1,
+        n_warmup_steps=0,
         interval_steps=1,
     )
     study = optuna.create_study(

@@ -25,16 +25,21 @@
 #                                    3 is the sweet spot: 2 seeds give a
 #                                    very noisy mean; 5 seeds halves the
 #                                    std but at 67% more wall.
-#   HPO_EPOCHS=400                   Per-trial training epoch budget.  The
-#                                    production cfg trains 800 epochs, so
-#                                    400 = 50% of production is the sweet
-#                                    spot for trial ranking accuracy
-#                                    without wasting compute: 200 epochs
-#                                    risks ranking trials by early-training
-#                                    behaviour that doesn't match the
-#                                    800-epoch winner; 600+ epochs gives
-#                                    marginal ranking improvement but ~50%
-#                                    more wall.  See commit 895564e.
+#   HPO_EPOCHS=800                   Per-trial training epoch budget,
+#                                    matched to the production retrain
+#                                    epoch budget so trial ranking matches
+#                                    production deployment behaviour
+#                                    exactly (no epoch-mismatch regret).
+#                                    Wall-time is controlled by:
+#                                      - 200-epoch per-trial EarlyStopping
+#                                        for Soft/DDNS (set by
+#                                        _build_trial_cfg in hpo_search.py)
+#                                      - MedianPruner across trials (kills
+#                                        clearly-losing Hard/Soft trials)
+#                                    Hard cannot use per-trial ES (SWA
+#                                    needs the full epoch budget), so its
+#                                    trials may run the full 800 unless
+#                                    pruned cross-trial.
 #   N_WORKERS=1                      Parallel worker count (one SLURM task each)
 #   SEED=2026                        Base seed
 #   DATA_DIR=./data
@@ -69,7 +74,7 @@ esac
 N_TRIALS="${N_TRIALS:-100}"
 N_STARTUP="${N_STARTUP:-30}"
 N_SEEDS="${N_SEEDS:-3}"
-HPO_EPOCHS="${HPO_EPOCHS:-400}"
+HPO_EPOCHS="${HPO_EPOCHS:-800}"
 # Comma-separated held-out angles for leave-one-angle-out HPO.  Default "60"
 # matches the single-angle paper protocol; "45,60,70" gives a 3-fold subset
 # covering both boundary angles + interior; "45,50,55,60,65,70" gives full
