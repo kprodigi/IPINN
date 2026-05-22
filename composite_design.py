@@ -784,7 +784,10 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
             "sched_patience": 25, "sched_factor": 0.290325,
         }
 
-        # ---- Hard-PINN cfg (arch [32, 32]) ----
+        # ---- Hard-PINN cfg (HPO best trial #152, val_R²_load = 0.7970, arch [32,32]) ----
+        # New clean-methodology HPO (155 trials, 3 seeds, 800 epochs).
+        # mean_train_load_r2 = 0.500, mean_val_load_r2 = 0.797,
+        # mean_val_energy_r2 = 0.980, std_val_load_r2 = 0.032.
         # The Hard-PINN loss contains ONLY the data terms (w_load, w_energy).
         # The work-energy identity F = dE/dd, the boundary conditions
         # E(0) = 0 and F(0) = 0, and force non-negativity at d = 0 are
@@ -796,19 +799,19 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
         # exactly the three core physics constraints (work-energy + two
         # BCs) under different enforcement mechanisms.
         cfg_hard = {
-            "optimizer": "adamw", "lr": 4.0e-05,
-            "weight_decay": 5.27e-04, "batch_size": 16,
-            "hidden_layers": [32, 32], "dropout": 0.0003,
-            "softplus_beta": 13.82, "smoothl1_beta": 0.143,
-            "w_load": 6.0, "w_energy": 7.0,
-            "grad_clip": 1.63,
+            "optimizer": "adamw", "lr": 2.8246810000e-05,
+            "weight_decay": 2.1117000000e-02, "batch_size": 16,
+            "hidden_layers": [32, 32], "dropout": 0.00163906,
+            "softplus_beta": 11.2557, "smoothl1_beta": 0.567626,
+            "w_load": 6.89916, "w_energy": 3.04777,
+            "grad_clip": 1.82636,
             "epochs": 800, "eval_every": 20,
             "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
             "sched_patience": 73, "sched_factor": 0.37,
             # Stabilization params: warmup + cosine + SWA.  These are
             # numerical-stability mechanisms, not physics, and are kept.
-            "warmup_epochs": 80,
-            "swa_pct": 0.20,
+            "warmup_epochs": 115,
+            "swa_pct": 0.127743,
             "eta_min": 1e-6,
         }
     else:
