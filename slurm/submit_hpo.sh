@@ -18,9 +18,23 @@
 # Environment overrides (all optional):
 #   APPROACH=hard                    ddns | soft | hard   (required)
 #   N_TRIALS=100                     Total Optuna trials across all workers
-#   N_STARTUP=15                     Random-search trials before TPE engages
-#   N_SEEDS=2                        Ensemble members trained per trial
-#   HPO_EPOCHS=200                   Per-trial training epoch budget
+#   N_STARTUP=30                     Random-search trials before TPE engages.
+#                                    Rule of thumb: ~1.5x search-space
+#                                    dimensionality (Hard=18, Soft=19 dims).
+#   N_SEEDS=3                        Ensemble members trained per trial.
+#                                    3 is the sweet spot: 2 seeds give a
+#                                    very noisy mean; 5 seeds halves the
+#                                    std but at 67% more wall.
+#   HPO_EPOCHS=400                   Per-trial training epoch budget.  The
+#                                    production cfg trains 800 epochs, so
+#                                    400 = 50% of production is the sweet
+#                                    spot for trial ranking accuracy
+#                                    without wasting compute: 200 epochs
+#                                    risks ranking trials by early-training
+#                                    behaviour that doesn't match the
+#                                    800-epoch winner; 600+ epochs gives
+#                                    marginal ranking improvement but ~50%
+#                                    more wall.  See commit 895564e.
 #   N_WORKERS=1                      Parallel worker count (one SLURM task each)
 #   SEED=2026                        Base seed
 #   DATA_DIR=./data
@@ -54,8 +68,8 @@ esac
 # ---- Defaults ------------------------------------------------------------
 N_TRIALS="${N_TRIALS:-100}"
 N_STARTUP="${N_STARTUP:-30}"
-N_SEEDS="${N_SEEDS:-2}"
-HPO_EPOCHS="${HPO_EPOCHS:-200}"
+N_SEEDS="${N_SEEDS:-3}"
+HPO_EPOCHS="${HPO_EPOCHS:-400}"
 # Comma-separated held-out angles for leave-one-angle-out HPO.  Default "60"
 # matches the single-angle paper protocol; "45,60,70" gives a 3-fold subset
 # covering both boundary angles + interior; "45,50,55,60,65,70" gives full

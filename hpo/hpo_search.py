@@ -1088,12 +1088,19 @@ def main():
                         "TPE has a diverse posterior before it starts "
                         "exploiting.  Lower this for very small searches; "
                         "raise it (e.g. to 50) if you want more exploration.")
-    p.add_argument("--n_seeds", type=int, default=2,
+    p.add_argument("--n_seeds", type=int, default=3,
                    help="Ensemble members trained per trial; the trial's "
-                        "objective is the mean validation load R^2.")
-    p.add_argument("--hpo_epochs", type=int, default=200,
-                   help="Per-trial training epochs (smaller than production "
-                        "to keep the search tractable).")
+                        "objective is the mean validation load R^2.  3 is "
+                        "the sweet spot: 2 seeds give a very noisy mean; 5 "
+                        "seeds halves the std but at 67%% more wall.")
+    p.add_argument("--hpo_epochs", type=int, default=400,
+                   help="Per-trial training epochs.  Default 400 is 50%% "
+                        "of the production 800-epoch budget — the sweet "
+                        "spot for trial ranking accuracy: 200 epochs risks "
+                        "ranking trials by early-training behaviour that "
+                        "doesn't match the 800-epoch winner; 600+ epochs "
+                        "gives marginal ranking improvement at ~50%% more "
+                        "wall-time.")
     p.add_argument("--data_dir",   default="./data")
     p.add_argument("--output_dir", default="./hpo_out")
     p.add_argument("--study_name", default=None,
