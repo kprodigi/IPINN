@@ -22,7 +22,7 @@ All tests must pass before submitting a pull request.
 ## Repository Layout
 
 The project uses a flat single-module layout for the main pipeline so that
-the full forward + inverse + analysis flow lives in one auditable file, with
+the full forward + inverse + analysis flow lives in one inspectable file, with
 HPO and HPC infrastructure in dedicated sibling directories:
 
 ```

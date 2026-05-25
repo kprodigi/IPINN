@@ -4,33 +4,29 @@
 COMPARE SOFT-PINN vs HARD-PINN — physics-correctness diagnostics
 ================================================================================
 Loads the M=20 ensemble bundles produced by forward_member.py for Soft and Hard
-and computes the metrics that demonstrate the architectural-BC + autograd
-contribution of Hard-PINN beyond R² alone.
+and computes metrics that quantify the physics-enforcement contribution of
+Hard-PINN beyond accuracy alone.
 
-Hard-PINN's value is NOT primarily about R² lift over Soft-PINN (the gap is
-typically ~0.02-0.03 on this problem).  It is about CATEGORICAL physics
-guarantees that Soft-PINN can only approximate:
+Hard-PINN's value is not primarily an R² lift over Soft-PINN (the gap is
+typically modest on this problem).  It is the categorical physics guarantee
+provided by the work-energy identity:
 
-   1. F(d=0) AND E(d=0):
-        Soft  →  small but non-zero residual (~10⁻¹ units)
-        Hard  →  exactly zero by construction (machine precision)
-
-      Hard's ``HardEnergyNet.configure_zero_bc`` enforces BOTH BCs
-      architecturally via slope-subtraction:
-        E_corrected(x) = E_net(x) − E_net(x|d=0)
-                         − (d_s − d_s0) · ∂E_net/∂d_s|_{x|d=0} + c_{0,E}
-      so E(d=0) = c_{0,E} (raw 0) and ∂E/∂d_s|_{d=0} = 0 (raw F(0) = 0).
-
-   2. Force-energy thermodynamic identity F = dE/dd:
-        Soft  →  residual penalised in loss; small but nonzero
+   1. Force-energy thermodynamic identity F = dE/dd:
+        Soft  →  identity residual penalised in loss; small but nonzero
         Hard  →  F is computed AS dE/dd via autograd; residual = 0 always
 
-   3. Hyperparameter count for BC enforcement:
-        Soft  →  w_bc tuned (and a separate physics weight w_phys)
-        Hard  →  no w_bc (architectural)
+   2. F(d=0) AND E(d=0) boundary conditions:
+        Soft  →  enforced through the paired soft penalty w_bc · (E(0)² + F(0)²)
+        Hard  →  encouraged through the auxiliary soft regularisers
+                 (monotonicity, angle smoothness, energy curvature) which
+                 collectively shape F and E near d=0
 
-   4. Worst-seed behaviour and ensemble interval coverage — usually
-      tighter for Hard since its physics is exact.
+   3. Hyperparameter count for the work-energy constraint:
+        Soft  →  w_phys tuned (and the paired BC weight w_bc)
+        Hard  →  no separate physics weight (the identity is exact by
+                 construction)
+
+   4. Worst-seed behaviour and ensemble interval coverage.
 
 Usage:
     python hpo/compare_methods.py \\
@@ -107,8 +103,8 @@ def _reconstruct_models(bundle: Dict, approach: str, in_d: int, device: torch.de
         else:  # hard
             m = cd.HardEnergyNet(in_d, cfg["hidden_layers"], cfg["dropout"],
                                  cfg["softplus_beta"]).to(device)
-            # Hard uses architectural BC.
-            m.configure_zero_bc(bundle["params"], enabled=True)
+            # Hard production: bare MLP with autograd F = dE/dd.
+            m.configure_zero_bc(bundle["params"], enabled=False)
         m.load_state_dict(sd)
         m.eval()
         models.append(m)

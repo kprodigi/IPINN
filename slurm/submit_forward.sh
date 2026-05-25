@@ -13,9 +13,9 @@
 # reads parts_hard/member_*.pt, applies Tukey-fence convergence filter,
 # computes ensemble metrics, writes the final bundle.
 #
-# Default M=20. Wall time per task is 24 h (the new slope-subtraction BC
-# is 2-3x slower than value-only BC; previous per-member time was
-# ~3.5 h, so new per-member is ~7-11 h; 24h is a safe ceiling).
+# Default M=20.  Wall time per task is 24 h (per-member training is
+# ~3.5-5.5 h depending on approach and architecture; 24 h provides a
+# generous safety margin for SLURM preemption tolerance).
 #
 # Usage (from the repo root):
 # bash slurm/submit_forward.sh
@@ -129,8 +129,8 @@ module purge
 module load ${CUDA_MODULE}
 module load ${CUDNN_MODULE}
 
-# Bypass conda activate (silently fails on some SDSMT compute nodes —
-# see commit ff09ee5). Pin the env's python by absolute path.
+# Bypass conda activate (which silently fails on some compute-node
+# setups).  Pin the env's python by absolute path instead.
 PYTHON_BIN="\$HOME/miniconda3/envs/${CONDA_ENV}/bin/python"
 if [[ ! -x "\$PYTHON_BIN" ]]; then
  echo "ERROR: '\$PYTHON_BIN' not executable on \$(hostname)"
@@ -146,9 +146,10 @@ echo " PYTHON_BIN: \$PYTHON_BIN"
 echo "=== FORWARD ${APPROACH^^} member \${MEMBER_IDX} Node: \$(hostname) GPU: \${CUDA_VISIBLE_DEVICES:-none} ==="
 echo "=== Start: \$(date) ==="
 
-# Single-line invocation: the SDSMT cluster's sbatch eats backslash-newline
-# line-continuations inside unquoted heredocs (see commit d7da39a), making
-# the python call exit silently with "unrecognized arguments".
+# Single-line invocation: some sbatch versions strip backslash-newline
+# line-continuations inside unquoted heredocs, which causes the python
+# call to exit silently with "unrecognized arguments".  Keeping the
+# command on one logical line avoids that surprise.
 "\$PYTHON_BIN" ${MEMBER_LAUNCHER} --approach ${APPROACH} --member_idx \${MEMBER_IDX} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_ensemble ${M_ENSEMBLE} --seed ${SEED} ${THETA_FLAG}
 EXIT_CODE=\$?
 

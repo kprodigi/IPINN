@@ -12,10 +12,10 @@ shared SQLite-backed study, with full resume-from-preemption support.
 
 Sampling policy
 ---------------
-* **Warm start (trial 0):** one informed prior dict (the documented
-  production HPs) is enqueued *before* the random-startup phase, so
-  TPE has a high-quality anchor point from the first observation.
-  Pass ``--no_warm_starts`` to disable.
+* **Warm start (trial 0):** one informed prior dict per approach is
+  enqueued *before* the random-startup phase, so TPE has a high-quality
+  anchor point from the first observation.  Pass ``--no_warm_starts``
+  to disable.
 * **Random startup (trials 1 .. n_startup_trials):** ``n_startup_trials``
   (default 30) are drawn uniformly at random from the per-approach
   search space.  For a ~19-dimensional search space, 30 random trials
@@ -101,9 +101,9 @@ Outputs (per ``--output_dir``)
     hpo_run_state_<approach>.json           Compact progress snapshot
                                             (completed/failed/running counts,
                                             current best, last trial)
-    hpo_best_snapshots_<approach>/          Audit trail: a JSON copy of the
-        best_at_trial_NNNN.json             best-params dict (incl. metrics)
-                                            at the moment each new best was set
+    hpo_best_snapshots_<approach>/          Archive of the best-params
+        best_at_trial_NNNN.json             JSON dict (incl. metrics) at the
+                                            moment each new best was set
     hpo_log_<approach>.txt                  Full Optuna log
 
 Crash / preemption safety
@@ -181,12 +181,13 @@ warnings.filterwarnings(
 # trials.  Strings sidestep this entirely.
 #
 # The Soft-PINN search space includes ``w_phys`` (work-energy residual
-# penalty weight) and ``w_bc`` (paired E(0)/F(0) soft-penalty weight) but
-# does NOT include weights for monotonicity / angle-smoothness / curvature —
-# those are not part of the simplified Soft loss formulation.  Similarly,
-# the Hard-PINN search space contains only data-fit and stabilisation
-# hyperparameters since the three core physics constraints are enforced
-# architecturally.
+# penalty weight) and ``w_bc`` (paired E(0)/F(0) soft-penalty weight) for
+# the three core physics constraints, plus auxiliary regularisers for
+# monotonicity, angle-smoothness, and curvature.  The Hard-PINN search
+# space enforces the three core constraints architecturally (no w_phys,
+# w_bc) and otherwise tunes data-fit, stabilisation, and the same
+# auxiliary regularisers so the two approaches are compared on
+# identical auxiliary priors.
 # =============================================================================
 HL_DDNS_SOFT = {
     "64-32":      [64, 32],
@@ -209,10 +210,9 @@ HL_HARD = {
 def suggest_ddns(trial: "optuna.Trial") -> Dict:
     """Search space for the data-driven baseline (no physics losses).
 
-    ``lr`` lower bound tightened from 1e-6 to 1e-5 to avoid the slow-LR
-    under-fit basin observed in earlier Hard-PINN HPOs.  The documented
-    DDNS best (val_R²_load = 0.78) used lr = 4.21e-5, so the tighter
-    range still includes the proven optimum.
+    ``lr`` is on log scale over [1e-5, 1e-3] — the lower bound avoids a
+    slow-LR under-fit basin while the range still spans two decades for
+    TPE exploration.
     """
     hl_key = trial.suggest_categorical("hidden_layers", list(HL_DDNS_SOFT.keys()))
     return {
@@ -235,26 +235,18 @@ def suggest_soft(trial: "optuna.Trial") -> Dict:
 
     The Soft-PINN loss contains the data terms (w_data_load, w_data_energy),
     the three core physics soft penalties (work-energy residual w_phys, paired
-    BC penalty w_bc enforcing both E(0)=0 and F(0)=0), AND three auxiliary
+    BC penalty w_bc enforcing both E(0)=0 and F(0)=0), and three auxiliary
     soft physics regularisers — monotonicity (F >= 0), angle smoothness
-    (dF/dtheta), and curvature (d^2E/dd^2).  These three are tunable here
-    because they materially affect ensemble-mean R^2 (see the Hard #152 vs
-    #124 post-mortem: without aux constraints, the M=20 production ensemble
-    fell ~0.04 below documented baselines).  They are applied uniformly to
-    Soft and Hard so the architectural-vs-soft comparison is over identical
-    auxiliary priors, not different ones.
+    (dF/dtheta), and curvature (d^2E/dd^2).  The auxiliary regularisers are
+    applied uniformly to Soft and Hard so the architectural-vs-soft
+    comparison is over identical auxiliary priors.
     """
     hl_key = trial.suggest_categorical("hidden_layers", list(HL_DDNS_SOFT.keys()))
     return {
         "hidden_layers":   list(HL_DDNS_SOFT[hl_key]),
         "batch_size":      trial.suggest_categorical("batch_size", [32, 64, 128]),
-        # lr upper widened from 5e-2 to 1e-1 — documented Soft 8.07e-3 was
-        # at 79% of [1e-5, 5e-2] log; now at 73% of [1e-5, 1e-1] log.
+        # lr / weight_decay on log scale because each spans 3-4 decades.
         "lr":              trial.suggest_float("lr",             1e-5, 1e-1, log=True),
-        # weight_decay lower shifted from 1e-6 to 1e-5 — documented Soft
-        # 6.84e-4 was at 71% of [1e-6, 1e-2] log; now at 61% of
-        # [1e-5, 1e-2] log.  The 1e-6 lower bound was unrealistically
-        # small for Adam anyway.
         "weight_decay":    trial.suggest_float("weight_decay",   1e-5, 1e-2, log=True),
         "dropout":         trial.suggest_float("dropout",        0.0,  0.05),
         "softplus_beta":   trial.suggest_float("softplus_beta",  5.0,  25.0),
@@ -262,19 +254,12 @@ def suggest_soft(trial: "optuna.Trial") -> Dict:
         "w_data_load":     trial.suggest_float("w_data_load",    0.5,  10.0, log=True),
         "w_data_energy":   trial.suggest_float("w_data_energy",  0.1,  10.0, log=True),
         "w_phys":          trial.suggest_float("w_phys",         0.01, 10.0, log=True),
-        # w_bc upper widened from 5.0 to 10.0 — documented Soft 0.599 was
-        # at 66%; now at 59%.
         "w_bc":             trial.suggest_float("w_bc",            0.01, 10.0, log=True),
         "colloc_ratio":     trial.suggest_float("colloc_ratio",    1.0,  6.0),
-        # Auxiliary soft physics regularisers — tuned by HPO on ranges
-        # wide enough to comfortably include the documented best values
-        # (Soft: w_monotonicity=4.10, w_angle_smooth=0.019, smooth_delta=2.66°;
-        #  Hard: w_monotonicity=7.72, w_angle_smooth=0.016, w_curvature=0.0013,
-        #  smooth_delta=1.93°).  Same ranges in suggest_hard for identical
-        #  priors.
-        # w_monotonicity upper widened to 100 to match Hard — documented
-        # Soft 4.10 was at 75% of [0.01, 30.0] log; now at 65% of
-        # [0.01, 100.0] log.
+        # Auxiliary soft physics regularisers — tuned by HPO on the same
+        # ranges as in suggest_hard so the architectural-vs-soft comparison
+        # uses identical auxiliary priors.  Wide log ranges so TPE can
+        # explore several decades of regularisation strength.
         "w_monotonicity":   trial.suggest_float("w_monotonicity",  0.01,   100.0, log=True),
         "w_angle_smooth":   trial.suggest_float("w_angle_smooth",  0.001,  10.0, log=True),
         "w_curvature":      trial.suggest_float("w_curvature",     0.0001, 0.1,  log=True),
@@ -290,68 +275,47 @@ def suggest_hard(trial: "optuna.Trial") -> Dict:
 
     The Hard-PINN architecturally enforces the three core physics
     constraints (work-energy identity F = dE/dd via autograd, and the two
-    boundary conditions E(0) = 0 and F(0) = 0 via slope-subtraction), so
-    no soft penalties are needed for those.  The data terms (w_load,
-    w_energy) drive the fit, while the warmup + cosine + SWA schedule
-    (warmup_epochs, swa_pct) stabilises training.
+    boundary conditions E(0) = 0 and F(0) = 0 via the model
+    parameterisation), so no soft penalties are needed for those.  The
+    data terms (w_load, w_energy) drive the fit, while the warmup +
+    cosine + SWA schedule (warmup_epochs, swa_pct) stabilises training.
 
-    In addition — for parity with the Soft-PINN search space — the three
-    auxiliary soft regularisers (monotonicity F >= 0, angle smoothness
-    dF/dtheta, curvature d^2E/dd^2) are tuned here on the same ranges as
-    in ``suggest_soft``.  Hard-vs-Soft is therefore an architectural-vs-
-    soft comparison of the CORE three constraints, with identical auxiliary
-    priors in both — not a comparison muddled by different auxiliary
-    formulations.  The Hard #152 vs #124 post-mortem showed that without
-    these auxiliaries the M=20 production ensemble falls ~0.04 below the
-    documented baseline (val_R²_load ≈ 0.85), so re-introducing them is
-    necessary to recover the proven optimum.
+    For parity with the Soft-PINN search space, the three auxiliary soft
+    regularisers (monotonicity F >= 0, angle smoothness dF/dtheta,
+    curvature d^2E/dd^2) are tuned here on the same ranges as in
+    ``suggest_soft``.  Hard-vs-Soft is therefore an architectural-vs-soft
+    comparison of the CORE three constraints with identical auxiliary
+    priors in both.
 
-    ``lr`` is widened back to ``[1e-6, 5e-3]`` (from the earlier narrow
-    ``[1e-5, 1e-3]``) so TPE can re-discover the documented best (lr =
-    9.95e-5).  The wider lower bound risks the slow-LR under-fit basin
-    seen in earlier runs, but with the aux constraints back in the loss
-    that basin is less likely to dominate.
-
-    ``batch_size`` includes 8 even though a Hard-PINN trial at
-    batch_size=8 takes ~5.5 h per ensemble member — the documented
-    production best (val_R²_load = 0.85) used batch_size=8 with 8816
-    training samples, so excluding 8 from the search space makes the
-    documented optimum unreachable.  Choices are [8, 16, 32].  Allow
-    extra wall-time (96-120h) when launching this HPO to absorb the
-    longer batch_size=8 trials.
+    ``batch_size`` choices are [8, 16, 32].  Allow generous wall-time
+    when launching this HPO because Hard-PINN trials at batch_size=8
+    take several hours per ensemble member.
     """
     hl_key = trial.suggest_categorical("hidden_layers", list(HL_HARD.keys()))
     return {
         "hidden_layers":   list(HL_HARD[hl_key]),
         "batch_size":      trial.suggest_categorical("batch_size", [8, 16, 32]),
+        # lr / weight_decay / smoothl1_beta on log scale because each
+        # candidate range spans multiple decades.
         "lr":              trial.suggest_float("lr",             1e-6, 5e-3, log=True),
         "weight_decay":    trial.suggest_float("weight_decay",   1e-5, 5e-2, log=True),
         "dropout":         trial.suggest_float("dropout",        0.0,  0.05),
         "softplus_beta":   trial.suggest_float("softplus_beta",  3.0,  25.0),
-        # smoothl1_beta on log scale — documented Hard value 0.118 sits at
-        # 11% of linear [0.01, 1.0] but at 54% of log [0.01, 1.0].
         "smoothl1_beta":   trial.suggest_float("smoothl1_beta",  0.01, 1.0,  log=True),
-        # w_load and w_energy widened from [1, 20] to [0.5, 50] — documented
-        # Hard values 6.80, 8.65 sat at 64% and 72% of the narrow range.
-        # The widened range puts them at 57% and 60%, giving TPE room to
-        # push higher if data weights drive a better fit.
+        # Wide log ranges on the data weights so TPE can balance load vs
+        # energy fitting strength.
         "w_load":          trial.suggest_float("w_load",         0.5,  50.0, log=True),
         "w_energy":        trial.suggest_float("w_energy",       0.5,  50.0, log=True),
-        # grad_clip retightened from [0.5, 3.0] to [0.3, 2.0] — documented
-        # 0.983 sat at 19%; now at 40%.
+        # grad_clip on linear scale, centred near 1 where Adam typically
+        # benefits from clipping but doesn't truncate informative grads.
         "grad_clip":       trial.suggest_float("grad_clip",      0.3,  2.0),
         "warmup_epochs":   trial.suggest_int  ("warmup_epochs",  40,   150),
         "swa_pct":         trial.suggest_float("swa_pct",        0.10, 0.35),
         "colloc_ratio":     trial.suggest_float("colloc_ratio",    1.0,  6.0),
-        # Auxiliary soft physics regularisers — tuned by HPO on the same
-        # ranges as Soft so the architectural-vs-soft comparison is over
-        # identical priors.  Ranges are wide enough to include the
-        # documented production HPs (w_monotonicity=7.72, w_angle_smooth=
-        # 0.016, w_curvature=0.0013, smooth_delta_deg=1.93°).  Upper bound
-        # on w_monotonicity widened to 100 because documented Hard value
-        # 7.72 still sat at 83% of log [0.01, 30.0] — TPE needs room to
-        # push higher if the true optimum is >10.  Same change applied to
-        # Soft for parity.
+        # Auxiliary soft physics regularisers — same ranges as in
+        # suggest_soft so the architectural-vs-soft comparison uses
+        # identical auxiliary priors.  Wide log ranges so TPE can
+        # explore several decades of regularisation strength.
         "w_monotonicity":   trial.suggest_float("w_monotonicity",  0.01,   100.0, log=True),
         "w_angle_smooth":   trial.suggest_float("w_angle_smooth",  0.001,  10.0, log=True),
         "w_curvature":      trial.suggest_float("w_curvature",     0.0001, 0.1,  log=True),
@@ -394,10 +358,8 @@ WARM_START = {
         },
     ],
     "soft": [
-        # Warm-start: documented Soft-PINN production HPs (val R²_load = 0.80
-        # at θ*=60° with M=20 ensemble × 800 epochs).  Same aux constraint
-        # values that the documented baseline used; w_curvature was 0 in the
-        # documented baseline so we seed at the lower bound 1e-4.
+        # Warm-start: production Soft-PINN HPs enqueued as trial 0 so TPE
+        # evaluates the prior configuration before random sampling begins.
         {
             "hidden_layers":    "256-128",
             "batch_size":       64,
@@ -420,11 +382,8 @@ WARM_START = {
         },
     ],
     "hard": [
-        # Warm-start: documented Hard-PINN production HPs (val R²_load = 0.85
-        # at θ*=60° with M=20 ensemble × 800 epochs).  These HPs were tuned
-        # with the same three auxiliary soft constraints we are now re-adding
-        # to the search space, so TPE evaluates the proven configuration as
-        # trial 1.
+        # Warm-start: production Hard-PINN HPs enqueued as trial 0 so TPE
+        # evaluates the prior configuration before random sampling begins.
         {
             "hidden_layers":    "128-64",
             "batch_size":       8,
@@ -760,8 +719,8 @@ def _enqueue_warm_starts(
 
     Skipped on resume if the same params already appear in the study.
     Warm-start dicts are filtered to keys in the current search space so
-    that an obsolete warm start (e.g. one that referenced a removed
-    regulariser) does not crash the enqueue step.
+    that any extra keys not in the suggester are silently dropped rather
+    than crashing the enqueue step.
     """
     allowed = set(_suggester_keys(approach))
     for ws in WARM_START.get(approach, []):
@@ -1015,7 +974,7 @@ def make_checkpoint_callback(
 
     A best-params snapshot is also written to
     ``hpo_best_params_<approach>.json.<trial>.snap`` whenever a NEW best is
-    found, so a complete audit trail of how the best evolved is preserved.
+    found, preserving a full archive of how the best-so-far evolved.
     """
     best_path     = os.path.join(output_dir, f"hpo_best_params_{approach}.json")
     history_path  = os.path.join(output_dir, f"hpo_history_{approach}.csv")
@@ -1034,7 +993,7 @@ def make_checkpoint_callback(
             if payload is not None:
                 _atomic_write_text(best_path, json.dumps(payload, indent=2) + "\n")
                 # If this trial set a new best, also drop a numbered snapshot
-                # so we have an audit trail.
+                # so the evolution of the best-so-far is preserved on disk.
                 best_value = payload.get("best_value")
                 if best_value is not None and best_value > state["best_value_seen"]:
                     state["best_value_seen"] = best_value
@@ -1125,15 +1084,14 @@ def main():
     p.add_argument("--hpo_epochs", type=int, default=800,
                    help="Per-trial training epochs.  Default 800 matches "
                         "the production retrain budget so trial ranking "
-                        "reflects production deployment behaviour exactly "
-                        "(no epoch-mismatch regret).  Wall-time is "
-                        "controlled by (a) the 200-epoch HPO-only "
+                        "reflects production deployment behaviour.  Wall "
+                        "time is bounded by (a) the 200-epoch HPO-only "
                         "EarlyStopping patience set in _build_trial_cfg "
-                        "for Soft/DDNS, and (b) the MedianPruner that "
+                        "for Soft/DDNS and (b) the MedianPruner that "
                         "kills clearly-losing trials cross-trial.  Hard "
-                        "cannot use per-trial ES (SWA needs the full "
-                        "budget) so its trials run the full 800 epochs "
-                        "unless pruned cross-trial.")
+                        "cannot use per-trial ES (SWA requires the full "
+                        "budget) so individual Hard trials run the full "
+                        "800 epochs unless pruned across trials.")
     p.add_argument("--data_dir",   default="./data")
     p.add_argument("--output_dir", default="./hpo_out")
     p.add_argument("--study_name", default=None,
@@ -1315,11 +1273,11 @@ def main():
     #     random exploration; the pruner needs a population of completed
     #     trials to compute a meaningful median.
     #   * n_warmup_steps = 0: prune as soon as the first seed of a trial
-    #     completes if it's below median.  At HPO_EPOCHS=800 this is
-    #     critical for Hard — without it a Hard trial at bs=8 burns
-    #     16.5h (3 seeds × 5.5h) even when clearly losing.  Single-seed
-    #     noise risk is mitigated by the fact that we only prune when
-    #     STRICTLY below median (not just close to it).
+    #     completes if it's below median.  This is the primary protection
+    #     against compute waste on long-running Hard-PINN trials, where a
+    #     small batch size can push per-seed cost into multi-hour
+    #     territory.  Single-seed noise risk is mitigated by pruning only
+    #     when STRICTLY below median (not just close to it).
     #   * interval_steps = 1: check after every (fold, seed) report.
     # Hard-PINN trials disable EarlyStopping in stabilized mode (SWA needs
     # the full epoch budget), so the pruner is the PRIMARY protection

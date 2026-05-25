@@ -127,7 +127,7 @@ class _SafeUnicodeStreamHandler(logging.StreamHandler):
 # =============================================================================
 # ATOMIC CSV WRITES (prevents truncated CSVs on SLURM preemption)
 # =============================================================================
-# We patch ``DataFrame.to_csv`` so every CSV write the pipeline performs goes
+# ``DataFrame.to_csv`` is patched so every CSV write the pipeline performs goes
 # through tmp-file + os.replace.  os.replace is atomic on POSIX and Windows
 # NTFS, so a SLURM SIGTERM mid-write either leaves the prior version intact
 # or replaces it with the complete new file — never a half-written CSV.
@@ -189,9 +189,8 @@ def setup_logging(output_dir: str, tag: str = "") -> logging.Logger:
 # Problem: figures of different widths get scaled differently when printed
 # at full-page width. Reference width is PRINT_WIDTH_IN (single column).
 #
-# Wide figures used to multiply font sizes by width/7.48, which made on-screen
-# and PNG exports look huge and caused label/legend/title overlap. We cap the
-# scale at 1.0 so fonts never exceed the single-column reference size.
+# Font sizes are capped at the single-column reference size so they never
+# exceed the reference even when figures are wider than PRINT_WIDTH_IN.
 #
 # Target sizes (reference at fig_width >= PRINT_WIDTH_IN):
 #   axis labels:    9 pt
@@ -227,8 +226,8 @@ _BASE_FONT_AT_FULL_WIDTH = {
     "suptitle":  16.0,  # figure-level suptitle, bold
 }
 
-# All figure text uses Arial in **bold** weight (per user request — every
-# axis label, tick, legend entry, suptitle, title, and annotation is bold).
+# All figure text uses Arial in **bold** weight — every axis label, tick,
+# legend entry, suptitle, title, and annotation is bold.
 FIG_FONT_FAMILY = ["Arial", "Liberation Sans", "DejaVu Sans"]
 FIG_FONT_WEIGHT = "bold"
 
@@ -267,8 +266,8 @@ def apply_fig_style(fig, axes=None, fig_width: float = None, logger: Optional[lo
     Sets x/y labels, titles, tick labels, legend entries, suptitle, figure-level
     legends, and any colorbar text to Arial at the size returned by
     :func:`scaled_fonts`.  Subplot titles, suptitle, and panel labels are bold;
-    body text (axis labels, ticks, legend entries) is regular weight by
-    default, with uniform bold applied per user request.
+    body text (axis labels, ticks, legend entries) is uniformly bold for
+    publication-grade legibility.
 
     Free-floating Text annotations preserve any explicit ``fontweight`` the
     caller set (so e.g. an annotation passed with ``fontweight='bold'`` keeps
@@ -343,8 +342,8 @@ def apply_fig_style(fig, axes=None, fig_width: float = None, logger: Optional[lo
 
     # Free-floating Text annotations (text() / annotate() anchored to axes).
     # Force bold weight on every annotation so the figure has uniform Arial
-    # bold typography end-to-end (per user request).  Family and size still
-    # follow the same panel-vs-annot heuristic as before.
+    # bold typography end-to-end.  Family and size still follow the
+    # panel-vs-annot heuristic.
     for ax in all_axes:
         for txt in ax.texts:
             if not txt.get_text():
@@ -480,11 +479,11 @@ def set_seed(seed: int) -> None:
     -----
     Bit-identical reproducibility on GPU is *not* fully achievable when autograd
     accumulates gradients across CUDA atomics (used by the second-order
-    `create_graph=True` path in Hard-PINN training). We set every controllable
-    knob — including the cuBLAS workspace and ``use_deterministic_algorithms``
-    in warn-only mode — so reruns on the same hardware/PyTorch version produce
-    near-identical numbers (within 1e-6 typical drift) and so a reviewer who
-    asks "can you reproduce Table 1?" gets a near-yes.
+    ``create_graph=True`` path in Hard-PINN training). Every controllable knob
+    is set — including the cuBLAS workspace and
+    ``use_deterministic_algorithms`` in warn-only mode — so reruns on the same
+    hardware/PyTorch version produce near-identical numbers (within 1e-6
+    typical drift).
     """
     # PYTHONHASHSEED only honoured if set BEFORE Python starts — set it here
     # for the env, but the authoritative place is the launch script. Document in main().
@@ -499,8 +498,8 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     # warn_only=True: log a warning if a non-deterministic kernel is hit but do
-    # not abort. Hard-PINN double-backward currently triggers a few of these;
-    # they bias numbers by <1e-6, well below the conformal-band width.
+    # not abort. Hard-PINN double-backward triggers a few of these; they bias
+    # numbers by <1e-6, well below the conformal-band width.
     try:
         torch.use_deterministic_algorithms(True, warn_only=True)
     except (TypeError, RuntimeError):
@@ -523,8 +522,8 @@ def r2_safe(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
     sklearn's ``r2_score`` divides by ``var(y_true)``; when a held-out slice has
     near-zero variance (e.g. an LC×θ subset where energy is briefly flat) the
-    metric blows up to ``-inf`` and contaminates the Tukey fence. We treat such
-    slices as "undefined" and let the caller decide how to aggregate.
+    metric blows up to ``-inf`` and contaminates the Tukey fence. Such slices
+    are treated as "undefined" so the caller can decide how to aggregate.
     """
     y_true = np.asarray(y_true, dtype=np.float64).reshape(-1)
     y_pred = np.asarray(y_pred, dtype=np.float64).reshape(-1)
@@ -603,7 +602,7 @@ class Config:
     inverse_stress_max_targets: int = 5
     # Per-member forward spread at reported optimum (cheap).
     run_inverse_member_spread: bool = True
-    # CI / smoke: tiny budgets, no reviewer extras, GP-BO replaced by coarse grid inverse.
+    # CI / smoke: tiny budgets, robustness extras skipped, GP-BO replaced by coarse grid inverse.
     dry_run: bool = False
     show_plots: bool = False
     save_plots: bool = True
@@ -677,8 +676,8 @@ class BOConfig:
 
     Budget is set tight: empirically the optimum is found in ~7 / 20 EI
     evaluations on this problem, with cross-restart theta-spread of
-    +/- 0.0 deg on most targets.  We therefore use B=20 (5 random initial
-    + 15 EI) and an early-stop after ``stagnation_patience`` consecutive
+    +/- 0.0 deg on most targets.  Total budget is B=20 (5 random initial
+    + 15 EI) with an early-stop after ``stagnation_patience`` consecutive
     non-improving evaluations.  Total surrogate calls per target are
     ``n_bo_restarts * effective_calls`` where ``effective_calls <=
     n_calls_total``.
@@ -725,28 +724,16 @@ def _dry_run_shrink_training_cfg(cfg: Dict) -> None:
 def get_model_config(approach: str, protocol: str = "random", w_phys_override: float = None) -> Dict:
     """Get model configuration with protocol-specific hyperparameters.
 
-    Unseen-θ=60° configs are hardcoded HPO-best.  These are the configurations
-    whose production retrain (M=20 ensemble × 600-800 epochs) produced the
-    documented results:
-        DDNS:  best val load R² = 0.7835  (arch [128, 64, 32])
-        Soft:  best val load R² = 0.8012  (arch [256, 128, 64])
-        Hard:  best val load R² = 0.8499  (arch [32, 32])
-    The Soft and Hard cfgs run with the architectural E(0)=0 BC active (the
-    slope-subtraction construction described in Section 3.2.3); DDNS runs with
-    BC disabled inside train_ddns since it has no physics losses.
+    Unseen-θ=60° configs are hardcoded HPO-best.  DDNS runs with BC disabled
+    inside train_ddns since it has no physics losses.
 
-    To reproduce the documented R² numbers, run:
+    To reproduce the reported R² numbers, run:
         python composite_design.py --mode forward --data_dir ./data \\
             --output_dir ./results --n_ensemble 20 --strict_paper
     """
 
     if protocol == "unseen":
-        # ---- cfg_ddns (HPO best trial #131, val_R²_load = 0.7378, arch [256,128,64]) ----
-        # New clean-methodology HPO (150 trials, 3 seeds, 800 epochs).
-        # mean_train_load_r2 = 0.547, mean_val_load_r2 = 0.738,
-        # mean_val_energy_r2 = 0.983, std_val_load_r2 = 0.009.
-        # ---- DDNS cfg: documented v17 HPs (val_R²_load = 0.7131, M=19/20) ----
-        # Reproduces the v17 result reported in Table 1 of the paper.
+        # ---- DDNS cfg ----
         # Adam optimizer, no physics terms (DDNS = data-driven baseline).
         cfg_ddns = {
             "optimizer": "adam", "lr": 4.2123162503e-05,
@@ -760,14 +747,12 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
             "sched_patience": 58, "sched_factor": 0.4589,
         }
 
-        # ---- Soft-PINN cfg: documented v17 HPs (val_R²_load = 0.7875, M=20) ----
-        # Reproduces the v17 result reported in Table 1 of the paper.
+        # ---- Soft-PINN cfg ----
         # Loss = data + work-energy residual (w_phys) + paired E(0)/F(0)
         # soft BC penalty (w_bc) + three auxiliary soft regularisers
         # (monotonicity F>=0, angle smoothness dF/dθ, curvature d²E/dd²).
-        # The auxiliary regularisers were tuned by the v17 HPO and are
-        # essential to the result — they collectively encode the
-        # smoothness priors the unseen-angle protocol relies on.
+        # The auxiliary regularisers collectively encode the smoothness
+        # priors the unseen-angle protocol relies on.
         cfg_soft = {
             "optimizer": "adam", "lr": 8.0733040807e-03,
             "weight_decay": 6.8420377257e-04, "batch_size": 64,
@@ -785,17 +770,15 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
             "sched_patience": 55, "sched_factor": 0.4574,
         }
 
-        # ---- Hard-PINN cfg: documented v17 HPs (val_R²_load = 0.8221, M=20) ----
-        # Reproduces the v17 result reported in Table 1 of the paper.
-        # Architecture is bare MLP (HardEnergyNet with configure_zero_bc(
-        # enabled=False)), force F = dE/dd via autograd.  Three core physics
-        # constraints are enforced as in v17:
-        #   * work-energy identity F = dE/dd via the network output structure
-        #   * E(0) = 0 and F(0) = 0 encouraged indirectly through the three
-        #     auxiliary soft regularisers (monotonicity, angle smoothness,
-        #     curvature) which collectively shape F and E near d=0
-        # Training schedule: warmup (80 ep) + cosine LR + SWA over the final
-        # 20% of epochs.  Adam optimizer (not AdamW) to match v17.
+        # ---- Hard-PINN cfg ----
+        # Architecture: HardEnergyNet (single-output energy MLP), force
+        # F = dE/dd computed by autograd at both training and inference, so
+        # the work-energy identity is enforced by construction.  The boundary
+        # conditions E(0)=0 and F(0)=0 are encouraged through the three
+        # auxiliary soft regularisers (monotonicity, angle smoothness, energy
+        # curvature) which collectively shape F and E near d=0.  Training
+        # schedule: warmup + cosine LR + SWA over the final ``swa_pct`` of
+        # epochs.  Adam optimizer.
         cfg_hard = {
             "optimizer": "adam", "lr": 9.9507487403e-05,
             "weight_decay": 3.7459350574e-03, "batch_size": 8,
@@ -1084,12 +1067,12 @@ def hard_pinn_predict_load_energy(
 def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> Tuple[List[nn.Module], StandardScaler, StandardScaler, OneHotEncoder, ScalingParams]:
     """
     Train Hard-PINN ensemble on 100% of data for maximum accuracy in inverse design.
-    
+
     No holdout is used because:
     1. The forward model has already been validated using dual protocols
-    2. For inverse design, we want the most accurate surrogate possible
-    3. The inverse design validation comes from comparing predicted vs actual (EA, IPF)
-    
+    2. The inverse-design surrogate should use the most accurate fit available
+    3. Inverse-design validation comes from comparing predicted vs actual (EA, IPF)
+
     Returns:
         models: List of trained Hard-PINN models (ensemble)
         scaler_disp: Displacement scaler (fitted on all data)
@@ -1121,17 +1104,14 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
         grad_factor=float(scaler_out.scale_[1] / max(1e-12, scaler_disp.scale_[0])),
     )
     
-    # Use unseen-protocol Hard cfg for full-data training: same architecture
-    # [32, 32], dropout, loss weights, optimizer, and stabilization
-    # (warmup + cosine + SWA). The unseen-protocol cfg deliberately omits
-    # auxiliary field-wide regularizers (monotonicity, angle smoothness,
-    # curvature); the inverse-design surrogate inherits this absence so
-    # that all three core physics constraints (work-energy + two BCs)
-    # remain enforced exclusively by the architectural slope-subtraction.
+    # Use unseen-protocol Hard cfg for full-data training: same architecture,
+    # dropout, loss weights, optimizer, and stabilization (warmup + cosine
+    # + SWA), so the inverse-design surrogate inherits the same physics
+    # treatment as the validated forward model.
     cfg = get_model_config("hard", protocol="unseen")
     cfg["epochs"] = 1500  # Full data (incl. 60°) converges faster than unseen protocol
-    cfg["batch_size"] = 128  # Larger batch for 10500 samples (unseen used 8 for 8816)
-    cfg["warmup_epochs"] = 150  # Scale warmup proportionally: 80/800 ≈ 150/1500
+    cfg["batch_size"] = 128  # Larger batch for the full-data sample
+    cfg["warmup_epochs"] = 150  # Scale warmup proportionally with total epochs
     if CFG.dry_run:
         cfg["epochs"] = min(int(cfg["epochs"]), 12)
         cfg["warmup_epochs"] = min(int(cfg.get("warmup_epochs", 6)), 4)
@@ -1179,7 +1159,8 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
         
         # Create and train model
         model = HardEnergyNet(X_full.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
-        # Hard-PINN production forward training: BC DISABLED (v17 architecture).
+        # Optional architectural BC kept disabled in production; the soft
+        # auxiliary regularisers handle BC enforcement.
         model.configure_zero_bc(params, enabled=False)
 
         if cfg["optimizer"] == "adamw":
@@ -1585,14 +1566,14 @@ class HardEnergyNet(nn.Module):
         # (1) Network value at the boundary.
         out0 = self.net(x0)
         # (2) Network d-slope at the boundary.  Use a separate detached input
-        # with ``requires_grad=True`` so we can pull out the local sensitivity
-        # without entangling the outer-grad graph.  ``create_graph=self.training``
+        # with ``requires_grad=True`` so the local sensitivity can be pulled
+        # out without entangling the outer-grad graph.  ``create_graph=self.training``
         # so backward through the loss can reach the net's weights via
-        # ``dE_dd_at_zero`` during training; at eval/inference we save the
-        # double-backward cost.  ``retain_graph`` left at its default (= the
-        # value of ``create_graph``); explicitly passing ``False`` here would
-        # free intermediates that the outer ``loss.backward()`` needs when the
-        # loss depends on both ``dE/dd`` and ``E_n`` (physics + data terms).
+        # ``dE_dd_at_zero`` during training; at eval/inference the
+        # double-backward cost is saved.  ``retain_graph`` left at its default
+        # (= the value of ``create_graph``); explicitly passing ``False`` here
+        # would free intermediates that the outer ``loss.backward()`` needs
+        # when the loss depends on both ``dE/dd`` and ``E_n`` (physics + data terms).
         x0_grad = x0.detach().clone().requires_grad_(True)
         out0_grad = self.net(x0_grad)
         dE_dd_at_zero = torch.autograd.grad(
@@ -1752,17 +1733,15 @@ def monotonicity_loss_soft(Xin: torch.Tensor, model: nn.Module,
 
     Why not work in physical units here?
     ------------------------------------
-    Earlier we briefly normalized the gradient to physical kN (matching
-    Hard-PINN's monotonicity loss) for unit consistency. That change scaled
-    the penalty magnitude by ``(sig_E/sig_d)^2 / sig_E^2 = 1/sig_d^2 ≈
-    1/(35 mm)^2 ≈ 1/1200``, which silently reduced the Soft-PINN's HPO-tuned
-    ``w_monotonicity = 4.097`` to an effective weight of ~0.003 — i.e., the
-    constraint stopped acting. The HPO from manuscript Section 3.4 was
-    performed against the formulation below; we keep it.
+    Normalising the gradient to physical kN (matching Hard-PINN's
+    monotonicity loss) would scale the penalty magnitude by
+    ``(sig_E/sig_d)^2 / sig_E^2 = 1/sig_d^2``, shrinking the HPO-tuned
+    ``w_monotonicity`` to a negligible effective weight.  The HPO was
+    performed against the formulation below, so it is preserved as written.
 
     The Soft-PINN and Hard-PINN ``w_monotonicity`` values therefore live on
     different magnitude scales by design — each was independently tuned to
-    its own loss formulation (Section 3.4). They are NOT directly comparable.
+    its own loss formulation.  They are NOT directly comparable.
     """
     Xin_g = Xin.requires_grad_(True) if not Xin.requires_grad else Xin
     pred = model(Xin_g)
@@ -1902,11 +1881,8 @@ def train_ddns(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     
     model = SoftPINNNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
     # DDNS is the data-driven baseline — no architectural physics priors.
-    # The F(d=0)=E(d=0)=0 correction is enabled only for Soft- and Hard-PINN.
-    # Applying it to DDNS imposes a structural prior with no loss-side
-    # counterpart and cost ~0.07 R^2 vs the BC-free v_6 baseline in HPO.
     # Calling configure_zero_bc(..., enabled=False) is explicit (the network
-    # default is also False, but this documents the choice for reviewers).
+    # default is also False, but this documents the choice).
     model.configure_zero_bc(params, enabled=False)
     opt = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"]) if cfg.get("optimizer", "adamw").lower() == "adam" else optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     sched = optim.lr_scheduler.ReduceLROnPlateau(opt, patience=cfg["sched_patience"], factor=cfg["sched_factor"], mode='max')
@@ -2064,11 +2040,10 @@ def train_soft(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
                 loss = loss + w_smooth * loss_smooth
             
             if w_bc > 0 and X_bc_t is not None:
-                # Soft BC: paired penalty on E(0)=0 AND F(0)=0, mirroring
-                # the architectural enforcement of both BCs in Hard-PINN
-                # (Section 3.2.3).  Each penalty is computed on raw-units
-                # predictions so the two terms are dimensionally
-                # commensurate after the trained scalers are inverted.
+                # Soft BC: paired penalty on E(0)=0 AND F(0)=0.  Each
+                # penalty is computed on raw-units predictions so the two
+                # terms are dimensionally commensurate after the trained
+                # scalers are inverted.
                 pred_bc = model(X_bc_t)
                 E_bc_phys = pred_bc[:, 1:2] * params.sig_E + params.mu_E
                 F_bc_phys = pred_bc[:, 0:1] * params.sig_F + params.mu_F
@@ -2128,28 +2103,22 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
                seed: int, protocol: str, logger: logging.Logger) -> Tuple:
     """Train Hard-PINN model.
 
-    The third return value is the best epoch's mean validation R²,
-    ``0.5 * (R²_load + R²_energy)``, used for checkpointing (including SWA check).
-
-    Architecture (matches v17 documented Hard-PINN, val_R²=0.8221):
-    bare MLP outputting normalised energy ``Ê_n``; force ``F̂ = ∂Ê/∂d``
-    via autograd at both training and inference.  The boundary conditions
-    E(0)=0 and F(0)=0 are NOT enforced architecturally — they are
-    encouraged through the soft auxiliary regularisers (w_monotonicity,
-    w_angle_smooth, w_curvature) which constrain F and E near d=0
-    indirectly.  The slope-subtraction architecture
-    (``HardEnergyNet.configure_zero_bc(enabled=True)``) is retained in the
-    codebase for ablation studies but disabled in production training:
-    it adds a second-order autograd graph (2-3× per-step cost) and
-    over-constrains the model, producing under-fit train_R²~0.49 vs
-    val_R²~0.74 with the new BC vs ~0.82 in v17 without it.
+    Architecture: HardEnergyNet outputs normalised energy ``Ê_n``; the
+    force ``F̂ = ∂Ê/∂d`` is computed by autograd at both training and
+    inference, so the work-energy identity is enforced by construction.
+    The boundary conditions E(0)=0 and F(0)=0 are encouraged through the
+    three auxiliary soft regularisers (monotonicity, angle smoothness,
+    curvature) which collectively shape F and E near d=0.  An optional
+    architectural BC correction (``HardEnergyNet.configure_zero_bc``) is
+    preserved in the codebase for ablation studies.
 
     Loss: ``w_load · SmoothL1(F̂, F) + w_energy · SmoothL1(Ê, E)`` plus
-    the three auxiliary soft regularisers when their weights are non-zero
-    (which is the case in the documented v17 cfg and in our new HPO best).
+    the three auxiliary soft regularisers.  The third return value is
+    the best epoch's load R², used for checkpointing including the
+    final SWA snapshot.
 
     Training schedule: warmup + cosine LR + SWA over the final ``swa_pct``
-    of epochs.  Stable across the documented production retrains.
+    of epochs.
     """
     set_seed(seed)
     cfg = get_model_config("hard", protocol)
@@ -2162,9 +2131,9 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     y_val = val_df[["load_kN", "energy_J"]].values
     
     model = HardEnergyNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
-    # Hard-PINN production forward training: BC enforcement DISABLED to match
-    # the v17 architecture (bare MLP + autograd F=dE/dd).  Slope-subtraction
-    # BC kept available via configure_zero_bc(enabled=True) for ablations.
+    # Optional architectural BC kept disabled in production; the soft
+    # auxiliary regularisers handle BC enforcement.  The slope-subtraction
+    # form remains available via configure_zero_bc(enabled=True) for ablations.
     model.configure_zero_bc(params, enabled=False)
     opt = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"]) if cfg.get("optimizer", "adamw").lower() == "adam" else optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     
@@ -2491,7 +2460,7 @@ def evaluate_ensemble(models: List[nn.Module], approach: str, val_df: pd.DataFra
 def compute_statistical_tests(dual_results: Dict, logger: logging.Logger) -> Dict:
     """Compare ensemble member load-R² across approaches with three statistics.
 
-    For each (protocol, approach-pair) we report:
+    For each (protocol, approach-pair) the following are reported:
 
     1. **Welch's t-test** (``equal_var=False``) — descriptive effect-size summary.
        Note: ensemble members share the data split, so the iid assumption is
@@ -2909,9 +2878,9 @@ def train_lc_plausibility_classifier(
     # --- Base learners (for the final production model) ----------------------
     # Sample-size-aware calibration policy: identical to ``auto_tune_lambda``.
     # With ~12-30 paired samples (n_lc0 = n_lc1 ≈ 6-15) the Platt sigmoid
-    # calibrator is high-variance; in that regime we deliberately *skip*
-    # calibration and return the soft-voting ensemble directly. Above 30
-    # samples we use sigmoid calibration with up to 5-fold inner CV.
+    # calibrator is high-variance; in that regime calibration is deliberately
+    # *skipped* and the soft-voting ensemble is returned directly.  Above 30
+    # samples, sigmoid calibration with up to 5-fold inner CV is applied.
     import warnings as _w
     base_ens = _make_base()
     if n_samples < 20:
@@ -3769,7 +3738,7 @@ def _make_objective(models, approach, lc, scaler_disp, enc, params, target_ea, t
                     cal_ens=None, feat_scaler=None, prob_weight=0.0, d_eval=None):
     """Factory function for objective closure with optional LC plausibility penalty.
 
-    Objective (matches manuscript Section 3.7.2):
+    Objective:
         J = w_ea*(EA@d_eval - EA_target)^2 + w_ipf*(IPF - IPF_target)^2
             + prob_weight*(-log p_LC)
     """
@@ -3819,7 +3788,7 @@ def run_inverse_design(models: List[nn.Module], approach: str, target_ea: float,
     results = {"gpbo": {}, "gpbo_joint": None,
                "target_ea": target_ea, "target_ipf": target_ipf,
                "prob_weight": prob_weight}
-    # Note: Only GP-BO is used for inverse design (grid/DE/DA removed in v18)
+    # Only GP-BO is used for inverse design.
     
     def _enrich(res_dict, lc):
         """Populate prediction metrics on an optimizer result."""
@@ -3956,10 +3925,10 @@ def gp_bo_minimize_joint_multistart(objective_funcs, bounds, bo_cfg, logger, n_r
     random seeds per target**. Each restart is a *fully independent* GP-BO run
     of ``bo_cfg.n_calls_total`` evaluations (default 30). The total surrogate
     cost per inverse-design call is therefore ``n_restarts × n_calls_total``
-    (= 150 with defaults). The "30 evaluations per BO run" claim in the paper
-    refers to the per-restart budget — the multi-start factor is the robustness
-    safety net documented in Section 5.8 ("Multi-seed robustness testing ...
-    converges to identical solutions across seeds").
+    (= 150 with defaults). The per-restart budget controls the convergence
+    claim; the multi-start factor provides a robustness safety net
+    ("multi-seed robustness testing ... converges to identical solutions
+    across seeds").
     """
     if n_restarts <= 1:
         return gp_bo_minimize_joint(objective_funcs, bounds, bo_cfg, logger)
@@ -5082,9 +5051,9 @@ def run_multiobjective_sweep(models: List[nn.Module], approach: str, scaler_disp
         pareto_df.attrs["lc_counts_dominance_front"] = front_lc_counts
 
     # ----- Per-LC hypervolume contribution -----
-    # How much of the front's hypervolume would be lost if we excluded each
-    # LC? Computed by re-running compute_hypervolume_2d on the LC-restricted
-    # sub-front and reporting the deficit relative to the full HV.
+    # How much of the front's hypervolume would be lost if each LC were
+    # excluded? Computed by re-running compute_hypervolume_2d on the
+    # LC-restricted sub-front and reporting the deficit relative to the full HV.
     try:
         full_hv_for_diag = compute_hypervolume_2d(
             pareto_front_df, landscape_df["EA"].min(), landscape_df["IPF"].max(), logger,
@@ -5111,9 +5080,9 @@ def run_multiobjective_sweep(models: List[nn.Module], approach: str, scaler_disp
     # For every Pareto-dominance-front point in the majority LC, find the
     # best counterfactual in the OTHER LC at the same-or-better IPF and at
     # the same-or-better EA.  This makes the LC-dominance claim
-    # quantitative: instead of "LC2 dominates" (an observation), we can
-    # cite "LC1's best counter-EA at IPF <= X is Y vs LC2's Z (gap of dEA
-    # = Z-Y J)" for each row.  Written to Table_pareto_lc_dominance_audit.csv.
+    # quantitative: instead of "LC2 dominates" (an observation), each row
+    # cites "LC1's best counter-EA at IPF <= X is Y vs LC2's Z (gap of dEA
+    # = Z-Y J)".  Written to Table_pareto_lc_dominance_audit.csv.
     audit_rows: List[Dict] = []
     if (
         not pareto_front_df.empty
@@ -5306,13 +5275,11 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
     fig = plt.figure(figsize=(16, 12))
     gs = fig.add_gridspec(2, 3, hspace=0.52, wspace=0.42, left=0.07, right=0.98, top=0.90, bottom=0.06)
     
-    # Retrieve conformal factors for Hard-PINN.  We pull the **2σ-coverage**
-    # factor (95.4-percentile of |residual|/sigma) so the band drawn here as
-    # ``mean ± cf * sigma`` actually achieves the nominal 95% coverage. The
-    # legacy ``conformal_factor`` (68.3-percentile, 1σ) was previously
-    # multiplied by 2 — that linear extrapolation under-covers under heavy
-    # tails. Using cf_2sigma directly matches the rescaled-band convention
-    # introduced when reconciling 1-sigma vs 2-sigma scaling.
+    # Retrieve conformal factors for Hard-PINN.  The **2σ-coverage** factor
+    # (95.4-percentile of |residual|/sigma) is used so the band drawn here
+    # as ``mean ± cf * sigma`` achieves the nominal 95% coverage.  Using
+    # cf_2sigma directly avoids the under-coverage that arises from
+    # linearly scaling a 1σ factor by 2 under heavy-tailed residuals.
     cf_ea = 1.0
     cf_ipf = 1.0
     if calibration is not None:
@@ -5696,9 +5663,9 @@ def fig_unseen_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir: str,
     
     # Retrieve conformal factors (load and energy) per approach.
     # Use the **2σ-coverage** factor (95.4-percentile of |residual|/σ) so the
-    # band drawn as ``mean ± cf * σ`` achieves the nominal 95% coverage. The
-    # earlier convention used cf_1sigma multiplied by 2; that linear
-    # extrapolation under-covers when residuals are heavy-tailed.
+    # band drawn as ``mean ± cf * σ`` achieves the nominal 95% coverage.
+    # Using cf_2sigma directly avoids the under-coverage that arises from
+    # linearly scaling a 1σ factor by 2 under heavy-tailed residuals.
     conformal_factors = {}
     for approach in ["ddns", "soft", "hard"]:
         cf_load = 1.0
@@ -6181,7 +6148,7 @@ def fig_optimizer_comparison(all_inverse_results: List[Dict], output_dir: str, l
     """GP-BO inverse design: objective convergence and final loss for each target.
 
     Layout: one column per target, two rows (best-so-far objective vs evaluations,
-    plus final objective bar). Only GP-BO is run in this pipeline (v18+).
+    plus final objective bar). Only GP-BO is run in this pipeline.
 
     The lowest-objective run per target is highlighted with a gold border.
     """
@@ -6719,7 +6686,7 @@ def fig_physics_verification(dual_results: Dict, val_df: pd.DataFrame, scaler_di
     ax = axes[1]
     
     # Plot in reverse order so Hard-PINN (most important) is on top.
-    # Local RNG so we don't pollute the global numpy seed state mid-pipeline.
+    # Local RNG to avoid polluting the global numpy seed state mid-pipeline.
     _subsample_rng = np.random.default_rng(42)
     for approach in ["ddns", "soft", "hard"]:
         if approach in residual_data:
@@ -7336,8 +7303,8 @@ def run_inverse_design_robust(models: List[nn.Module], approach: str, target_ea:
 def generate_inverse_robustness_table(robust_results: List[Dict], output_dir: str, logger: logging.Logger):
     """Generate inverse design robustness table.
 
-    Columns mirror ``Table3_inverse_illposedness.csv`` so reviewers can read
-    the two tables interchangeably: same nomenclature for cross-seed spread,
+    Columns mirror ``Table3_inverse_illposedness.csv`` so the two tables can
+    be read interchangeably: same nomenclature for cross-seed spread, with
     explicit cost accounting (``total_surrogate_calls``).
     """
     if not robust_results:
@@ -7626,8 +7593,8 @@ def run_same_capacity_experiment(train_df: pd.DataFrame, val_df: pd.DataFrame,
         else:
             model = HardEnergyNet(Xtr.shape[1], architecture, cfg.get("dropout", 0.0), cfg["softplus_beta"]).to(DEVICE)
             # Hard-PINN: bare MLP outputting E; F = dE/dd via autograd.
-            # BC architecturally disabled to match the v17 forward training
-            # architecture (which the surrogate models here mirror).
+            # Architectural BC disabled to match the production forward
+            # training architecture (which these surrogates mirror).
             model.configure_zero_bc(params, enabled=False)
         
         n_params = model.count_parameters()
@@ -8097,7 +8064,7 @@ def generate_summary_tables(dual_results: Dict, df_metrics: pd.DataFrame, all_in
         pd.DataFrame(rows).to_csv(os.path.join(output_dir, "Table4_model_complexity.csv"), index=False)
         logger.info("  Saved: Table4_model_complexity.csv")
 
-    # Table 5: Per-LC performance breakdown (addresses reviewer concern about aggregated R²)
+    # Table 5: Per-LC performance breakdown (disaggregates the aggregated R²)
     rows = []
     for protocol in ["random", "unseen"]:
         if protocol not in dual_results:
@@ -8473,7 +8440,7 @@ def check_publication_dependencies(logger: logging.Logger) -> None:
 
 
 def write_statistical_testing_policy(output_dir: str, logger: logging.Logger) -> None:
-    """Document multiplicity and primary vs exploratory tests for reviewers."""
+    """Document multiplicity and primary vs exploratory tests."""
     text = """STATISTICAL TESTING POLICY (MANUSCRIPT / SUPPLEMENT)
 ============================================================
 
@@ -9946,7 +9913,7 @@ def fig_08_pareto(pareto_df: pd.DataFrame, landscape_df: pd.DataFrame,
     # carries one row per (α, candidate-angle, lc); pivoting by (α, angle) and
     # taking the minimum J across LCs gives the achievable objective surface.
     # ``landscape_df`` lacks both ``alpha`` and ``J`` columns by construction,
-    # so we read only from ``pareto_df`` here.
+    # so only ``pareto_df`` is read here.
     if pareto_df is not None and not pareto_df.empty and {"alpha", "angle", "J"} <= set(pareto_df.columns):
         piv = pareto_df.pivot_table(index="alpha", columns="angle",
                                     values="J", aggfunc="min")
@@ -10140,7 +10107,7 @@ def fig_appendix_all(forward_state: Optional[Dict],
                         analysis_state: Optional[Dict],
                         output_dir: str, logger: logging.Logger) -> None:
     """Generate the 7 appendix figures by reusing the supplementary plotting
-    routines defined earlier in this module.
+    routines defined in this module.
 
     These are already styled with apply_fig_style(); they go to the same
     output directory but with FigAx_*.png filenames.
@@ -10363,7 +10330,7 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
     else:
         forward_R2_used = None
 
-    # Per-target BO history will be written to disk for reviewer inspection.
+    # Per-target BO history will be written to disk for inspection.
     bo_history_dir = os.path.join(output_dir, "bo_history")
     os.makedirs(bo_history_dir, exist_ok=True)
 
@@ -10376,8 +10343,8 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
             res["forward_R2_used"] = forward_R2_used
 
         # Persist the per-target BO trajectory (every evaluated point) so
-        # reviewers can verify "the optimum is found in ~7 / 20 evals"
-        # independently from the run log.  One CSV per target.
+        # the convergence claim ("the optimum is found in ~7 / 20 evals")
+        # can be verified independently of the run log.  One CSV per target.
         tid = t.get("id", f"T{i+1}")
         try:
             gj = res.get("gpbo_best") or res.get("gpbo_joint") or {}
@@ -10507,10 +10474,9 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
     dcommon_diag = None
     try:
         # Symmetric d_common sweep: capped at min(LC1_stroke, LC2_stroke) so
-        # BOTH LCs are evaluable at every d_star.  This fixes the silent
-        # LC-asymmetry of an earlier version (which swept d ∈ {60, 70, 80,
-        # 90, 100} mm; LC1's 80 mm stroke meant d=90/100 fell back to
-        # LC2-only entries, conflating physical limits with reporting
+        # BOTH LCs are evaluable at every d_star.  This avoids silent
+        # LC-asymmetry from d_star values that fall beyond LC1's natural
+        # 80 mm stroke (which would conflate physical limits with reporting
         # gaps).
         lcs_observed = sorted(df_all["LC"].unique())
         min_stroke = min(disp_end_mm(lc) for lc in lcs_observed) if lcs_observed else 80.0
@@ -10523,7 +10489,7 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
         for d_star in symmetric_d_grid:
             for lc in lcs_observed:
                 # Defensive: every (d_star, lc) here is by construction
-                # within the LC's natural stroke; we still check.
+                # within the LC's natural stroke; double-checked.
                 if d_star > disp_end_mm(lc):
                     continue
                 ea_list = []

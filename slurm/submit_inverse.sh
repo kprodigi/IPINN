@@ -17,8 +17,8 @@
 #                       --use_pretrained_inverse <bundle>
 #                       skips training, runs classifier + GP-BO + ablations
 #
-# Default M=20.  Member training wall is 24 h (sequential would be ~7-11 h
-# per member with the new slope-subtraction BC; 24 h is a safe ceiling).
+# Default M=20.  Member training wall is 24 h (per-member training is
+# ~3.5-5.5 h; 24 h provides margin for SLURM preemption tolerance).
 # Analysis wall is 24 h (classifier is fast; GP-BO over 5 targets + Pareto
 # + Jacobian + λ-sensitivity adds up).
 #
@@ -114,8 +114,9 @@ echo "  PYTHON_BIN: \$PYTHON_BIN"
 echo "=== INVERSE HARD member \${MEMBER_IDX}  Node: \$(hostname)  GPU: \${CUDA_VISIBLE_DEVICES:-none} ==="
 echo "=== Start: \$(date) ==="
 
-# Single-line invocation: the SDSMT cluster's sbatch eats backslash-newline
-# continuations inside unquoted heredocs (see commit d7da39a).
+# Single-line invocation: some sbatch versions strip backslash-newline
+# line-continuations inside unquoted heredocs, which would cause the
+# python call to fail silently with "unrecognized arguments".
 "\$PYTHON_BIN" ${MEMBER_LAUNCHER} --member_idx \${MEMBER_IDX} --data_dir ${DATA_DIR} --output_dir ${OUTPUT_DIR} --n_ensemble ${M_ENSEMBLE} --seed ${SEED}
 EXIT_CODE=\$?
 

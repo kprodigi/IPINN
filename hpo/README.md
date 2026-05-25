@@ -112,7 +112,7 @@ Each approach writes to `--output_dir` (default `./hpo_out`):
     hpo_best_params_<approach>.json          best params so far (rewritten atomically after every completed trial)
     hpo_history_<approach>.csv               every trial (params + R² + state + datetimes + duration)
     hpo_run_state_<approach>.json            compact progress snapshot (completed/failed/running counts)
-    hpo_best_snapshots_<approach>/           audit trail of how the best evolved
+    hpo_best_snapshots_<approach>/           archive of the best-params JSON at each new best
         best_at_trial_NNNN.json              one snapshot per new best
     hpo_log_<approach>.txt                   full Optuna log
     slurm_logs/                              per-task stdout/stderr

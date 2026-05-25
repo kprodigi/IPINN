@@ -42,26 +42,30 @@ The file is organized in nine top-level blocks, in source order:
 | Lines | Content |
 |-------|---------|
 | 1391–1462 | `SoftPINNNet` — two-headed MLP for force and energy (DDNS and Soft-PINN both use this) |
-| 1428–1462 | `SoftPINNNet.configure_zero_bc` — architectural `E(0)=0`/`F(0)=0` correction |
+| 1428–1462 | `SoftPINNNet.configure_zero_bc` — optional architectural `E(0)=0`/`F(0)=0` correction (production cfgs use the soft `w_bc` penalty instead) |
 | 1463–1529 | `HardEnergyNet` — single-output energy network; force is `dE/dd` via `torch.autograd.grad` |
-| 1501–1529 | `HardEnergyNet.configure_zero_bc` — slope-subtraction architectural BC (both `E(0)=0` and `F(0)=0`) |
+| 1501–1529 | `HardEnergyNet.configure_zero_bc` — optional architectural BC correction (preserved for ablation studies; the production Hard-PINN uses the bare MLP form together with the auxiliary soft penalties) |
 
-The architectural-BC contribution is split across the two PINN
-variants. The Soft-PINN keeps the BC in the loss as a paired penalty
-on both `E(0)=0` and `F(0)=0`; the Hard-PINN enforces both BCs
-exactly by construction via slope subtraction (no `w_bc` term in the
-Hard loss). Two flavours:
+The Hard-PINN production architecture is the standard bare-MLP
+energy network with `F = ∂E/∂d` computed by autograd at both
+training and inference.  The boundary conditions `E(0) = 0` and
+`F(0) = 0` are encouraged through the auxiliary soft penalties
+(monotonicity, angle smoothness, curvature) which collectively
+shape the force–displacement curve near the origin (Section 3.5.2).
+The Soft-PINN adds an explicit paired BC penalty
+`w_bc · (E(0)² + F(0)²)` to the work-energy residual loss.
+
+Two flavours:
 
 - **SoftPINNNet** (two-headed `[F, E]`) keeps the standard
-  two-output forward pass; the BC is enforced by a paired soft-MSE
+  two-output forward pass; the BC is enforced by the paired soft-MSE
   loss term `w_bc · (E(0)² + F(0)²)` added to the work-energy
   residual loss.
-- **HardEnergyNet** (single output `E`, with `F = dE/dd`) pins BOTH the
-  value AND the d-slope at the boundary to recover `F(0) = 0` exactly,
-  via the slope-subtraction construction
-  `E_corr(x) = E_net(x) − E_net(x|d=0) − (d_s − d_s0) · ∂E_net/∂d_s|_{x|d=0} + c_{0,E}`.
-  Cost: one extra inner `autograd.grad` per forward pass plus a
-  second-order graph during training (~2–3× the value-only correction).
+- **HardEnergyNet** (single output `E`, with `F = dE/dd`) enforces the
+  work-energy identity by construction.  An optional architectural
+  BC correction (`configure_zero_bc`) is available for ablation
+  studies but is not used in the production cfgs reported in the
+  main results.
 
 ## Block 4 — Physics losses (1530 – 1796) ← paper Section 3.5.2
 

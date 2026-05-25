@@ -27,19 +27,21 @@
 #                                    std but at 67% more wall.
 #   HPO_EPOCHS=800                   Per-trial training epoch budget,
 #                                    matched to the production retrain
-#                                    epoch budget so trial ranking matches
-#                                    production deployment behaviour
-#                                    exactly (no epoch-mismatch regret).
-#                                    Wall-time is controlled by:
+#                                    epoch budget so trial ranking
+#                                    reflects production deployment
+#                                    behaviour.  Wall-time is bounded
+#                                    by two mechanisms:
 #                                      - 200-epoch per-trial EarlyStopping
 #                                        for Soft/DDNS (set by
 #                                        _build_trial_cfg in hpo_search.py)
-#                                      - MedianPruner across trials (kills
-#                                        clearly-losing Hard/Soft trials)
+#                                      - MedianPruner across trials,
+#                                        which kills clearly-losing
+#                                        Hard/Soft trials early
 #                                    Hard cannot use per-trial ES (SWA
-#                                    needs the full epoch budget), so its
-#                                    trials may run the full 800 unless
-#                                    pruned cross-trial.
+#                                    requires the full epoch budget), so
+#                                    individual Hard trials run the full
+#                                    800 epochs unless pruned across
+#                                    trials.
 #   N_WORKERS=1                      Parallel worker count (one SLURM task each)
 #   SEED=2026                        Base seed
 #   DATA_DIR=./data

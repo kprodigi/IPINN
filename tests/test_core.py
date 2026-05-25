@@ -325,10 +325,10 @@ class TestHardEnergyNet:
 
 # =====================================================================
 # Hard-PINN and Soft-PINN auxiliary regularizers (monotonicity F>=0,
-# angle smoothness dF/dθ, curvature d²E/dd²) — REQUIRED in the production
-# unseen-protocol cfgs to reproduce the documented v17 results
-# (Hard val_R²_load = 0.8221, Soft val_R²_load = 0.7875).  Without these
-# the Hard ensemble falls ~0.04 below baseline.
+# angle smoothness dF/dθ, curvature d²E/dd²).  These soft penalties
+# encode the physical priors used by the unseen-angle protocol and are
+# required in the production cfgs of both Soft-PINN and Hard-PINN
+# (Section 3.2 of the manuscript).
 # =====================================================================
 class TestCurvatureRegularizationHard:
     def test_curvature_fn_exists(self, m):
@@ -336,13 +336,12 @@ class TestCurvatureRegularizationHard:
 
     def test_hard_unseen_config_includes_auxiliary_regularizers(self, m):
         cfg = m.get_model_config("hard", "unseen")
-        # The production Hard-PINN cfg MUST contain the three auxiliary
-        # field-wide regularizer weights — these were tuned by the v17 HPO
-        # and are essential to the documented val_R²=0.8221 result.
+        # The production Hard-PINN cfg must contain the three auxiliary
+        # field-wide regularizer weights so the physical priors
+        # (monotonicity, angle smoothness, energy-curvature) are active.
         for key in ("w_curvature", "w_monotonicity", "w_angle_smooth"):
             assert key in cfg, (
-                f"{key} must be set in production Hard cfg; "
-                f"required to reproduce v17 val_R²=0.8221."
+                f"{key} must be set in production Hard cfg."
             )
             assert cfg[key] > 0.0, (
                 f"{key} must be positive in production Hard cfg; got {cfg[key]}."
@@ -350,13 +349,12 @@ class TestCurvatureRegularizationHard:
 
     def test_soft_unseen_config_includes_auxiliary_regularizers(self, m):
         cfg = m.get_model_config("soft", "unseen")
-        # Soft-PINN cfg also includes monotonicity and angle smoothness
-        # per v17 (w_curvature was 0 in v17 Soft, so we only require the
-        # other two).
+        # Soft-PINN cfg includes monotonicity and angle smoothness; the
+        # curvature penalty is not required for the soft formulation
+        # because the work-energy residual already constrains E shape.
         for key in ("w_monotonicity", "w_angle_smooth"):
             assert key in cfg, (
-                f"{key} must be set in production Soft cfg; "
-                f"required to reproduce v17 val_R²=0.7875."
+                f"{key} must be set in production Soft cfg."
             )
             assert cfg[key] > 0.0, (
                 f"{key} must be positive in production Soft cfg; got {cfg[key]}."
