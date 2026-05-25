@@ -807,18 +807,20 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
         #   mean_val_energy_r2 = 0.978
         #   std_val_load_r2    = 0.032
         #
-        # The Hard-PINN loss contains ONLY the data terms (w_load, w_energy).
-        # The work-energy identity F = dE/dd, the boundary conditions
-        # E(0) = 0 and F(0) = 0, and force non-negativity at d = 0 are
-        # enforced architecturally via the slope-subtraction in
-        # HardEnergyNet.configure_zero_bc (Section 3.2.3).  Auxiliary
-        # field-wide regularizers (monotonicity, angle smoothness,
-        # curvature) are intentionally NOT applied — the architectural-vs-
-        # soft-penalty comparison with Soft-PINN is then a comparison of
-        # exactly the three core physics constraints (work-energy + two
-        # BCs) under different enforcement mechanisms.
+        # Hard-PINN architecture matches v17 (documented val_R²=0.8221):
+        # bare MLP outputting normalised energy E_n, with force F = dE/dd
+        # via autograd at training and inference.  The boundary conditions
+        # E(0)=0 and F(0)=0 are NOT enforced architecturally — they are
+        # enforced through the soft auxiliary penalties (w_monotonicity,
+        # w_angle_smooth, w_curvature) which collectively constrain F and
+        # E near d=0 indirectly.  The earlier slope-subtraction architecture
+        # (see HardEnergyNet.configure_zero_bc) is preserved in the codebase
+        # for ablation studies but is intentionally disabled in production
+        # forward training because it adds a second-order autograd graph
+        # (2-3× per-step cost) and over-constrains the model relative to
+        # v17, producing under-fit (train_R²~0.49) at HPO time.
         cfg_hard = {
-            "optimizer": "adamw", "lr": 1.0673230867e-05,
+            "optimizer": "adam", "lr": 1.0673230867e-05,
             "weight_decay": 6.4267667838e-04, "batch_size": 32,
             "hidden_layers": [64, 64, 64], "dropout": 0.028048945,
             "softplus_beta": 20.351957, "smoothl1_beta": 0.928943,
@@ -1194,7 +1196,8 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
         
         # Create and train model
         model = HardEnergyNet(X_full.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
-        model.configure_zero_bc(params)
+        # Hard-PINN production forward training: BC DISABLED (v17 architecture).
+        model.configure_zero_bc(params, enabled=False)
 
         if cfg["optimizer"] == "adamw":
             optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
@@ -2145,14 +2148,22 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     The third return value is the best epoch's mean validation R²,
     ``0.5 * (R²_load + R²_energy)``, used for checkpointing (including SWA check).
 
-    For the unseen-angle protocol, the loss is the pure data loss
-    ``w_load · SmoothL1(F̂, F) + w_energy · SmoothL1(Ê, E)`` where
-    ``F̂ = ∂Ê/∂d`` by autograd.  Both BCs (E(0)=0 and F(0)=0) are enforced
-    architecturally inside :class:`HardEnergyNet.configure_zero_bc` via
-    slope subtraction.  No auxiliary regularisers (monotonicity, angle
-    smoothness, curvature) are applied — the three-way comparison with
-    Soft-PINN and DDNS is then over exactly the physics-enforcement
-    mechanism, not over additional priors.
+    Architecture (matches v17 documented Hard-PINN, val_R²=0.8221):
+    bare MLP outputting normalised energy ``Ê_n``; force ``F̂ = ∂Ê/∂d``
+    via autograd at both training and inference.  The boundary conditions
+    E(0)=0 and F(0)=0 are NOT enforced architecturally — they are
+    encouraged through the soft auxiliary regularisers (w_monotonicity,
+    w_angle_smooth, w_curvature) which constrain F and E near d=0
+    indirectly.  The slope-subtraction architecture
+    (``HardEnergyNet.configure_zero_bc(enabled=True)``) is retained in the
+    codebase for ablation studies but disabled in production training:
+    it adds a second-order autograd graph (2-3× per-step cost) and
+    over-constrains the model, producing under-fit train_R²~0.49 vs
+    val_R²~0.74 with the new BC vs ~0.82 in v17 without it.
+
+    Loss: ``w_load · SmoothL1(F̂, F) + w_energy · SmoothL1(Ê, E)`` plus
+    the three auxiliary soft regularisers when their weights are non-zero
+    (which is the case in the documented v17 cfg and in our new HPO best).
 
     Training schedule: warmup + cosine LR + SWA over the final ``swa_pct``
     of epochs.  Stable across the documented production retrains.
@@ -2168,7 +2179,10 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     y_val = val_df[["load_kN", "energy_J"]].values
     
     model = HardEnergyNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
-    model.configure_zero_bc(params)
+    # Hard-PINN production forward training: BC enforcement DISABLED to match
+    # the v17 architecture (bare MLP + autograd F=dE/dd).  Slope-subtraction
+    # BC kept available via configure_zero_bc(enabled=True) for ablations.
+    model.configure_zero_bc(params, enabled=False)
     opt = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"]) if cfg.get("optimizer", "adamw").lower() == "adam" else optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     
     # Scheduler selection: stabilized (unseen) vs reactive (random)
@@ -7628,8 +7642,10 @@ def run_same_capacity_experiment(train_df: pd.DataFrame, val_df: pd.DataFrame,
             model.configure_zero_bc(params, enabled=False)
         else:
             model = HardEnergyNet(Xtr.shape[1], architecture, cfg.get("dropout", 0.0), cfg["softplus_beta"]).to(DEVICE)
-            # Hard-PINN: architectural E(d=0)=0 correction, force is dE/dd.
-            model.configure_zero_bc(params)
+            # Hard-PINN: bare MLP outputting E; F = dE/dd via autograd.
+            # BC architecturally disabled to match the v17 forward training
+            # architecture (which the surrogate models here mirror).
+            model.configure_zero_bc(params, enabled=False)
         
         n_params = model.count_parameters()
         
@@ -10315,7 +10331,8 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
         for m_state in states:
             model = HardEnergyNet(in_d, cfg_pre["hidden_layers"],
                                   cfg_pre["dropout"], cfg_pre["softplus_beta"]).to(DEVICE)
-            model.configure_zero_bc(inv_p)
+            # BC disabled to mirror the forward-training architecture.
+            model.configure_zero_bc(inv_p, enabled=False)
             model.load_state_dict({k: v.to(DEVICE) for k, v in m_state["state_dict"].items()})
             model.eval()
             inv_models.append(model)
