@@ -233,29 +233,42 @@ FIG_FONT_WEIGHT = "bold"
 
 
 def scaled_fonts(fig_width: float) -> dict:
-    """Font sizes (pt) for figures (fixed sizes, no width scaling).
+    """Font sizes (pt) and line widths for figures, auto-scaled to the
+    journal's target column width.
 
-    Returns the baseline sizes regardless of ``fig_width`` so every figure
-    uses the same Arial sizing (label=16, title=16, tick=14, legend=12).  The
-    ``fig_width`` argument is preserved for call-site compatibility but unused.
+    When a figure is saved wider than ``PRINT_WIDTH_IN`` (7.48 in, the
+    Composite Structures full-page width) and the journal then inserts it
+    at full-column width, every text element shrinks by the ratio
+    ``PRINT_WIDTH_IN / fig_width``.  Without compensation, a 16-pt label
+    on a 14-in figure becomes ~8.5 pt on the printed page — too small for
+    body-text legibility.
+
+    To keep the *on-page* sizes at the targets in
+    ``_BASE_FONT_AT_FULL_WIDTH`` (label=16, title=16, tick=14, legend=12,
+    suptitle=16) regardless of the source figsize, this function scales
+    fonts and line widths up by ``max(1.0, fig_width / PRINT_WIDTH_IN)``.
+    Figures saved at or below journal width get the baseline sizes
+    unchanged.
 
     Apply via ``apply_fig_style``.
     """
-    del fig_width  # unused; retained for call-site compatibility
+    # Up-scale ratio so the inserted figure renders at the baseline sizes.
+    scale = max(1.0, float(fig_width) / float(PRINT_WIDTH_IN))
     return {
-        "label":      _BASE_FONT_AT_FULL_WIDTH["label"],
-        "title":      _BASE_FONT_AT_FULL_WIDTH["title"],
-        "tick":       _BASE_FONT_AT_FULL_WIDTH["tick"],
-        "legend":     _BASE_FONT_AT_FULL_WIDTH["legend"],
-        "panel":      _BASE_FONT_AT_FULL_WIDTH["panel"],
-        "annot":      _BASE_FONT_AT_FULL_WIDTH["annot"],
-        "suptitle":   _BASE_FONT_AT_FULL_WIDTH["suptitle"],
-        # Geometry — line/tick widths.
-        "linewidth":  1.8,
-        "markersize": 7.0,
-        "axes_lw":    1.2,
-        "tick_major": 6.0,
-        "tick_minor": 3.5,
+        "label":      _BASE_FONT_AT_FULL_WIDTH["label"]    * scale,
+        "title":      _BASE_FONT_AT_FULL_WIDTH["title"]    * scale,
+        "tick":       _BASE_FONT_AT_FULL_WIDTH["tick"]     * scale,
+        "legend":     _BASE_FONT_AT_FULL_WIDTH["legend"]   * scale,
+        "panel":      _BASE_FONT_AT_FULL_WIDTH["panel"]    * scale,
+        "annot":      _BASE_FONT_AT_FULL_WIDTH["annot"]    * scale,
+        "suptitle":   _BASE_FONT_AT_FULL_WIDTH["suptitle"] * scale,
+        # Geometry — line/tick widths scale linearly with the figure so
+        # strokes also appear at the same on-page weight after insertion.
+        "linewidth":  1.8 * scale,
+        "markersize": 7.0 * scale,
+        "axes_lw":    1.2 * scale,
+        "tick_major": 6.0 * scale,
+        "tick_minor": 3.5 * scale,
     }
 
 
