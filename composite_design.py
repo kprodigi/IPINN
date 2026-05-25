@@ -745,93 +745,76 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
         # New clean-methodology HPO (150 trials, 3 seeds, 800 epochs).
         # mean_train_load_r2 = 0.547, mean_val_load_r2 = 0.738,
         # mean_val_energy_r2 = 0.983, std_val_load_r2 = 0.009.
+        # ---- DDNS cfg: documented v17 HPs (val_R²_load = 0.7131, M=19/20) ----
+        # Reproduces the v17 result reported in Table 1 of the paper.
+        # Adam optimizer, no physics terms (DDNS = data-driven baseline).
         cfg_ddns = {
-            "optimizer": "adam", "lr": 1.0135181205e-05,
-            "weight_decay": 1.5517296599e-05, "batch_size": 128,
-            "hidden_layers": [256, 128, 64], "dropout": 0.014112,
-            "softplus_beta": 18.6592, "smoothl1_beta": 1.0086,
-            "w_data_load": 5.606619, "w_data_energy": 1.424624,
+            "optimizer": "adam", "lr": 4.2123162503e-05,
+            "weight_decay": 3.1582563297e-05, "batch_size": 64,
+            "hidden_layers": [128, 64, 32], "dropout": 0.016401,
+            "softplus_beta": 18.9027, "smoothl1_beta": 1.0838,
+            "w_data_load": 3.568932, "w_data_energy": 3.451798,
             "w_phys": 0.0, "w_bc": 0.0, "colloc_ratio": 0.0,
             "epochs": 800, "eval_every": 25,
             "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
-            "sched_patience": 87, "sched_factor": 0.5965,
+            "sched_patience": 58, "sched_factor": 0.4589,
         }
 
-        # ---- Soft-PINN cfg (HPO best trial #103, val_R²_load = 0.7796, arch [256,128]) ----
-        # New clean-methodology HPO (150 trials, 3 seeds, 800 epochs).
-        # mean_train_load_r2 = 0.541, mean_val_load_r2 = 0.780,
-        # mean_val_energy_r2 = 0.988.
-        # The Soft-PINN loss contains the data terms (w_data_load,
-        # w_data_energy), the work-energy residual loss (w_phys), and the
-        # boundary-condition soft penalty (w_bc) which enforces BOTH
-        # E(0) = 0 AND F(0) = 0 via a paired MSE on the network's E and F
-        # outputs at d = 0 (Section 3.2.2).  Auxiliary field-wide
-        # regularizers (monotonicity, angle smoothness, curvature) are
-        # intentionally NOT applied so the Soft–Hard comparison isolates
-        # the three core physics constraints (work-energy + two BCs)
-        # under different enforcement mechanisms.
+        # ---- Soft-PINN cfg: documented v17 HPs (val_R²_load = 0.7875, M=20) ----
+        # Reproduces the v17 result reported in Table 1 of the paper.
+        # Loss = data + work-energy residual (w_phys) + paired E(0)/F(0)
+        # soft BC penalty (w_bc) + three auxiliary soft regularisers
+        # (monotonicity F>=0, angle smoothness dF/dθ, curvature d²E/dd²).
+        # The auxiliary regularisers were tuned by the v17 HPO and are
+        # essential to the result — they collectively encode the
+        # smoothness priors the unseen-angle protocol relies on.
         cfg_soft = {
-            "optimizer": "adam", "lr": 1.3217112008e-05,
-            "weight_decay": 2.4409132901e-06, "batch_size": 64,
-            "hidden_layers": [256, 128], "dropout": 0.014463,
-            "softplus_beta": 21.1837, "smoothl1_beta": 0.610540,
-            "w_data_load": 4.805743, "w_data_energy": 1.075164,
-            "w_phys": 0.781504 if w_phys_override is None else w_phys_override,
-            "w_bc": 2.282421, "colloc_ratio": 4.840252,
+            "optimizer": "adam", "lr": 8.0733040807e-03,
+            "weight_decay": 6.8420377257e-04, "batch_size": 64,
+            "hidden_layers": [256, 128], "dropout": 0.007671,
+            "softplus_beta": 12.0831, "smoothl1_beta": 1.0266,
+            "w_data_load": 2.969519, "w_data_energy": 0.953040,
+            "w_phys": 0.519484 if w_phys_override is None else w_phys_override,
+            "w_bc": 0.599104, "colloc_ratio": 3.670053,
+            "w_monotonicity": 4.097050,
+            "w_angle_smooth": 0.019446,
+            "smooth_delta_deg": 2.6603,
             "extrapolate_angles": True,
             "epochs": 800, "eval_every": 25,
             "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
-            "sched_patience": 25, "sched_factor": 0.290325,
+            "sched_patience": 55, "sched_factor": 0.4574,
         }
 
-        # ---- Hard-PINN cfg (HPO trial #124, arch [64,64,64]) ----
-        # Selected from the top-5 HPO trials by ensemble-friendliness criteria
-        # rather than raw HPO val-R² rank.  HPO selected trial #152 as #1
-        # (val_R²_load = 0.797, mean of 3 seeds, weight_decay = 0.0211), but
-        # its M=20 bootstrap ensemble underperformed (0.7566) because the
-        # heavy regularization that smoothed the 3-seed objective also
-        # under-fit each bootstrap member (mean train_R² = 0.50).
-        #
-        # Trial #124 has:
-        #   - top-5 HPO val (0.7710)
-        #   - 33× lower weight_decay (6.4e-4 vs 2.1e-2) → bootstrap
-        #     members can actually fit their ~63% data subsets
-        #   - +0.06 higher mean train_R² (0.560 vs 0.500) → indicates
-        #     each member converges meaningfully
-        #   - Deeper architecture [64,64,64] → more representational
-        #     capacity to support bootstrap diversity
-        #
-        # HPO stats for trial #124:
-        #   mean_train_load_r2 = 0.560
-        #   mean_val_load_r2   = 0.771
-        #   mean_val_energy_r2 = 0.978
-        #   std_val_load_r2    = 0.032
-        #
-        # Hard-PINN architecture matches v17 (documented val_R²=0.8221):
-        # bare MLP outputting normalised energy E_n, with force F = dE/dd
-        # via autograd at training and inference.  The boundary conditions
-        # E(0)=0 and F(0)=0 are NOT enforced architecturally — they are
-        # enforced through the soft auxiliary penalties (w_monotonicity,
-        # w_angle_smooth, w_curvature) which collectively constrain F and
-        # E near d=0 indirectly.  The earlier slope-subtraction architecture
-        # (see HardEnergyNet.configure_zero_bc) is preserved in the codebase
-        # for ablation studies but is intentionally disabled in production
-        # forward training because it adds a second-order autograd graph
-        # (2-3× per-step cost) and over-constrains the model relative to
-        # v17, producing under-fit (train_R²~0.49) at HPO time.
+        # ---- Hard-PINN cfg: documented v17 HPs (val_R²_load = 0.8221, M=20) ----
+        # Reproduces the v17 result reported in Table 1 of the paper.
+        # Architecture is bare MLP (HardEnergyNet with configure_zero_bc(
+        # enabled=False)), force F = dE/dd via autograd.  Three core physics
+        # constraints are enforced as in v17:
+        #   * work-energy identity F = dE/dd via the network output structure
+        #   * E(0) = 0 and F(0) = 0 encouraged indirectly through the three
+        #     auxiliary soft regularisers (monotonicity, angle smoothness,
+        #     curvature) which collectively shape F and E near d=0
+        # Training schedule: warmup (80 ep) + cosine LR + SWA over the final
+        # 20% of epochs.  Adam optimizer (not AdamW) to match v17.
         cfg_hard = {
-            "optimizer": "adam", "lr": 1.0673230867e-05,
-            "weight_decay": 6.4267667838e-04, "batch_size": 32,
-            "hidden_layers": [64, 64, 64], "dropout": 0.028048945,
-            "softplus_beta": 20.351957, "smoothl1_beta": 0.928943,
-            "w_load": 10.191384, "w_energy": 6.262209,
-            "grad_clip": 1.823925,
+            "optimizer": "adam", "lr": 9.9507487403e-05,
+            "weight_decay": 3.7459350574e-03, "batch_size": 8,
+            "hidden_layers": [128, 64], "dropout": 0.005504,
+            "softplus_beta": 11.6712, "smoothl1_beta": 0.1176,
+            "w_load": 6.8031, "w_energy": 8.6549,
+            "grad_clip": 0.9834,
+            "w_monotonicity": 7.719974,
+            "w_angle_smooth": 0.016094,
+            "w_curvature": 0.001285,
+            "smooth_delta_deg": 1.9329,
+            "colloc_ratio": 3.5795,
+            "extrapolate_angles": True,
             "epochs": 800, "eval_every": 20,
-            "earlystop_patience_evals": 15, "earlystop_min_delta": 1e-5,
+            "earlystop_patience_evals": 20, "earlystop_min_delta": 1e-5,
             "sched_patience": 73, "sched_factor": 0.37,
             # Stabilization params: warmup + cosine + SWA.
-            "warmup_epochs": 124,
-            "swa_pct": 0.144055,
+            "warmup_epochs": 80,
+            "swa_pct": 0.20,
             "eta_min": 1e-6,
         }
     else:

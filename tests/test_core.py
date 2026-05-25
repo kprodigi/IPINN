@@ -324,39 +324,42 @@ class TestHardEnergyNet:
 
 
 # =====================================================================
-# Hard-PINN curvature regularization (d²E/dd²) — function preserved for
-# ablation use, but NOT active in the production Hard cfg.  The
-# unseen-protocol Hard cfg deliberately omits w_curvature / w_monotonicity /
-# w_angle_smooth so the architectural-vs-soft-penalty comparison with the
-# Soft-PINN isolates the three core physics constraints (work-energy + two
-# BCs) under different enforcement mechanisms.
+# Hard-PINN and Soft-PINN auxiliary regularizers (monotonicity F>=0,
+# angle smoothness dF/dθ, curvature d²E/dd²) — REQUIRED in the production
+# unseen-protocol cfgs to reproduce the documented v17 results
+# (Hard val_R²_load = 0.8221, Soft val_R²_load = 0.7875).  Without these
+# the Hard ensemble falls ~0.04 below baseline.
 # =====================================================================
 class TestCurvatureRegularizationHard:
     def test_curvature_fn_exists(self, m):
-        # Function is still in the module for ablation experiments, even
-        # though the production cfg does not invoke it.
         assert hasattr(m, "curvature_regularization_hard")
 
-    def test_hard_unseen_config_excludes_auxiliary_regularizers(self, m):
+    def test_hard_unseen_config_includes_auxiliary_regularizers(self, m):
         cfg = m.get_model_config("hard", "unseen")
-        # The production Hard-PINN cfg must NOT contain auxiliary
-        # field-wide regularizer weights; physics enforcement in Hard is
-        # exclusively architectural (Section 3.2.3 of the manuscript).
+        # The production Hard-PINN cfg MUST contain the three auxiliary
+        # field-wide regularizer weights — these were tuned by the v17 HPO
+        # and are essential to the documented val_R²=0.8221 result.
         for key in ("w_curvature", "w_monotonicity", "w_angle_smooth"):
-            assert key not in cfg, (
-                f"{key} must not be set in production Hard cfg; "
-                f"auxiliary regularizers are omitted by design."
+            assert key in cfg, (
+                f"{key} must be set in production Hard cfg; "
+                f"required to reproduce v17 val_R²=0.8221."
+            )
+            assert cfg[key] > 0.0, (
+                f"{key} must be positive in production Hard cfg; got {cfg[key]}."
             )
 
-    def test_soft_unseen_config_excludes_auxiliary_regularizers(self, m):
+    def test_soft_unseen_config_includes_auxiliary_regularizers(self, m):
         cfg = m.get_model_config("soft", "unseen")
-        # Soft-PINN matches Hard-PINN's auxiliary-regularizer omission;
-        # only the work-energy residual and the paired E(0)/F(0) BC
-        # penalty are present besides the data losses.
-        for key in ("w_monotonicity", "w_angle_smooth", "w_curvature"):
-            assert key not in cfg, (
-                f"{key} must not be set in production Soft cfg; "
-                f"auxiliary regularizers are omitted by design."
+        # Soft-PINN cfg also includes monotonicity and angle smoothness
+        # per v17 (w_curvature was 0 in v17 Soft, so we only require the
+        # other two).
+        for key in ("w_monotonicity", "w_angle_smooth"):
+            assert key in cfg, (
+                f"{key} must be set in production Soft cfg; "
+                f"required to reproduce v17 val_R²=0.7875."
+            )
+            assert cfg[key] > 0.0, (
+                f"{key} must be positive in production Soft cfg; got {cfg[key]}."
             )
 
     def test_curvature_loss_scalar(self, m):
