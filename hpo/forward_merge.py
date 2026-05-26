@@ -214,13 +214,10 @@ def main():
     for part in parts:
         in_d = int(part["in_d"])
         model = _build_model(args.approach, part["cfg"], in_d).to(cd.DEVICE)
-        if args.approach == "hard":
-            model.configure_zero_bc(params)
-        elif args.approach == "soft":
-            # train_soft uses enabled=False — Soft uses the soft w_bc penalty.
-            model.configure_zero_bc(params, enabled=False)
-        else:  # ddns
-            model.configure_zero_bc(params, enabled=False)
+        # All three approaches use the bare-MLP form at training and
+        # inference (Hard's work-energy identity is enforced by autograd
+        # F = dE/dd, not by an architectural BC correction).
+        model.configure_zero_bc(params, enabled=False)
         model.load_state_dict({k: v.to(cd.DEVICE) for k, v in part["state_dict"].items()})
         model.eval()
         models.append(model)
