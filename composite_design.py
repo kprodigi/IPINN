@@ -233,42 +233,33 @@ FIG_FONT_WEIGHT = "bold"
 
 
 def scaled_fonts(fig_width: float) -> dict:
-    """Font sizes (pt) and line widths for figures, auto-scaled to the
-    journal's target column width.
+    """Font sizes (pt) and line widths for figures.
 
-    When a figure is saved wider than ``PRINT_WIDTH_IN`` (7.48 in, the
-    Composite Structures full-page width) and the journal then inserts it
-    at full-column width, every text element shrinks by the ratio
-    ``PRINT_WIDTH_IN / fig_width``.  Without compensation, a 16-pt label
-    on a 14-in figure becomes ~8.5 pt on the printed page — too small for
-    body-text legibility.
-
-    To keep the *on-page* sizes at the targets in
-    ``_BASE_FONT_AT_FULL_WIDTH`` (label=16, title=16, tick=14, legend=12,
-    suptitle=16) regardless of the source figsize, this function scales
-    fonts and line widths up by ``max(1.0, fig_width / PRINT_WIDTH_IN)``.
-    Figures saved at or below journal width get the baseline sizes
-    unchanged.
+    Returns the baseline publication sizes (label=16, title=16, tick=14,
+    legend=12, panel=14, annot=12, suptitle=16) for every figure
+    regardless of ``fig_width``.  Per-figure size adjustments are handled
+    by the figure routines themselves choosing an appropriate figsize:
+    single-panel figures at PRINT_WIDTH_IN, multi-panel grids at
+    PRINT_WIDTH_IN with the panel count chosen so per-panel area stays
+    readable.
 
     Apply via ``apply_fig_style``.
     """
-    # Up-scale ratio so the inserted figure renders at the baseline sizes.
-    scale = max(1.0, float(fig_width) / float(PRINT_WIDTH_IN))
+    del fig_width  # retained for call-site compatibility
     return {
-        "label":      _BASE_FONT_AT_FULL_WIDTH["label"]    * scale,
-        "title":      _BASE_FONT_AT_FULL_WIDTH["title"]    * scale,
-        "tick":       _BASE_FONT_AT_FULL_WIDTH["tick"]     * scale,
-        "legend":     _BASE_FONT_AT_FULL_WIDTH["legend"]   * scale,
-        "panel":      _BASE_FONT_AT_FULL_WIDTH["panel"]    * scale,
-        "annot":      _BASE_FONT_AT_FULL_WIDTH["annot"]    * scale,
-        "suptitle":   _BASE_FONT_AT_FULL_WIDTH["suptitle"] * scale,
-        # Geometry — line/tick widths scale linearly with the figure so
-        # strokes also appear at the same on-page weight after insertion.
-        "linewidth":  1.8 * scale,
-        "markersize": 7.0 * scale,
-        "axes_lw":    1.2 * scale,
-        "tick_major": 6.0 * scale,
-        "tick_minor": 3.5 * scale,
+        "label":      _BASE_FONT_AT_FULL_WIDTH["label"],
+        "title":      _BASE_FONT_AT_FULL_WIDTH["title"],
+        "tick":       _BASE_FONT_AT_FULL_WIDTH["tick"],
+        "legend":     _BASE_FONT_AT_FULL_WIDTH["legend"],
+        "panel":      _BASE_FONT_AT_FULL_WIDTH["panel"],
+        "annot":      _BASE_FONT_AT_FULL_WIDTH["annot"],
+        "suptitle":   _BASE_FONT_AT_FULL_WIDTH["suptitle"],
+        # Line/tick widths chosen to render cleanly at PRINT_WIDTH_IN.
+        "linewidth":  1.8,
+        "markersize": 7.0,
+        "axes_lw":    1.2,
+        "tick_major": 6.0,
+        "tick_minor": 3.5,
     }
 
 
@@ -3115,7 +3106,7 @@ def fig_classifier_decision_boundary(
     X_grid_scaled = feat_scaler.transform(X_grid)
     P_lc2 = cal_ens.predict_proba(X_grid_scaled)[:, 1].reshape(EA_grid.shape)
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    fig, axes = plt.subplots(1, 2, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.5 / 14))
 
     # Panel (a): P(LC2 | indicators) heatmap (cividis is colourblind- and B/W-safe)
     ax = axes[0]
@@ -4139,7 +4130,7 @@ def fig_solution_landscape(all_inverse_results, output_dir, logger):
     if not targets_with_landscape:
         return
     n = len(targets_with_landscape)
-    fig, axes = plt.subplots(1, n, figsize=(5.5 * n, 4.5), squeeze=False)
+    fig, axes = plt.subplots(1, n, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 4.5 / (5.5 * n)), squeeze=False)
     lc_color = {"LC1": COLORS["LC1"], "LC2": COLORS["LC2"]}
     lc_ls = {"LC1": LINESTYLES["LC1"], "LC2": LINESTYLES["LC2"]}
     for i, res in enumerate(targets_with_landscape):
@@ -4172,7 +4163,7 @@ def fig_forward_map_jacobian(jacobian_results, output_dir, logger):
     lcs = sorted(k.replace("dEA_dtheta_", "") for k in jacobian_results if k.startswith("dEA_dtheta_"))
     if not lcs:
         return
-    fig, axes = plt.subplots(2, len(lcs), figsize=(5.5 * len(lcs), 8), squeeze=False, sharex=True)
+    fig, axes = plt.subplots(2, len(lcs), figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 8 / (5.5 * len(lcs))), squeeze=False, sharex=True)
     bif_color = COLORS["gpbo"]
     for j, lc in enumerate(lcs):
         dea = jacobian_results[f"dEA_dtheta_{lc}"]
@@ -4204,7 +4195,7 @@ def fig_inverse_posterior(all_inverse_results, output_dir, logger):
     if not targets_with_post:
         return
     n = len(targets_with_post)
-    fig, axes = plt.subplots(1, n, figsize=(5.5 * n, 4.5), squeeze=False)
+    fig, axes = plt.subplots(1, n, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 4.5 / (5.5 * n)), squeeze=False)
     for i, res in enumerate(targets_with_post):
         ax = axes[0, i]
         post = res["inverse_posterior"]
@@ -4515,7 +4506,7 @@ def fig_inverse_posterior_likelihood(all_inverse: List[Dict], output_dir: str, l
         return
     n = len(targets)
     fonts = scaled_fonts(8.0)
-    fig, axes = plt.subplots(2, n, figsize=(5.5 * n, 8), squeeze=False, sharex="col")
+    fig, axes = plt.subplots(2, n, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 8 / (5.5 * n)), squeeze=False, sharex="col")
     for i, res in enumerate(targets):
         tid = res.get("target_info", {}).get("id", f"T{i+1}")
         post_j = res.get("inverse_posterior", {})
@@ -5285,7 +5276,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
     scaled by the conformal factor from the random protocol Hard-PINN
     (best available proxy for the full-data inverse model).
     """
-    fig = plt.figure(figsize=(16, 12))
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 12 / 16))
     gs = fig.add_gridspec(2, 3, hspace=0.52, wspace=0.42, left=0.07, right=0.98, top=0.90, bottom=0.06)
     
     # Retrieve conformal factors for Hard-PINN.  The **2σ-coverage** factor
@@ -5502,7 +5493,7 @@ def fig_residual_histograms(dual_results: Dict, output_dir: str, logger: logging
     for protocol in ["unseen"]:
         if protocol not in dual_results:
             continue
-        fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+        fig, axes = plt.subplots(2, 3, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 8 / 12))
         labels = ['a', 'b', 'c', 'd', 'e', 'f']
         label_idx = 0
         for i, approach in enumerate(["ddns", "soft", "hard"]):
@@ -5537,7 +5528,7 @@ def fig_boxplot_comparison(dual_results: Dict, output_dir: str, logger: logging.
         return
     
     n_protos = len(protocols_avail)
-    fig, axes = plt.subplots(n_protos, 2, figsize=(10, 4.5 * n_protos), squeeze=False)
+    fig, axes = plt.subplots(n_protos, 2, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * (4.5 * n_protos) / 10), squeeze=False)
     approaches = ["ddns", "soft", "hard"]
     
     for row, protocol in enumerate(protocols_avail):
@@ -5578,7 +5569,7 @@ def fig_parity_plots(dual_results: Dict, output_dir: str, logger: logging.Logger
     for protocol in ["unseen"]:
         if protocol not in dual_results:
             continue
-        fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+        fig, axes = plt.subplots(2, 3, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 8 / 12))
         labels = ['a', 'b', 'c', 'd', 'e', 'f']
         label_idx = 0
         for i, approach in enumerate(["ddns", "soft", "hard"]):
@@ -5613,7 +5604,7 @@ def fig_parity_plots(dual_results: Dict, output_dir: str, logger: logging.Logger
 
 def fig_cross_protocol_comparison(dual_results: Dict, output_dir: str, logger: logging.Logger):
     """Generate cross-protocol comparison bar chart. [CHANGE C] y-axis starts at 0.5"""
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 4.5 / 10))
     x = np.arange(3)
     width = 0.35
     approaches = ["ddns", "soft", "hard"]
@@ -5696,7 +5687,7 @@ def fig_unseen_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir: str,
         conformal_factors[approach] = {"load": cf_load, "energy": cf_energy}
     
     # Load curves (ensemble mean + conformal-calibrated bands)
-    fig, axes = plt.subplots(1, len(lcs), figsize=(5.5 * len(lcs), 4.5))
+    fig, axes = plt.subplots(1, len(lcs), figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 4.5 / (5.5 * len(lcs))))
     if len(lcs) == 1:
         axes = [axes]
     for idx, lc in enumerate(lcs):
@@ -5734,7 +5725,7 @@ def fig_unseen_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir: str,
     logger.info("  Saved: Fig_unseen_load_curves.png")
     
     # Energy curves (ensemble mean + conformal-calibrated bands)
-    fig, axes = plt.subplots(1, len(lcs), figsize=(5.5 * len(lcs), 4.5))
+    fig, axes = plt.subplots(1, len(lcs), figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 4.5 / (5.5 * len(lcs))))
     if len(lcs) == 1:
         axes = [axes]
     for idx, lc in enumerate(lcs):
@@ -5783,7 +5774,7 @@ def fig_random_grid_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir:
     lcs = sorted(df_all["LC"].unique())
     
     # Create figure at print width (190mm = 7.48in for Composite Structures full-page)
-    fig, axes = plt.subplots(len(lcs), len(angles), figsize=(3.0 * len(angles), 3.0 * len(lcs) + 0.6))
+    fig, axes = plt.subplots(len(lcs), len(angles), figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * (3.0 * len(lcs) + 0.6) / (3.0 * len(angles))))
     
     for i, lc in enumerate(lcs):
         disp_end = disp_end_mm(lc)  # [CHANGE B] Define for this LC
@@ -5827,7 +5818,7 @@ def fig_ablation_study(df_ablation: pd.DataFrame, output_dir: str, logger: loggi
     """Generate ablation study figure. [CHANGE D] Updated for unseen protocol."""
     if df_ablation.empty:
         return
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    fig, axes = plt.subplots(2, 2, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 8 / 10))
     ax = axes[0, 0]
     ax.semilogx(df_ablation["w_phys"] + 0.01, df_ablation["load_r2"], color=COLORS["soft"], marker='o', markersize=7, linewidth=1.5, label="Load $R^2$", markerfacecolor='white', markeredgecolor=COLORS["soft"], markeredgewidth=1.5)
     ax.semilogx(df_ablation["w_phys"] + 0.01, df_ablation["energy_r2"], color=COLORS["ddns"], marker='s', linestyle='--', markersize=7, linewidth=1.5, label="Energy $R^2$", markerfacecolor=COLORS["ddns"])
@@ -5923,7 +5914,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
         snapshot_indices = [min(idx, n_iters - 1) for idx in snapshot_indices]
         
         # Create 2x4 figure (extra height for multi-line subplot titles + bottom legend)
-        fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+        fig, axes = plt.subplots(2, 4, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 8 / 16))
         axes = axes.flatten()
         
         for ax_idx, snap_idx in enumerate(snapshot_indices[:8]):
@@ -6035,7 +6026,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
     
     snapshot_indices = [min(idx, min_iters - 1) for idx in snapshot_indices]
     
-    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+    fig, axes = plt.subplots(2, 4, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 8 / 16))
     axes = axes.flatten()
     
     for ax_idx, snap_idx in enumerate(snapshot_indices[:8]):
@@ -6176,7 +6167,7 @@ def fig_optimizer_comparison(all_inverse_results: List[Dict], output_dir: str, l
     
     n = len(all_inverse_results)
     ncols = min(n, 5)
-    fig, axes = plt.subplots(2, ncols, figsize=(3.6 * ncols, 7.5), squeeze=False)
+    fig, axes = plt.subplots(2, ncols, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 7.5 / (3.6 * ncols)), squeeze=False)
     
     for col, result in enumerate(all_inverse_results[:ncols]):
         tid = result.get("target_info", {}).get("id", f"T{col + 1}")
@@ -6260,7 +6251,7 @@ def fig_inverse_optimizer_convergence(opt_results: Dict, output_dir: str, logger
         ("gpbo_best", "GP-BO", COLORS.get("gpbo", COLORS.get("hard", "black")), "-"),
     ]
 
-    fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.6))
+    fig, ax = plt.subplots(1, 1, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 4.6 / 7.2))
 
     plotted = False
     for key, label, color, ls in methods:
@@ -6300,7 +6291,7 @@ def fig_target_feasibility(df_metrics: pd.DataFrame, targets: List[Dict], output
     if df_metrics.empty or not targets:
         return
 
-    fig, ax = plt.subplots(1, 1, figsize=(6.8, 5.2))
+    fig, ax = plt.subplots(1, 1, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.2 / 6.8))
 
     ea_col = "EA_common" if "EA_common" in df_metrics.columns else "EA"
     for lc in sorted(df_metrics["LC"].unique()):
@@ -6339,7 +6330,7 @@ def fig_target_feasibility(df_metrics: pd.DataFrame, targets: List[Dict], output
 def fig_design_space(models: List[nn.Module], approach: str, scaler_disp: StandardScaler, enc: OneHotEncoder, params: ScalingParams, output_dir: str, logger: logging.Logger):
     """Generate design space prediction figure (EA at ``D_COMMON`` for LC-fair comparison; IPF unchanged)."""
     angles = np.linspace(CFG.angle_opt_min, CFG.angle_opt_max, 26)
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 4.5 / 10))
     for lc, marker, ls, color in [("LC1", "o", "-", COLORS["soft"]), ("LC2", "s", "--", COLORS["ddns"])]:
         EA_vals, IPF_vals = [], []
         for ang in angles:
@@ -6384,7 +6375,7 @@ def fig_pareto_tradeoff(df_pareto: pd.DataFrame, output_dir: str, logger: loggin
     C_EA     = COLORS["gpbo"]   # bluish-green
     C_IPF    = "#CC79A7"        # reddish-purple, Wong-palette auxiliary distinct from EA
     
-    fig, axes = plt.subplots(2, 2, figsize=(11, 9))
+    fig, axes = plt.subplots(2, 2, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 9 / 11))
     
     # ==================== Panel (a): Optimal angle vs alpha ====================
     ax = axes[0, 0]
@@ -6492,7 +6483,7 @@ def fig_pareto_tradeoff(df_pareto: pd.DataFrame, output_dir: str, logger: loggin
 
 def fig_training_curves(dual_results: Dict, output_dir: str, logger: logging.Logger):
     """Generate training convergence curves."""
-    fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 8 / 12))
     labels = ['a', 'b', 'c', 'd', 'e', 'f']
     label_idx = 0
     for p_idx, protocol in enumerate(["random", "unseen"]):
@@ -6530,7 +6521,7 @@ def fig_model_complexity(dual_results: Dict, output_dir: str, logger: logging.Lo
     approaches = ["ddns", "soft", "hard"]
     n_params = [dual_results["random"][a]["n_params"] if a in dual_results["random"] else 0 for a in approaches]
     train_times = [dual_results["random"][a]["avg_training_time"] if a in dual_results["random"] else 0 for a in approaches]
-    fig, axes = plt.subplots(1, 2, figsize=(9, 4))
+    fig, axes = plt.subplots(1, 2, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 4 / 9))
     x = np.arange(len(approaches))
     colors_bar = [COLORS["ddns"], COLORS["soft"], COLORS["hard"]]
     ax = axes[0]
@@ -6645,7 +6636,7 @@ def fig_physics_verification(dual_results: Dict, val_df: pd.DataFrame, scaler_di
     """Generate physics constraint verification figure showing dE/dd = F satisfaction."""
     logger.info("  Generating physics verification figure...")
     
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5 / 15))
     
     residual_data = {}
     colors = {"ddns": COLORS["ddns"], "soft": COLORS["soft"], "hard": COLORS["hard"]}
@@ -7000,7 +6991,7 @@ def fig_baseline_comparison(baseline_results: Dict, dual_results: Dict, output_d
             }
     
     # Create figure
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
+    fig, axes = plt.subplots(1, 3, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 4.5 / 14))
     
     # Baseline ML models use Wong-palette auxiliaries (B/W-safe via lightness).
     # PINN families keep their canonical COLORS assignments.
@@ -7171,7 +7162,7 @@ def fig_hyperparam_sensitivity(sensitivity_df: pd.DataFrame, output_dir: str, lo
     
     suffix = f"_{tag}" if tag else ""
     
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5 / 12))
     
     # Pivot for heatmap
     w_phys_vals = sorted(sensitivity_df["w_phys"].unique())
@@ -7487,7 +7478,7 @@ def fig_reliability_diagram(calibration: Dict, output_dir: str, logger: logging.
         logger.warning("  No calibration data for reliability diagram")
         return
     
-    fig, axes = plt.subplots(1, n_protocols, figsize=(5.5 * n_protocols, 5), squeeze=False)
+    fig, axes = plt.subplots(1, n_protocols, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5 / (5.5 * n_protocols)), squeeze=False)
     axes = axes.flatten()
     
     approach_colors = {"ddns": COLORS["ddns"], "soft": COLORS["soft"], "hard": COLORS["hard"]}
@@ -7695,7 +7686,7 @@ def fig_same_capacity_comparison(same_cap_results: Dict, dual_results: Dict, out
     if not same_cap_results:
         return
     
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 4.5 / 10))
     
     # Get original results for comparison
     models_data = []
@@ -7926,7 +7917,7 @@ def fig_extended_ablation(ablation_df: pd.DataFrame, output_dir: str, logger: lo
     
     suffix = f"_{tag}" if tag else ""
     
-    fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+    fig, ax = plt.subplots(1, 1, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5 / 10))
     
     x = np.arange(len(ablation_df))
     width = 0.35
@@ -8577,7 +8568,7 @@ def fig_inverse_parity_uncertainty(
     if not t_ea:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 4.5 / 10))
     for ax, tt, pp, ss, xlab, ylab in [
         (axes[0], t_ea, p_ea, s_ea, f"Target EA (J) @ {D_COMMON:.0f} mm", f"Predicted EA (J) @ {D_COMMON:.0f} mm"),
         (axes[1], t_ipf, p_ipf, s_ipf, "Target IPF (kN)", "Predicted IPF (kN)"),
@@ -8610,7 +8601,7 @@ def fig_inverse_parity_uncertainty(
     logger.info("  Saved: Fig_inverse_parity_uncertainty.png")
 
     # Second small figure: error vs recovered angle (interpolation stress)
-    fig2, ax2 = plt.subplots(figsize=(8, 6))
+    fig2, ax2 = plt.subplots(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 6 / 8))
     ang_a = np.asarray(ang, dtype=np.float64)
     err_pct = np.abs(np.asarray(p_ea, dtype=np.float64) - np.asarray(t_ea, dtype=np.float64)) / (
         np.asarray(t_ea, dtype=np.float64) + 1e-12
@@ -8644,7 +8635,7 @@ def fig_validation_error_maps(
     protocols = [p for p in ("random", "unseen") if p in dual_results and approach in dual_results[p]]
     if not protocols:
         return
-    fig, axes = plt.subplots(2, len(protocols), figsize=(5.5 * len(protocols), 8), squeeze=False)
+    fig, axes = plt.subplots(2, len(protocols), figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 8 / (5.5 * len(protocols))), squeeze=False)
     for j, protocol in enumerate(protocols):
         dr = dual_results[protocol]
         ens = evaluate_ensemble(
@@ -8728,7 +8719,7 @@ def fig_qq_load_residuals(
     r = r[np.isfinite(r)]
     if len(r) < 8:
         return
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 6 / 8))
     if HAS_SCIPY:
         stats.probplot(r, dist="norm", plot=ax)
     else:
@@ -8768,7 +8759,7 @@ def fig_lc_classifier_diagnostics(
     if len(y) < 4 or len(np.unique(y)) < 2:
         logger.warning("  LC classifier diagnostics skipped: need both classes in CV labels.")
         return
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    fig, axes = plt.subplots(2, 2, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 8 / 10))
     ax00, ax01, ax10, ax11 = axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
     cm = confusion_matrix(y, pred, labels=[0, 1])
     im = ax00.imshow(cm, cmap="Blues")
@@ -8840,7 +8831,7 @@ def fig_landscape_ensemble_disagreement(
     """EA_std and IPF_std across the dense surrogate landscape (ensemble disagreement)."""
     if landscape_df is None or len(landscape_df) < 10:
         return
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 4.5 / 10))
     for ax, col, ylab in zip(
         axes,
         ("EA_std", "IPF_std"),
@@ -8878,7 +8869,7 @@ def fig_d_common_sensitivity_ea(
         return
     lc_list = sorted(landscape_df["lc"].unique())
     sens_rows = []
-    fig, axes = plt.subplots(1, len(lc_list), figsize=(5.5 * len(lc_list), 4.5), squeeze=False)
+    fig, axes = plt.subplots(1, len(lc_list), figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 4.5 / (5.5 * len(lc_list))), squeeze=False)
     axes = axes.flatten()
     for ax, lc in zip(axes, lc_list):
         d_end = disp_end_mm(str(lc))
@@ -8956,7 +8947,7 @@ def fig_inverse_vs_nearest_experimental_curve(
     n = len(panels)
     ncols = min(3, n)
     nrows = int(np.ceil(n / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4.0 * ncols, 3.5 * nrows + 0.6), squeeze=False)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * (3.5 * nrows + 0.6) / (4.0 * ncols)), squeeze=False)
     axes_flat = axes.flatten()
     for idx, (tid, pred_angle, pred_lc) in enumerate(panels):
         ax = axes_flat[idx]
@@ -9133,7 +9124,7 @@ def fig_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
                                logger: logging.Logger) -> str:
     """Fig. 1: representative experimental curves and target distributions."""
     set_publication_style()
-    fig = plt.figure(figsize=(16, 5.2))
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.2 / 16))
     gs = fig.add_gridspec(1, 3, wspace=0.34, left=0.06, right=0.99,
                           top=0.88, bottom=0.16)
     ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
@@ -9232,7 +9223,7 @@ def fig_02_forward_parity(dual_results: Dict, output_dir: str,
     """Fig. 2: predicted vs ground-truth scatter for load and energy under
     both evaluation protocols (random 80/20 and unseen θ=60°)."""
     set_publication_style()
-    fig = plt.figure(figsize=(13, 11))
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 11 / 13))
     gs  = fig.add_gridspec(2, 2, wspace=0.28, hspace=0.36,
                            left=0.08, right=0.98, top=0.92, bottom=0.10)
     axes = [[fig.add_subplot(gs[r, c]) for c in range(2)] for r in range(2)]
@@ -9298,7 +9289,7 @@ def fig_03_unseen_generalization(dual_results: Dict, df_all: pd.DataFrame,
         return ""
     res = dual_results[proto]
 
-    fig = plt.figure(figsize=(14, 9))
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 9 / 14))
     gs  = fig.add_gridspec(2, 2, wspace=0.26, hspace=0.34,
                            left=0.08, right=0.98, top=0.91, bottom=0.12)
     axes = [[fig.add_subplot(gs[r, c]) for c in range(2)] for r in range(2)]
@@ -9373,7 +9364,7 @@ def fig_04_physics_calibration(dual_results: Dict, calibration: Dict,
     (c) Q–Q plot of standardized load residuals.
     """
     set_publication_style()
-    fig = plt.figure(figsize=(16, 5.2))
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.2 / 16))
     gs  = fig.add_gridspec(1, 3, wspace=0.32, left=0.06, right=0.99,
                            top=0.88, bottom=0.16)
     ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
@@ -9521,7 +9512,7 @@ def fig_05_ill_posedness(jacobian_results: Optional[Dict],
     (c) ensemble-disagreement σ(θ, LC) heat-map.
     """
     set_publication_style()
-    fig = plt.figure(figsize=(16, 5.4))
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.4 / 16))
     gs  = fig.add_gridspec(1, 3, wspace=0.32, left=0.06, right=0.99,
                            top=0.88, bottom=0.16)
     ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
@@ -9627,7 +9618,7 @@ def fig_06_classifier(clf_diag: Dict, output_dir: str,
         logger.warning("  Fig. 6 skipped — need both classes in CV labels.")
         return ""
 
-    fig = plt.figure(figsize=(13, 11))
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 11 / 13))
     gs  = fig.add_gridspec(2, 2, wspace=0.28, hspace=0.34,
                            left=0.08, right=0.98, top=0.92, bottom=0.08)
     ax_a = fig.add_subplot(gs[0, 0])
@@ -9713,7 +9704,7 @@ def fig_07_inverse_design(all_inverse_results: List[Dict],
         logger.warning("  Fig. 7 skipped — no inverse results.")
         return ""
 
-    fig = plt.figure(figsize=(14.5, 10.5))
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 10.5 / 14.5))
     gs  = fig.add_gridspec(2, 2, wspace=0.30, hspace=0.36,
                            left=0.08, right=0.98, top=0.92, bottom=0.10)
     ax_a = fig.add_subplot(gs[0, 0])
@@ -9883,7 +9874,7 @@ def fig_08_pareto(pareto_df: pd.DataFrame, landscape_df: pd.DataFrame,
     (c) J(θ, α) heat-map (LC1 and LC2 stacked).
     """
     set_publication_style()
-    fig = plt.figure(figsize=(16, 5.6))
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.6 / 16))
     gs  = fig.add_gridspec(1, 3, wspace=0.32, left=0.06, right=0.99,
                            top=0.86, bottom=0.16)
     ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
@@ -9964,7 +9955,7 @@ def fig_09_pareto_recovery(pareto_inverse_results: Optional[List[Dict]],
         logger.info("  Fig. 9 skipped — no Pareto-target recovery results.")
         return ""
 
-    fig = plt.figure(figsize=(13, 5.4))
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.4 / 13))
     gs  = fig.add_gridspec(1, 2, wspace=0.30, left=0.08, right=0.98,
                            top=0.88, bottom=0.16)
     ax_a, ax_b = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])
@@ -10033,7 +10024,7 @@ def fig_10_robustness(lambda_diag: Optional[pd.DataFrame],
     (c) classifier ablation (with vs without penalty).
     """
     set_publication_style()
-    fig = plt.figure(figsize=(16, 5.4))
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.4 / 16))
     gs  = fig.add_gridspec(1, 3, wspace=0.34, left=0.06, right=0.99,
                            top=0.88, bottom=0.16)
     ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
