@@ -56,10 +56,9 @@ def _reconstruct_models(
 ) -> List[torch.nn.Module]:
     """Rebuild M models from saved state_dicts."""
     cfg = bundle["cfg"]
-    in_d = int(bundle["models_state"][0]["state_dict"].get(
-        next(iter(bundle["models_state"][0]["state_dict"].keys())),
-    ).shape[1]) if "models_state" in bundle else None
-    # safer: take first weight's input dimension from the actual key
+    # Input dim: take the first 2-D weight (layer-0 .weight) and read its
+    # second axis.  Robust to whatever ordering torch.save chose for the
+    # state_dict keys.
     sd0 = bundle["models_state"][0]["state_dict"]
     first_weight = next(v for k, v in sd0.items() if k.endswith(".weight") and v.ndim == 2)
     in_d = int(first_weight.shape[1])
