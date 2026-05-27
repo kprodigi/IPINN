@@ -51,6 +51,11 @@ slurm_logs/
 # Pickle intermediates
 *.pkl
 
+# Archive files (use Zenodo/GitHub releases for binary artefacts, not git)
+*.tar.gz
+*.tar.bz2
+*.zip
+
 # Temp
 *.png~
 pip_tmp/

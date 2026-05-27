@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 title: "IPINN: Physics-Informed Neural Networks for Forward Prediction and Inverse Design of Composite Ring Structures"
 type: software
-version: "0.19.1"
-date-released: "2026-04-29"
+version: "1.0-paper-final"
+date-released: "2026-05-27"
 authors:
   - name: "PRODIGI Research Group"
 repository-code: "https://github.com/kprodigi/IPINN"

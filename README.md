@@ -1,220 +1,195 @@
 # IPINN — Physics-Informed Inverse Design for Crashworthiness Optimization
 
-[![CI](https://github.com/kprodigi/IPINN/actions/workflows/ci.yml/badge.svg)](https://github.com/kprodigi/IPINN/actions/workflows/ci.yml)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Release](https://img.shields.io/badge/release-v1.0--paper--final-blue.svg)](https://github.com/kprodigi/IPINN/releases/tag/v1.0-paper-final)
 
-Forward prediction and inverse design of hexagonal composite ring structures under quasi-static crushing using three PINN architectures (DDNS, Soft-PINN, Hard-PINN), dual validation protocols, multi-start GP-BO inverse design with ill-posedness characterization, and weighted-sum multi-objective optimization.
+Forward prediction and inverse design of hexagonal composite ring structures
+under quasi-static crushing, using three physics-informed neural-network
+architectures compared on the same data + protocol, with multi-start GP-BO
+inverse design, ill-posedness characterization, and multi-objective Pareto
+sweep.
 
-## Key Features
+---
 
-- **Three-tier PINN hierarchy**: Data-driven (DDNS), soft physics constraint (Soft-PINN), and structurally enforced physics (Hard-PINN with F = dE/dd by construction)
-- **Inverse design**: multi-start GP-BO with LC plausibility classifier penalty
-- **Ill-posedness analysis**: Solution landscape mapping, multiplicity index, forward-map Jacobian with bifurcation detection, approximate inverse posterior with credible intervals
-- **Multi-objective optimization**: Dense Pareto sweep with weighted-sum and Chebyshev scalarizations + dominance filtering
-- **Dual validation**: Random 80/20 split + unseen-angle holdout
-- **HPC parallel pipeline**: SLURM workflow with parallel GPU training stages
+## Headline results
 
-## Quick Start
+Forward-prediction accuracy on the **unseen-angle protocol** (θ\*=60°
+held out; M=20 bootstrap ensemble; conformal-calibrated):
 
-### Installation
+| Approach   | Load R² | Energy R² | Load RMSE (kN) | Load MAE (kN) | M_eff/M_total |
+|------------|--------:|----------:|---------------:|--------------:|:-------------:|
+| DDNS       |  0.7175 |    0.9803 |          0.082 |          0.060 |     18/20     |
+| Soft-PINN  |  0.7875 |    0.9911 |          0.071 |          0.050 |     20/20     |
+| **Hard-PINN** | **0.8217** | **0.9888** |     **0.065** |    **0.046** | **20/20**   |
 
-```bash
-git clone https://github.com/kprodigi/IPINN.git
-cd IPINN
-pip install -e ".[all]"    # core + GP-BO
-```
+Full results in [`paper/tables/Table1_forward_results.csv`](paper/tables/Table1_forward_results.csv).
+All 10 paper figures rendered at 600 DPI in [`paper/figures/`](paper/figures/).
 
-Or using conda:
+---
 
-```bash
-conda env create -f environment.yml
-conda activate ipinn-crash
-```
-
-### Run Tests
-
-```bash
-pytest
-```
-
-### Single-Machine Run
-
-```bash
-# Full paper run (requires skopt):
-python composite_design.py --data_dir ./data --output_dir ./results_paper --strict_paper
-
-# Quick smoke test:
-python composite_design.py --dry_run --data_dir tests/fixtures --output_dir ./results_test --force_cpu
-```
-
-### HPC Parallel Run (SLURM)
-
-```bash
-# Run from the repo root.  Submits parallel SLURM jobs:
-#   prep -> training stages -> analysis -> aggregate
-CONDA_ENV=ipinn bash slurm/submit_pipeline.sh
-```
-
-See the [dependency graph](#hpc-parallel-pipeline) below.
-
-### Hyperparameter Optimization (Optuna TPE)
-
-Before running the full pipeline, retune the forward training hyperparameters
-on your hardware.  Three independent Optuna studies (one per approach) each
-write a SQLite study DB that survives SLURM preemption:
-
-```bash
-# From the repo root, on an HPC cluster with SLURM:
-APPROACH=ddns N_TRIALS=80  bash slurm/submit_hpo.sh
-APPROACH=soft N_TRIALS=120 bash slurm/submit_hpo.sh
-APPROACH=hard N_TRIALS=100 bash slurm/submit_hpo.sh
-```
-
-See [`hpo/README.md`](hpo/README.md) for the full HPO workflow.
-
-## CLI Options
-
-| Flag | Effect |
-|------|--------|
-| `--data_dir DIR` | Input CSV / XLSX location |
-| `--output_dir DIR` | All outputs |
-| `--seed N` | Global seed base (default: 2026) |
-| `--n_ensemble M` | Ensemble size (default: 20) |
-| `--strict_paper` | Require skopt; abort if missing |
-| `--force_cpu` | CPU even if CUDA is available |
-| `--show_plots` | Display plots on screen |
-| `--no_robustness` | Skip baselines, sensitivity, calibration |
-| `--no_ablation` | Skip physics-weight ablation study |
-| `--inverse_ablation` | Run inverse ablation (no classifier penalty) on first targets |
-| `--no_inverse_stress` | Skip validation-row inverse stress targets |
-| `--no_inverse_member_spread` | Skip per-member spread table |
-| `--dry_run` | CI/smoke: tiny budgets, M<=2, no GP-BO |
-
-## Output Artifacts
-
-All outputs are written to `--output_dir`. `MANIFEST_outputs.csv` auto-inventories every file.
-
-### Forward Prediction
-
-| Artifact | Purpose |
-|----------|---------|
-| `Fig_parity_*`, `Fig_residual_*`, `Fig_boxplot_*` | Forward accuracy across approaches and protocols |
-| `Fig_unseen_*`, `Fig_random_grid_*` | Load/energy curves with conformal uncertainty bands |
-| `Fig_reliability_diagram.png` | Ensemble calibration |
-| `Table1_forward_results.csv` | Summary: R-squared, RMSE, MAE, conformal factors |
-| `Table2_statistical_tests.csv` | Welch t-tests with Bonferroni correction |
-
-### Inverse Design and Ill-Posedness
-
-| Artifact | Purpose |
-|----------|---------|
-| `Table3_inverse_illposedness.csv` | Multiplicity index, posterior stats, sensitivity, penalties |
-| `Fig_solution_landscape.png` | J(theta) per LC with local minima and SMI |
-| `Fig_inverse_posterior.png` | Approximate posterior P(theta \| target) with 95% CI |
-| `Fig_forward_map_jacobian.png` | dEA/dtheta, dIPF/dtheta with bifurcation detection |
-| `Table_inverse_topk_basins.csv` | Ranked basins from landscape + multi-start BO |
-| `Table_inverse_theta_member_spread.csv` | Per-member uncertainty at the optimum |
-
-### Multi-Objective Analysis
-
-| Artifact | Purpose |
-|----------|---------|
-| `Table6_pareto_sweep.csv`, `Fig_pareto_tradeoff.png` | EA vs IPF Pareto front |
-| `Fig_multiobjective_heatmaps.png` | Dense landscape visualisation |
-| `Table_pareto_dominance.csv` | Non-dominated subset of the dense surrogate landscape |
-
-### Reproducibility
-
-| Artifact | Purpose |
-|----------|---------|
-| `runtime_environment.json` | Python, torch, numpy versions |
-| `STATISTICAL_TESTING_POLICY.txt` | Confirmatory vs exploratory test framing |
-| `Table_compute_reproducibility_budget.csv` | Training times, evaluation counts |
-| `MANIFEST_outputs.csv` | Complete file inventory |
-
-## HPC Parallel Pipeline
-
-The `submit_pipeline.sh` script splits the monolithic pipeline into SLURM jobs:
-
-```
-                                  prep
-                                   |
-       +------+------+------+------+------+------+------+
-       |      |      |      |      |      |      |      |
-      train  train  train  train  train  train  train
-      rand   rand   rand   uns    uns    uns    inv
-      ddns   soft   hard   ddns   soft   hard
-       |      |      |      |      |      |      |
-       +------+------+------+------+------+------+ -----+
-                       |                                |
-                forward_analysis                        |
-                       |                                |
-                       +--------------------------------+
-                       |
-                inverse_analysis
-                       |
-                  aggregate
-```
-
-## Methodology
-
-- **Hard-PINN**: single-output energy network; force is recovered exactly by autograd as F = dE/dd
-- **Inverse objective**: J = fit_error + lambda * LC_penalty (matches manuscript Section 3.7.2)
-- **Multi-start GP-BO**: N=5 restarts with different seeds for global optimality
-- **Ill-posedness diagnostics**: Forward-map Jacobian identifies where dEA/dtheta or dIPF/dtheta change sign (bifurcation = non-uniqueness source)
-- **Multi-objective sweep**: weighted-sum and Chebyshev scalarizations + 2D dominance filter on the dense landscape
-- **Statistics**: Welch t-tests with within-protocol Bonferroni correction; see `STATISTICAL_TESTING_POLICY.txt`
-
-## Project Structure
+## Repository layout
 
 ```
 IPINN/
-  composite_design.py     # Main pipeline (single module — forward + inverse + analysis)
-  pyproject.toml              # Package metadata
-  environment.yml             # Conda environment
-  requirements.txt            # Pip dependencies
-  README.md
-  CONTRIBUTING.md
-  CITATION.cff
-  LICENSE
-
-  data/                       # Experimental dataset
-    LC1.xlsx, LC2.xlsx
-    README.md                 # dataset description and column schema
-
-  hpo/                        # Hyperparameter optimisation + per-member training
-    hpo_search.py             # Optuna TPE entry point: --approach {ddns,soft,hard}
-    forward_member.py         # per-member forward ensemble trainer (1 SLURM task / member)
-    forward_merge.py          # forward-ensemble aggregator (Tukey filter + bundle)
-    inverse_member.py         # per-member inverse-design surrogate trainer
-    inverse_merge.py          # inverse-design pretrained-surrogate aggregator
-    compare_methods.py        # cross-approach physics-correctness comparison
-    README.md                 # HPO + per-member training workflow
-
-  slurm/                      # HPC submission scripts
-    submit_pipeline.sh        # full pipeline: 11-job dependency chain
-    submit_hpo.sh             # Optuna HPO launcher, APPROACH={ddns,soft,hard}
-    submit_forward.sh         # SLURM array launcher for forward per-member training
-    submit_inverse.sh         # SLURM array launcher for inverse per-member + analysis
-    hpc_run_stage.py          # per-stage CLI used by submit_pipeline.sh
-    README.md                 # HPC submission guide
-
-  docs/
-    ARCHITECTURE.md           # file/line map: paper sections → code
-
-  tests/
-    conftest.py               # shared test fixtures
-    test_core.py              # unit tests (training, losses, classifier, GP-BO)
-    test_smoke.py             # CLI smoke tests
-    test_helpers_manifest.py  # manifest and figure tests
-    fixtures/
-      tiny_crush.csv          # minimal dataset for CI dry runs
+├── composite_design.py        # Main pipeline (forward + inverse + analysis)
+├── data/                       # Experimental dataset (LC1.xlsx, LC2.xlsx)
+├── hpo/                        # Optuna HPO + per-member parallel training
+├── slurm/                      # HPC submission scripts
+├── scripts/                    # Utility scripts (bundle assembly, etc.)
+├── tests/                      # 124 unit + integration tests
+├── docs/                       # ARCHITECTURE.md (file/line map for reviewers)
+├── paper/                      # Publication artifacts
+│   ├── figures/                # 10 main figures + appendix (PNG, 600 DPI)
+│   └── tables/                 # Numerical tables (CSV) backing the manuscript
+├── CHANGELOG.md
+└── CITATION.cff
 ```
+
+---
+
+## Trained model bundles
+
+The trained M=20 bootstrap ensembles (forward + inverse, ~80 MB compressed)
+are archived on Zenodo for permanent citation:
+
+> **Zenodo DOI:** *[to be added on deposit]*
+
+Each bundle contains every trained network's state_dict, the scalers, the
+exact train/val data splits, and per-member metadata sufficient to
+regenerate every figure without retraining (see [Reproducing the figures
+without retraining](#reproducing-the-figures-without-retraining)).
+
+The same archive is mirrored as a GitHub release asset under tag
+`v1.0-paper-final`.
+
+---
+
+## Reproducing the paper from scratch
+
+```bash
+# Code at the exact paper version
+git clone https://github.com/kprodigi/IPINN.git
+cd IPINN
+git checkout v1.0-paper-final
+
+# Environment
+conda env create -f environment.yml
+conda activate ipinn
+
+# Full pipeline (forward + inverse + figures + tables)
+python composite_design.py --mode all \
+    --data_dir ./data \
+    --output_dir ./results_paper \
+    --strict_paper
+
+# Or on HPC, parallel SLURM submission (see slurm/README.md)
+bash slurm/submit_pipeline.sh
+```
+
+End-to-end wall time on a 15-GPU SLURM allocation is approximately
+14–18 hours (Hard-PINN forward training dominates).
+
+### Reproducing the figures without retraining
+
+If you have downloaded the trained-model archive from Zenodo:
+
+```bash
+# Extract the model archive into ./results_paper/
+tar -xzf paper_full_results.tar.gz -C ./
+
+# Render all 10 figures + 6 tables (~5 minutes, CPU only)
+python composite_design.py --mode replot \
+    --output_dir ./results_paper \
+    --replot_from ./results_paper \
+    --force_cpu
+```
+
+---
+
+## Hyperparameter optimisation
+
+The hyperparameters reported in the paper are tuned per approach by an
+Optuna TPE study with a MedianPruner across trials.  Re-run on your own
+hardware:
+
+```bash
+APPROACH=ddns N_TRIALS=150 N_WORKERS=6  bash slurm/submit_hpo.sh
+APPROACH=soft N_TRIALS=150 N_WORKERS=6  bash slurm/submit_hpo.sh
+APPROACH=hard N_TRIALS=150 N_WORKERS=15 bash slurm/submit_hpo.sh
+```
+
+See [`hpo/README.md`](hpo/README.md) for the full workflow, including
+warm-start configuration and the resume-from-preemption protocol.
+
+---
+
+## Methodology highlights
+
+- **Hard-PINN architecture:** single-output energy network with force
+  recovered exactly by autograd as F = ∂E/∂d, enforcing the work-energy
+  identity by construction.  Boundary conditions E(0)=0 and F(0)=0 are
+  shaped through three auxiliary soft regularisers (monotonicity, angle
+  smoothness, energy curvature).
+- **Soft-PINN architecture:** two-headed (F, E) network with the
+  work-energy identity penalised by a soft residual loss and a paired
+  E(0)/F(0) BC penalty.
+- **DDNS baseline:** data-driven only — same two-headed network, no
+  physics terms.
+- **M=20 bootstrap ensemble** with Tukey-fence convergence filter on
+  training-set R² to drop unconverged members before reporting.
+- **Conformal calibration:** split-conformal estimation of ±1σ and ±2σ
+  inflation factors so reported uncertainty bands attain nominal coverage
+  on the held-out angle.
+- **Multi-start GP-BO inverse design:** 5 restarts × 20 calls/restart,
+  joint kernel over continuous θ and the categorical loading case, with
+  a calibrated VotingClassifier penalty enforcing LC plausibility.
+- **Ill-posedness diagnostics:** solution-landscape mapping, multiplicity
+  index, forward-map Jacobian with bifurcation detection, and an
+  approximate inverse posterior with 95% credible interval.
+- **Pareto sweep:** weighted-sum and Chebyshev scalarisations with
+  2-D dominance filtering on a dense surrogate landscape.
+
+---
+
+## CLI reference
+
+| Flag | Effect |
+|------|--------|
+| `--data_dir DIR` | Input data location (default: `./data`) |
+| `--output_dir DIR` | Output directory (default: `./results_paper`) |
+| `--mode {all,forward,inverse,replot}` | Pipeline stage |
+| `--seed N` | Global seed base (default: 2026) |
+| `--n_ensemble M` | Bootstrap ensemble size (default: 20) |
+| `--strict_paper` | Require optional deps (skopt) — abort if missing |
+| `--force_cpu` | Use CPU even when CUDA is available |
+| `--no_robustness` | Skip baselines + sensitivity + ablation |
+| `--use_pretrained_inverse PATH` | Reuse a pre-trained inverse ensemble bundle |
+| `--dry_run` | CI/smoke: tiny budgets, M ≤ 2, no GP-BO |
+
+Run `python composite_design.py --help` for the full list.
+
+---
+
+## Testing
+
+```bash
+pytest tests/ -q
+```
+
+124 unit + integration tests covering network forward passes, physics
+losses, training schedules, ensemble aggregation, conformal calibration,
+classifier behaviour, and inverse-design diagnostics.
+
+---
 
 ## Citation
 
-If you use this software, please cite it using the metadata in [CITATION.cff](CITATION.cff).
+If you use this software in your research, please cite using the metadata
+in [CITATION.cff](CITATION.cff).  The accompanying trained-model archive
+is citable through its Zenodo DOI (see [Trained model bundles](#trained-model-bundles)).
+
+---
 
 ## License
 
