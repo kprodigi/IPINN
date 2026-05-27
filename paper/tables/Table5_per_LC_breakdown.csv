@@ -1,0 +1,7 @@
+Protocol,Model,LC,N_points,Load_R2,Energy_R2,Load_RMSE,Load_MAE
+Unseen Angle $\theta^*=60^\circ$,DDNS,LC1,642,0.6202,0.8458,0.0831,0.0622
+Unseen Angle $\theta^*=60^\circ$,DDNS,LC2,1042,0.7300,0.9942,0.0812,0.0587
+Unseen Angle $\theta^*=60^\circ$,Soft-PINN,LC1,642,0.8196,0.9210,0.0573,0.0365
+Unseen Angle $\theta^*=60^\circ$,Soft-PINN,LC2,1042,0.7487,0.9985,0.0783,0.0585
+Unseen Angle $\theta^*=60^\circ$,Hard-PINN,LC1,642,0.7757,0.9549,0.0639,0.0454
+Unseen Angle $\theta^*=60^\circ$,Hard-PINN,LC2,1042,0.8226,0.9912,0.0658,0.0469

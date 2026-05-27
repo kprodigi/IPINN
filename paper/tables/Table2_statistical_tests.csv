@@ -1,0 +1,4 @@
+Protocol,Comparison,DeltaR2_load,DeltaR2_load_CI95_lo,DeltaR2_load_CI95_hi,Bootstrap_excludes_zero,Cohens_d,t_statistic,p_value_descriptive,p_bonferroni_descriptive,Significant_descriptive,n1,n2,Note
+Unseen Angle $\theta^*=60^\circ$,DDNS VS SOFT,-0.0728,-0.0930,-0.0523,Yes,-2.240,-6.8146,0.0000,0.0000,Yes,18,20,Bootstrap CI is the inferential statistic; t-test is descriptive only (iid violated).
+Unseen Angle $\theta^*=60^\circ$,DDNS VS HARD,-0.1055,-0.1252,-0.0850,Yes,-3.240,-9.8606,0.0000,0.0000,Yes,18,20,Bootstrap CI is the inferential statistic; t-test is descriptive only (iid violated).
+Unseen Angle $\theta^*=60^\circ$,SOFT VS HARD,-0.0327,-0.0502,-0.0156,Yes,-1.125,-3.5572,0.0010,0.0031,Yes,20,20,Bootstrap CI is the inferential statistic; t-test is descriptive only (iid violated).

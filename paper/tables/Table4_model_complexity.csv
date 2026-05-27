@@ -1,0 +1,4 @@
+Model,Parameters,Avg_Training_Time_s
+DDNS,11170,0.0
+Soft-PINN,34690,0.0
+Hard-PINN,9089,0.0
