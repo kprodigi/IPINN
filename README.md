@@ -42,33 +42,14 @@ IPINN/
 ├── paper/                      # Publication artifacts
 │   ├── figures/                # 10 main figures + appendix (PNG, 600 DPI)
 │   └── tables/                 # Numerical tables (CSV) backing the manuscript
-├── CHANGELOG.md
-└── CITATION.cff
+└── CHANGELOG.md
 ```
-
----
-
-## Trained model bundles
-
-The trained M=20 bootstrap ensembles (forward + inverse, ~80 MB compressed)
-are archived on Zenodo for permanent citation:
-
-> **Zenodo DOI:** *[to be added on deposit]*
-
-Each bundle contains every trained network's state_dict, the scalers, the
-exact train/val data splits, and per-member metadata sufficient to
-regenerate every figure without retraining (see [Reproducing the figures
-without retraining](#reproducing-the-figures-without-retraining)).
-
-The same archive is mirrored as a GitHub release asset under tag
-`v1.0-paper-final`.
 
 ---
 
 ## Reproducing the paper from scratch
 
 ```bash
-# Code at the exact paper version
 git clone https://github.com/kprodigi/IPINN.git
 cd IPINN
 git checkout v1.0-paper-final
@@ -92,18 +73,17 @@ End-to-end wall time on a 15-GPU SLURM allocation is approximately
 
 ### Reproducing the figures without retraining
 
-If you have downloaded the trained-model archive from Zenodo:
+If you have a previously trained set of model bundles staged at
+`./results_paper/`:
 
 ```bash
-# Extract the model archive into ./results_paper/
-tar -xzf paper_full_results.tar.gz -C ./
-
-# Render all 10 figures + 6 tables (~5 minutes, CPU only)
 python composite_design.py --mode replot \
     --output_dir ./results_paper \
     --replot_from ./results_paper \
     --force_cpu
 ```
+
+Runs in approximately 5 minutes on a single CPU.
 
 ---
 
@@ -180,14 +160,6 @@ pytest tests/ -q
 124 unit + integration tests covering network forward passes, physics
 losses, training schedules, ensemble aggregation, conformal calibration,
 classifier behaviour, and inverse-design diagnostics.
-
----
-
-## Citation
-
-If you use this software in your research, please cite using the metadata
-in [CITATION.cff](CITATION.cff).  The accompanying trained-model archive
-is citable through its Zenodo DOI (see [Trained model bundles](#trained-model-bundles)).
 
 ---
 
