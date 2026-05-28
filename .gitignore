@@ -37,6 +37,8 @@ results_ci_dry/
 results_hpc_test/
 results_smoke_dry/
 results_smoke/
+forward_v17_repro/
+forward_*_repro/
 
 # Local-only artefacts (extracted manuscript, etc.)
 manuscript.md
