@@ -217,13 +217,15 @@ ONE_AND_HALF_COL_IN = 5.51
 # and inserting at 100% scale into a Composite Structures full-page figure means
 # these point sizes are exactly the on-page sizes the reader sees.
 _BASE_FONT_AT_FULL_WIDTH = {
-    "label":     16.0,  # x/y axis labels (axes.labelsize)
-    "title":     16.0,  # subplot titles (axes.titlesize, bold)
-    "tick":      14.0,  # tick labels (xtick/ytick.labelsize)
-    "legend":    12.0,  # legend entries (legend.fontsize)
-    "panel":     14.0,  # panel labels (a)/(b)/(c), bold
-    "annot":     12.0,  # in-axes annotations
-    "suptitle":  16.0,  # figure-level suptitle, bold
+    "label":       16.0,  # x/y axis labels (axes.labelsize)
+    "title":       16.0,  # subplot titles (axes.titlesize, bold)
+    "title_dense": 12.0,  # subplot titles for 3+ column dense layouts
+    "tick":        14.0,  # tick labels (xtick/ytick.labelsize)
+    "legend":      12.0,  # legend entries (legend.fontsize)
+    "legend_outer": 10.0, # legend entries outside data area (smaller)
+    "panel":       14.0,  # panel labels (a)/(b)/(c), bold
+    "annot":       12.0,  # in-axes annotations
+    "suptitle":    16.0,  # figure-level suptitle, bold
 }
 
 # All figure text uses Arial in **bold** weight — every axis label, tick,
@@ -247,13 +249,15 @@ def scaled_fonts(fig_width: float) -> dict:
     """
     del fig_width  # retained for call-site compatibility
     return {
-        "label":      _BASE_FONT_AT_FULL_WIDTH["label"],
-        "title":      _BASE_FONT_AT_FULL_WIDTH["title"],
-        "tick":       _BASE_FONT_AT_FULL_WIDTH["tick"],
-        "legend":     _BASE_FONT_AT_FULL_WIDTH["legend"],
-        "panel":      _BASE_FONT_AT_FULL_WIDTH["panel"],
-        "annot":      _BASE_FONT_AT_FULL_WIDTH["annot"],
-        "suptitle":   _BASE_FONT_AT_FULL_WIDTH["suptitle"],
+        "label":        _BASE_FONT_AT_FULL_WIDTH["label"],
+        "title":        _BASE_FONT_AT_FULL_WIDTH["title"],
+        "title_dense":  _BASE_FONT_AT_FULL_WIDTH["title_dense"],
+        "tick":         _BASE_FONT_AT_FULL_WIDTH["tick"],
+        "legend":       _BASE_FONT_AT_FULL_WIDTH["legend"],
+        "legend_outer": _BASE_FONT_AT_FULL_WIDTH["legend_outer"],
+        "panel":        _BASE_FONT_AT_FULL_WIDTH["panel"],
+        "annot":        _BASE_FONT_AT_FULL_WIDTH["annot"],
+        "suptitle":     _BASE_FONT_AT_FULL_WIDTH["suptitle"],
         # Line/tick widths chosen to render cleanly at PRINT_WIDTH_IN.
         "linewidth":  1.8,
         "markersize": 7.0,
@@ -312,8 +316,16 @@ def apply_fig_style(fig, axes=None, fig_width: float = None, logger: Optional[lo
                 if tobj.get_text():
                     _set(tobj, sf["label"], weight="bold")
             # Subplot title — bold (axes.titleweight='bold').
+            # If the figure routine intentionally set a smaller fontsize
+            # (e.g. for crowded 3+ column layouts), respect it rather than
+            # overriding back to the 16pt baseline.
             if ax.title.get_text():
-                _set(ax.title, sf["title"], weight="bold")
+                try:
+                    cur_title_size = float(ax.title.get_fontsize())
+                except Exception:
+                    cur_title_size = sf["title"]
+                target_title = cur_title_size if cur_title_size < sf["title"] else sf["title"]
+                _set(ax.title, target_title, weight="bold")
 
             # Tick labels — regular.
             for tl in ax.get_xticklabels() + ax.get_yticklabels():
@@ -8635,7 +8647,11 @@ def fig_validation_error_maps(
     protocols = [p for p in ("random", "unseen") if p in dual_results and approach in dual_results[p]]
     if not protocols:
         return
-    fig, axes = plt.subplots(2, len(protocols), figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 8 / (5.5 * len(protocols))), squeeze=False)
+    fig, axes = plt.subplots(
+        2, len(protocols),
+        figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 8 / (5.5 * len(protocols))),
+        squeeze=False, constrained_layout=True,
+    )
     for j, protocol in enumerate(protocols):
         dr = dual_results[protocol]
         ens = evaluate_ensemble(
@@ -8659,7 +8675,7 @@ def fig_validation_error_maps(
             ax.grid(True, alpha=0.22, linestyle="--")
             add_subplot_label(ax, chr(ord("a") + i * len(protocols) + j))
     apply_fig_style(fig)
-    plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.96])
+    # constrained_layout already handles spacing — tight_layout would conflict.
     fig.savefig(
         os.path.join(output_dir, "Fig_validation_error_maps_angle_disp.png"),
         dpi=600, bbox_inches="tight", facecolor="white",
@@ -9124,10 +9140,14 @@ def fig_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
                                logger: logging.Logger) -> str:
     """Fig. 1: representative experimental curves and target distributions."""
     set_publication_style()
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.2 / 16))
-    gs = fig.add_gridspec(1, 3, wspace=0.34, left=0.06, right=0.99,
-                          top=0.88, bottom=0.16)
+    # 3-column layout @ 7.48 in is dense — use constrained_layout to keep
+    # subplot titles, suptitle, colorbar labels, and y-axis labels from
+    # colliding.  Subplot titles are sized down to title_dense (12 pt).
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.6 / 16),
+                     constrained_layout=True)
+    gs = fig.add_gridspec(1, 3)
     ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
+    _t_dense = _BASE_FONT_AT_FULL_WIDTH["title_dense"]
 
     angles = sorted(df_all["Angle"].unique())
     lcs    = sorted(df_all["LC"].unique())
@@ -9152,9 +9172,9 @@ def fig_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
     cbar.set_label("Angle θ (°)")
     ax_a.set_xlabel("Displacement d (mm)")
     ax_a.set_ylabel("Load F (kN)")
-    ax_a.set_title("Experimental curves")
+    ax_a.set_title("Experimental curves", fontsize=_t_dense, fontweight="bold", pad=4)
     ax_a.grid(True, alpha=0.3)
-    ax_a.legend(loc="upper right", title="LC")
+    ax_a.legend(loc="upper left", title="LC", fontsize=10, framealpha=0.92)
     _panel_label(ax_a, "a")
 
     # (b, c) EA / IPF per (angle, LC)
@@ -9195,7 +9215,7 @@ def fig_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
         ax.set_xlim(-0.5, len(angles) - 0.5)
         ax.set_xlabel(r"Angle $\theta$ (°)")
         ax.set_ylabel(ylabel)
-        ax.set_title(title)
+        ax.set_title(title, fontsize=_t_dense, fontweight="bold", pad=4)
         ax.grid(True, axis="y", alpha=0.3)
         # LC proxy legend
         handles = [mpatches.Patch(facecolor=_LC_BOX_COLORS[lc],
@@ -9210,7 +9230,9 @@ def fig_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
     _panel_label(ax_b, "b")
     _panel_label(ax_c, "c")
 
-    fig.suptitle("Dataset overview", fontweight="bold", y=0.99)
+    # With constrained_layout, omit explicit y= so matplotlib places suptitle
+    # above the row of subplot titles automatically.
+    fig.suptitle("Dataset overview", fontweight="bold")
     apply_fig_style(fig)
     return _savefig(fig, output_dir, "Fig01_dataset_overview.png", logger)
 
@@ -9221,21 +9243,32 @@ def fig_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
 def fig_02_forward_parity(dual_results: Dict, output_dir: str,
                              logger: logging.Logger) -> str:
     """Fig. 2: predicted vs ground-truth scatter for load and energy under
-    both evaluation protocols (random 80/20 and unseen θ=60°)."""
+    available evaluation protocols (random 80/20 and/or unseen θ=60°)."""
     set_publication_style()
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 11 / 13))
-    gs  = fig.add_gridspec(2, 2, wspace=0.28, hspace=0.36,
-                           left=0.08, right=0.98, top=0.92, bottom=0.10)
-    axes = [[fig.add_subplot(gs[r, c]) for c in range(2)] for r in range(2)]
 
-    PROTOS    = [("random", "Random 80/20"), ("unseen", r"Unseen θ=60°")]
     APPROACHES = ["ddns", "soft", "hard"]
     CHANNELS   = [("load", "Load (kN)"), ("energy", "Energy (J)")]
 
-    legend_handles: List = []
-    for r, (proto, plabel) in enumerate(PROTOS):
-        if proto not in dual_results:
-            continue
+    # Skip protocols that have no data — avoids the empty top row when only
+    # the unseen protocol was trained.
+    PROTOS_ALL = [("random", "Random 80/20"), ("unseen", r"Unseen θ=60°")]
+    available = [
+        (p, lbl) for (p, lbl) in PROTOS_ALL
+        if p in dual_results and dual_results[p]
+    ]
+    if not available:
+        logger.warning("  Fig. 2 skipped — no protocol results.")
+        return ""
+
+    n_rows = len(available)
+    # Single-protocol case: render a 1x2 strip instead of a 2x2 with empties.
+    fig_h = PRINT_WIDTH_IN * (5.6 if n_rows == 1 else 11) / 13
+    fig, axes_arr = plt.subplots(n_rows, 2,
+                                 figsize=(PRINT_WIDTH_IN, fig_h),
+                                 squeeze=False, constrained_layout=True)
+    axes = axes_arr.tolist()
+
+    for r, (proto, plabel) in enumerate(available):
         for c, (ch_key, ch_label) in enumerate(CHANNELS):
             ax = axes[r][c]
             for app in APPROACHES:
@@ -9249,11 +9282,9 @@ def fig_02_forward_parity(dual_results: Dict, output_dir: str,
                 if yt.size == 0 or yp.size == 0:
                     continue
                 r2 = r2_safe(yt, yp)
-                h = ax.scatter(yt, yp, s=12, alpha=0.5, color=COLORS[app],
-                               edgecolors="none",
-                               label=f"{MODEL_LABELS[app]}  R²={r2:.3f}")
-                if r == 0 and c == 0:
-                    legend_handles.append(h)
+                ax.scatter(yt, yp, s=12, alpha=0.5, color=COLORS[app],
+                           edgecolors="none",
+                           label=f"{MODEL_LABELS[app]}  R²={r2:.3f}")
             # parity line
             lo = min(ax.get_xlim()[0], ax.get_ylim()[0])
             hi = max(ax.get_xlim()[1], ax.get_ylim()[1])
@@ -9265,11 +9296,15 @@ def fig_02_forward_parity(dual_results: Dict, output_dir: str,
             ax.set_ylabel(f"Predicted {ch_label}")
             ax.set_title(f"{plabel} — {ch_label.split(' ')[0]}")
             ax.grid(True, alpha=0.3)
-            ax.legend(loc="upper left", framealpha=0.95)
+            # Legend OUTSIDE the data area (upper-right, above the axes) so
+            # it never obscures the scatter near the origin or the parity line.
+            ax.legend(loc="upper left",
+                      bbox_to_anchor=(1.02, 1.0),
+                      fontsize=10, frameon=False, borderaxespad=0.)
             _panel_label(ax, "abcd"[2 * r + c])
 
     fig.suptitle("Forward-model accuracy across evaluation protocols",
-                 fontweight="bold", y=0.97)
+                 fontweight="bold")
     apply_fig_style(fig)
     return _savefig(fig, output_dir, "Fig02_forward_parity.png", logger)
 
@@ -9289,9 +9324,12 @@ def fig_03_unseen_generalization(dual_results: Dict, df_all: pd.DataFrame,
         return ""
     res = dual_results[proto]
 
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 9 / 14))
-    gs  = fig.add_gridspec(2, 2, wspace=0.26, hspace=0.34,
-                           left=0.08, right=0.98, top=0.91, bottom=0.12)
+    # constrained_layout handles the suptitle + 2x2 grid + bottom-anchored
+    # figure legend without manual gridspec offsets.  Slightly taller height
+    # to give the bottom legend room.
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 9.5 / 14),
+                     constrained_layout=True)
+    gs  = fig.add_gridspec(2, 2)
     axes = [[fig.add_subplot(gs[r, c]) for c in range(2)] for r in range(2)]
     CHANNELS = [("load_kN", "Load (kN)"), ("energy_J", "Energy (J)")]
     lcs = sorted(df_all["LC"].unique())[:2]
@@ -9342,11 +9380,16 @@ def fig_03_unseen_generalization(dual_results: Dict, df_all: pd.DataFrame,
             ax.grid(True, alpha=0.3)
             _panel_label(ax, "abcd"[2 * r + c])
 
-    # shared figure-level legend (avoids per-axes legend overlap)
-    fig.legend(legend_handles, legend_labels, loc="lower center", ncol=4,
-               bbox_to_anchor=(0.5, 0.01), frameon=True, framealpha=0.95)
-    fig.suptitle(r"Generalization to unseen angle $\theta=60°$  (ensemble mean ± conformal 2σ)",
-                 fontweight="bold", y=0.97)
+    # shared figure-level legend below all panels — bbox_to_anchor y=-0.02
+    # keeps it clear of the row-2 x-axis labels.  constrained_layout will
+    # reserve space for it.
+    fig.legend(legend_handles, legend_labels, loc="lower center",
+               ncol=max(2, len(legend_handles)),
+               bbox_to_anchor=(0.5, -0.02), fontsize=12, frameon=False)
+    # Shortened suptitle — the "(ensemble mean ± conformal 2σ)" parenthetical
+    # belongs in the caption, not the on-figure title.
+    fig.suptitle(r"Generalization to unseen angle $\theta=60°$",
+                 fontweight="bold")
     apply_fig_style(fig)
     return _savefig(fig, output_dir, "Fig03_unseen_generalization.png", logger)
 
@@ -9364,10 +9407,15 @@ def fig_04_physics_calibration(dual_results: Dict, calibration: Dict,
     (c) Q–Q plot of standardized load residuals.
     """
     set_publication_style()
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.2 / 16))
-    gs  = fig.add_gridspec(1, 3, wspace=0.32, left=0.06, right=0.99,
-                           top=0.88, bottom=0.16)
+    # 3 panels @ 7.48 in: shrink subplot-title font to title_dense (12 pt) so
+    # "Physics residual" / "Reliability diagram" / "Q–Q load residuals" each
+    # fit in their ~2.5 in column.  constrained_layout takes care of suptitle
+    # padding and inter-axis spacing.
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.8 / 16),
+                     constrained_layout=True)
+    gs  = fig.add_gridspec(1, 3)
     ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
+    _t_dense = _BASE_FONT_AT_FULL_WIDTH["title_dense"]
 
     # (a) residual histogram |dE/dd - F| per approach (unseen protocol)
     proto = "unseen"
@@ -9403,8 +9451,8 @@ def fig_04_physics_calibration(dual_results: Dict, calibration: Dict,
     ax_a.set_xscale("log")
     ax_a.set_xlabel(r"$|\,\partial E/\partial d - F\,|$ (kN)")
     ax_a.set_ylabel("Count (log)")
-    ax_a.set_title("Physics residual")
-    ax_a.legend(loc="upper right")
+    ax_a.set_title("Physics residual", fontsize=_t_dense, fontweight="bold", pad=4)
+    ax_a.legend(loc="upper left", fontsize=10, framealpha=0.92)
     ax_a.grid(True, alpha=0.3)
     _panel_label(ax_a, "a")
 
@@ -9441,7 +9489,7 @@ def fig_04_physics_calibration(dual_results: Dict, calibration: Dict,
     ax_b.set_aspect("equal", adjustable="box")
     ax_b.set_xlabel("Nominal coverage")
     ax_b.set_ylabel("Empirical coverage")
-    ax_b.set_title("Reliability diagram")
+    ax_b.set_title("Reliability diagram", fontsize=_t_dense, fontweight="bold", pad=4)
     # Drop the x-axis "0.0" tick so it doesn't collide with the y-axis "0.0"
     # at the origin under bold-Arial sizing.  Keep the rest of the grid intact.
     ax_b.set_xticks([0.2, 0.4, 0.6, 0.8, 1.0])
@@ -9488,13 +9536,13 @@ def fig_04_physics_calibration(dual_results: Dict, calibration: Dict,
                       label="N(0,1)")
     ax_c.set_xlabel("Theoretical quantiles")
     ax_c.set_ylabel("Standardized residual")
-    ax_c.set_title("Q–Q load residuals (unseen)")
-    ax_c.legend(loc="upper left")
+    ax_c.set_title("Q–Q load residuals", fontsize=_t_dense, fontweight="bold", pad=4)
+    ax_c.legend(loc="upper left", fontsize=10, framealpha=0.92)
     ax_c.grid(True, alpha=0.3)
     _panel_label(ax_c, "c")
 
     fig.suptitle("Physics consistency and uncertainty calibration",
-                 fontweight="bold", y=0.99)
+                 fontweight="bold")
     apply_fig_style(fig)
     return _savefig(fig, output_dir, "Fig04_physics_calibration.png", logger)
 
@@ -9512,10 +9560,13 @@ def fig_05_ill_posedness(jacobian_results: Optional[Dict],
     (c) ensemble-disagreement σ(θ, LC) heat-map.
     """
     set_publication_style()
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.4 / 16))
-    gs  = fig.add_gridspec(1, 3, wspace=0.32, left=0.06, right=0.99,
-                           top=0.88, bottom=0.16)
+    # 3 panels @ 7.48 in: use title_dense (12 pt) on subplot titles and let
+    # constrained_layout handle padding for the suptitle and per-panel labels.
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.8 / 16),
+                     constrained_layout=True)
+    gs  = fig.add_gridspec(1, 3)
     ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
+    _t_dense = _BASE_FONT_AT_FULL_WIDTH["title_dense"]
 
     # (a) Forward Jacobian — dEA/dθ + dIPF/dθ per LC
     if jacobian_results:
@@ -9531,8 +9582,8 @@ def fig_05_ill_posedness(jacobian_results: Optional[Dict],
     ax_a.axhline(0, color="0.4", lw=0.6, linestyle="--")
     ax_a.set_xlabel(r"Angle $\theta$ (°)")
     ax_a.set_ylabel(r"$\partial$EA / $\partial\theta$  (J/°)")
-    ax_a.set_title("Forward Jacobian sensitivity")
-    ax_a.legend(loc="best")
+    ax_a.set_title("Forward-map sensitivity", fontsize=_t_dense, fontweight="bold", pad=4)
+    ax_a.legend(loc="upper left", fontsize=10, framealpha=0.92)
     ax_a.grid(True, alpha=0.3)
     _panel_label(ax_a, "a")
 
@@ -9571,9 +9622,9 @@ def fig_05_ill_posedness(jacobian_results: Optional[Dict],
                   transform=ax_b.transAxes, fontsize=12)
     ax_b.set_xlabel(r"Angle $\theta$ (°)")
     ax_b.set_ylabel(r"BO objective $J(\theta, LC)$")
-    ax_b.set_title("Objective landscape (one target)")
+    ax_b.set_title("BO objective landscape", fontsize=_t_dense, fontweight="bold", pad=4)
     if ax_b.get_legend_handles_labels()[0]:
-        ax_b.legend(loc="best", fontsize=10)
+        ax_b.legend(loc="upper left", fontsize=10, framealpha=0.92)
     ax_b.grid(True, alpha=0.3)
     _panel_label(ax_b, "b")
 
@@ -9589,13 +9640,14 @@ def fig_05_ill_posedness(jacobian_results: Optional[Dict],
                           label=f"{ylab} {lc}")
     ax_c.set_xlabel(r"Angle $\theta$ (°)")
     ax_c.set_ylabel("Ensemble disagreement (std)")
-    ax_c.set_title("Forward ensemble σ across (θ, LC)")
-    ax_c.legend(loc="best", fontsize=10)
+    ax_c.set_title("Ensemble disagreement", fontsize=_t_dense, fontweight="bold", pad=4)
+    ax_c.legend(loc="upper left", fontsize=10, framealpha=0.92)
     ax_c.grid(True, alpha=0.3)
     _panel_label(ax_c, "c")
 
-    fig.suptitle("Inverse problem is ill-posed — forward sensitivity, multimodal landscape, ensemble disagreement",
-                 fontweight="bold", y=0.99)
+    # Shortened suptitle — the descriptive subclause belongs in the caption.
+    fig.suptitle("Inverse problem ill-posedness",
+                 fontweight="bold")
     apply_fig_style(fig)
     return _savefig(fig, output_dir, "Fig05_ill_posedness.png", logger)
 
@@ -9618,9 +9670,9 @@ def fig_06_classifier(clf_diag: Dict, output_dir: str,
         logger.warning("  Fig. 6 skipped — need both classes in CV labels.")
         return ""
 
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 11 / 13))
-    gs  = fig.add_gridspec(2, 2, wspace=0.28, hspace=0.34,
-                           left=0.08, right=0.98, top=0.92, bottom=0.08)
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 11 / 13),
+                     constrained_layout=True)
+    gs  = fig.add_gridspec(2, 2)
     ax_a = fig.add_subplot(gs[0, 0])
     ax_b = fig.add_subplot(gs[0, 1])
     ax_c = fig.add_subplot(gs[1, 0])
@@ -9680,7 +9732,7 @@ def fig_06_classifier(clf_diag: Dict, output_dir: str,
     _panel_label(ax_d, "d")
 
     fig.suptitle("Loading-condition plausibility classifier (LOO diagnostics)",
-                 fontweight="bold", y=0.97)
+                 fontweight="bold")
     apply_fig_style(fig)
     return _savefig(fig, output_dir, "Fig06_classifier_diagnostics.png", logger)
 
@@ -9704,9 +9756,9 @@ def fig_07_inverse_design(all_inverse_results: List[Dict],
         logger.warning("  Fig. 7 skipped — no inverse results.")
         return ""
 
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 10.5 / 14.5))
-    gs  = fig.add_gridspec(2, 2, wspace=0.30, hspace=0.36,
-                           left=0.08, right=0.98, top=0.92, bottom=0.10)
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 10.5 / 14.5),
+                     constrained_layout=True)
+    gs  = fig.add_gridspec(2, 2)
     ax_a = fig.add_subplot(gs[0, 0])
     ax_b = fig.add_subplot(gs[0, 1])
     ax_c = fig.add_subplot(gs[1, 0])
@@ -9740,7 +9792,9 @@ def fig_07_inverse_design(all_inverse_results: List[Dict],
     ax_a.set_ylabel("Best objective J")
     ax_a.set_title("GP-BO convergence per target")
     ax_a.set_yscale("log")
-    ax_a.legend(loc="upper right", fontsize=10, ncol=2)
+    # Legend outside the data area so it doesn't sit on top of the traces.
+    ax_a.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0),
+                fontsize=9, frameon=False, borderaxespad=0., ncol=1)
     ax_a.grid(True, which="both", alpha=0.3)
     _panel_label(ax_a, "a")
 
@@ -9776,8 +9830,8 @@ def fig_07_inverse_design(all_inverse_results: List[Dict],
             ax_b.set_ylim(mn - pad, mx + pad)
     ax_b.set_xlabel("Target value")
     ax_b.set_ylabel("Recovered value (mean ± 2σ)")
-    ax_b.set_title("Inverse parity (EA, IPF)")
-    ax_b.legend(loc="upper left")
+    ax_b.set_title("Recovered vs target value")
+    ax_b.legend(loc="upper left", fontsize=10, framealpha=0.92)
     ax_b.grid(True, alpha=0.3)
     _panel_label(ax_b, "b")
 
@@ -9813,8 +9867,10 @@ def fig_07_inverse_design(all_inverse_results: List[Dict],
                   transform=ax_c.transAxes, fontsize=12)
     ax_c.set_xlabel("Displacement d (mm)")
     ax_c.set_ylabel("Load F (kN)")
-    ax_c.set_title("Recovered curves vs nearest experiment")
-    ax_c.legend(loc="best", fontsize=9, ncol=1)
+    ax_c.set_title("Recovered curves vs experiment")
+    # Outside-axes legend so traces are not occluded.
+    ax_c.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0),
+                fontsize=8, frameon=False, borderaxespad=0., ncol=1)
     ax_c.grid(True, alpha=0.3)
     _panel_label(ax_c, "c")
 
@@ -9852,14 +9908,14 @@ def fig_07_inverse_design(all_inverse_results: List[Dict],
                   transform=ax_d.transAxes, fontsize=12)
     ax_d.set_xlabel("Target")
     ax_d.set_ylabel(r"Recovered angle $\theta$ (°)")
-    ax_d.set_title(r"Multi-seed θ stability ($n_{seeds}=5$)")
+    ax_d.set_title(r"Multi-seed θ stability")
     if ax_d.get_legend_handles_labels()[0]:
-        ax_d.legend(loc="best", fontsize=10)
+        ax_d.legend(loc="upper left", fontsize=10, framealpha=0.92)
     ax_d.grid(True, axis="y", alpha=0.3)
     _panel_label(ax_d, "d")
 
     fig.suptitle("Inverse design via GP-Bayesian optimisation",
-                 fontweight="bold", y=0.97)
+                 fontweight="bold")
     apply_fig_style(fig)
     return _savefig(fig, output_dir, "Fig07_inverse_design.png", logger)
 
@@ -9874,10 +9930,13 @@ def fig_08_pareto(pareto_df: pd.DataFrame, landscape_df: pd.DataFrame,
     (c) J(θ, α) heat-map (LC1 and LC2 stacked).
     """
     set_publication_style()
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.6 / 16))
-    gs  = fig.add_gridspec(1, 3, wspace=0.32, left=0.06, right=0.99,
-                           top=0.86, bottom=0.16)
+    # 3 panels @ 7.48 in — shrink subplot titles and let constrained_layout
+    # handle colorbar + suptitle spacing.
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 6.0 / 16),
+                     constrained_layout=True)
+    gs  = fig.add_gridspec(1, 3)
     ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
+    _t_dense = _BASE_FONT_AT_FULL_WIDTH["title_dense"]
 
     if pareto_df is not None and not pareto_df.empty and {"EA", "IPF", "alpha"} <= set(pareto_df.columns):
         sc = ax_a.scatter(pareto_df["EA"], pareto_df["IPF"],
@@ -9887,7 +9946,8 @@ def fig_08_pareto(pareto_df: pd.DataFrame, landscape_df: pd.DataFrame,
         cb.set_label(r"weight $\alpha$ (EA priority)")
         ax_a.set_xlabel(f"EA@{int(D_COMMON)}mm (J)")
         ax_a.set_ylabel("IPF (kN)")
-        ax_a.set_title("Pareto front EA–IPF")
+        ax_a.set_title("Pareto front EA–IPF",
+                       fontsize=_t_dense, fontweight="bold", pad=4)
     ax_a.grid(True, alpha=0.3)
     _panel_label(ax_a, "a")
 
@@ -9908,8 +9968,9 @@ def fig_08_pareto(pareto_df: pd.DataFrame, landscape_df: pd.DataFrame,
                       lw=1.4, ms=6, label=str(lc) if lc else "Pareto")
     ax_b.set_xlabel(r"weight $\alpha$ (EA priority)")
     ax_b.set_ylabel(r"Optimal $\theta^\ast$ (°)")
-    ax_b.set_title(r"Optimal θ vs α")
-    ax_b.legend(loc="best", title="LC")
+    ax_b.set_title(r"Optimal θ vs α",
+                   fontsize=_t_dense, fontweight="bold", pad=4)
+    ax_b.legend(loc="upper left", title="LC", fontsize=10, framealpha=0.92)
     ax_b.grid(True, alpha=0.3)
     _panel_label(ax_b, "b")
 
@@ -9930,14 +9991,15 @@ def fig_08_pareto(pareto_df: pd.DataFrame, landscape_df: pd.DataFrame,
             cb.set_label("min objective J")
             ax_c.set_xlabel(r"angle $\theta$ (°)")
             ax_c.set_ylabel(r"weight $\alpha$")
-            ax_c.set_title(r"J(θ, α) min over LC")
+            ax_c.set_title(r"J(θ, α) min over LC",
+                           fontsize=_t_dense, fontweight="bold", pad=4)
     else:
         ax_c.text(0.5, 0.5, "no landscape data", ha="center", va="center",
                   transform=ax_c.transAxes, fontsize=12)
     _panel_label(ax_c, "c")
 
     fig.suptitle(f"Multi-objective design space — EA@{int(D_COMMON)}mm vs IPF",
-                 fontweight="bold", y=0.99)
+                 fontweight="bold")
     apply_fig_style(fig)
     return _savefig(fig, output_dir, "Fig08_pareto.png", logger)
 
@@ -9955,9 +10017,9 @@ def fig_09_pareto_recovery(pareto_inverse_results: Optional[List[Dict]],
         logger.info("  Fig. 9 skipped — no Pareto-target recovery results.")
         return ""
 
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.4 / 13))
-    gs  = fig.add_gridspec(1, 2, wspace=0.30, left=0.08, right=0.98,
-                           top=0.88, bottom=0.16)
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.6 / 13),
+                     constrained_layout=True)
+    gs  = fig.add_gridspec(1, 2)
     ax_a, ax_b = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])
 
     ref_theta, rec_theta, lc_match, ids = [], [], [], []
@@ -9989,7 +10051,7 @@ def fig_09_pareto_recovery(pareto_inverse_results: Optional[List[Dict]],
                 plt.Line2D([0], [0], marker="o", color="w",
                            markerfacecolor="#D55E00", markeredgecolor="black",
                            markersize=10, label="LC mismatch")]
-    ax_a.legend(handles=legend_h, loc="upper left")
+    ax_a.legend(handles=legend_h, loc="upper left", fontsize=10, framealpha=0.92)
     ax_a.grid(True, alpha=0.3)
     _panel_label(ax_a, "a")
 
@@ -10006,8 +10068,8 @@ def fig_09_pareto_recovery(pareto_inverse_results: Optional[List[Dict]],
     ax_b.grid(True, axis="y", alpha=0.3)
     _panel_label(ax_b, "b")
 
-    fig.suptitle("Pareto-optimal target recovery — known-feasible inverse-design test",
-                 fontweight="bold", y=0.99)
+    fig.suptitle("Pareto-optimal target recovery",
+                 fontweight="bold")
     apply_fig_style(fig)
     return _savefig(fig, output_dir, "Fig09_pareto_recovery.png", logger)
 
@@ -10024,10 +10086,12 @@ def fig_10_robustness(lambda_diag: Optional[pd.DataFrame],
     (c) classifier ablation (with vs without penalty).
     """
     set_publication_style()
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.4 / 16))
-    gs  = fig.add_gridspec(1, 3, wspace=0.34, left=0.06, right=0.99,
-                           top=0.88, bottom=0.16)
+    # 3 panels @ 7.48 in — title_dense + constrained_layout.
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.8 / 16),
+                     constrained_layout=True)
+    gs  = fig.add_gridspec(1, 3)
     ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
+    _t_dense = _BASE_FONT_AT_FULL_WIDTH["title_dense"]
 
     # (a) λ-sensitivity
     if lambda_diag is not None and not lambda_diag.empty and "lambda" in lambda_diag.columns:
@@ -10041,8 +10105,9 @@ def fig_10_robustness(lambda_diag: Optional[pd.DataFrame],
         ax_a.set_xscale("log")
         ax_a.set_xlabel(r"classifier penalty $\lambda$")
         ax_a.set_ylabel("Inverse-design error (%)")
-        ax_a.set_title(r"$\lambda$-sensitivity")
-        ax_a.legend(loc="best")
+        ax_a.set_title(r"$\lambda$-sensitivity",
+                       fontsize=_t_dense, fontweight="bold", pad=4)
+        ax_a.legend(loc="upper left", fontsize=10, framealpha=0.92)
     else:
         ax_a.text(0.5, 0.5, "no λ-sensitivity data", ha="center", va="center",
                   transform=ax_a.transAxes, fontsize=12)
@@ -10066,8 +10131,9 @@ def fig_10_robustness(lambda_diag: Optional[pd.DataFrame],
                  label=f"adopted d*={int(D_COMMON)}mm")
     ax_b.set_xlabel(r"common displacement $d^\ast$ (mm)")
     ax_b.set_ylabel(r"EA at $d^\ast$ (J)")
-    ax_b.set_title(r"$D_{\mathrm{common}}$ sensitivity")
-    ax_b.legend(loc="best", title="LC")
+    ax_b.set_title(r"$D_{\mathrm{common}}$ sensitivity",
+                   fontsize=_t_dense, fontweight="bold", pad=4)
+    ax_b.legend(loc="upper left", title="LC", fontsize=10, framealpha=0.92)
     ax_b.grid(True, alpha=0.3)
     _panel_label(ax_b, "b")
 
@@ -10086,8 +10152,9 @@ def fig_10_robustness(lambda_diag: Optional[pd.DataFrame],
             ax_c.set_xticks(x, df["Target"].astype(str))
             ax_c.set_xlabel("Target")
             ax_c.set_ylabel(r"$P(\mathrm{LC}\,|\,\mathrm{recovered\ design})$")
-            ax_c.set_title("Classifier ablation")
-            ax_c.legend(loc="best")
+            ax_c.set_title("Classifier ablation",
+                           fontsize=_t_dense, fontweight="bold", pad=4)
+            ax_c.legend(loc="upper left", fontsize=10, framealpha=0.92)
         else:
             ax_c.text(0.5, 0.5, "incompatible ablation table",
                       ha="center", va="center", transform=ax_c.transAxes)
@@ -10097,8 +10164,8 @@ def fig_10_robustness(lambda_diag: Optional[pd.DataFrame],
     ax_c.grid(True, axis="y", alpha=0.3)
     _panel_label(ax_c, "c")
 
-    fig.suptitle("Robustness and sensitivity of the inverse-design framework",
-                 fontweight="bold", y=0.99)
+    fig.suptitle("Robustness and sensitivity",
+                 fontweight="bold")
     apply_fig_style(fig)
     return _savefig(fig, output_dir, "Fig10_robustness.png", logger)
 
