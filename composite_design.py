@@ -213,226 +213,68 @@ SINGLE_COL_IN = 3.54
 DOUBLE_COL_IN = PRINT_WIDTH_IN
 ONE_AND_HALF_COL_IN = 5.51
 
-# Font targets (in points, AT THE FIGURE'S SAVED WIDTH).  Saving at PRINT_WIDTH_IN
-# and inserting at 100% scale into a Composite Structures full-page figure means
-# these point sizes are exactly the on-page sizes the reader sees.
-_BASE_FONT_AT_FULL_WIDTH = {
-    "label":       16.0,  # x/y axis labels (axes.labelsize)
-    "title":       16.0,  # subplot titles (axes.titlesize, bold)
-    "title_dense": 12.0,  # subplot titles for 3+ column dense layouts
-    "tick":        14.0,  # tick labels (xtick/ytick.labelsize)
-    "legend":      12.0,  # legend entries (legend.fontsize)
-    "legend_outer": 10.0, # legend entries outside data area (smaller)
-    "panel":       14.0,  # panel labels (a)/(b)/(c), bold
-    "annot":       12.0,  # in-axes annotations
-    "suptitle":    16.0,  # figure-level suptitle, bold
-}
-
-# All figure text uses Arial in **bold** weight — every axis label, tick,
-# legend entry, suptitle, title, and annotation is bold.
-FIG_FONT_FAMILY = ["Arial", "Liberation Sans", "DejaVu Sans"]
-FIG_FONT_WEIGHT = "bold"
-
-
-def scaled_fonts(fig_width: float) -> dict:
-    """Font sizes (pt) and line widths for figures.
-
-    Returns the baseline publication sizes (label=16, title=16, tick=14,
-    legend=12, panel=14, annot=12, suptitle=16) for every figure
-    regardless of ``fig_width``.  Per-figure size adjustments are handled
-    by the figure routines themselves choosing an appropriate figsize:
-    single-panel figures at PRINT_WIDTH_IN, multi-panel grids at
-    PRINT_WIDTH_IN with the panel count chosen so per-panel area stays
-    readable.
-
-    Apply via ``apply_fig_style``.
-    """
-    del fig_width  # retained for call-site compatibility
-    return {
-        "label":        _BASE_FONT_AT_FULL_WIDTH["label"],
-        "title":        _BASE_FONT_AT_FULL_WIDTH["title"],
-        "title_dense":  _BASE_FONT_AT_FULL_WIDTH["title_dense"],
-        "tick":         _BASE_FONT_AT_FULL_WIDTH["tick"],
-        "legend":       _BASE_FONT_AT_FULL_WIDTH["legend"],
-        "legend_outer": _BASE_FONT_AT_FULL_WIDTH["legend_outer"],
-        "panel":        _BASE_FONT_AT_FULL_WIDTH["panel"],
-        "annot":        _BASE_FONT_AT_FULL_WIDTH["annot"],
-        "suptitle":     _BASE_FONT_AT_FULL_WIDTH["suptitle"],
-        # Line/tick widths chosen to render cleanly at PRINT_WIDTH_IN.
-        "linewidth":  1.8,
-        "markersize": 7.0,
-        "axes_lw":    1.2,
-        "tick_major": 6.0,
-        "tick_minor": 3.5,
-    }
-
-
-def apply_fig_style(fig, axes=None, fig_width: float = None, logger: Optional[logging.Logger] = None):
-    """Enforce the Arial figure style on every text element.
-
-    Call AFTER creating subplots and setting labels/titles, BEFORE savefig.
-    Sets x/y labels, titles, tick labels, legend entries, suptitle, figure-level
-    legends, and any colorbar text to Arial at the size returned by
-    :func:`scaled_fonts`.  Subplot titles, suptitle, and panel labels are bold;
-    body text (axis labels, ticks, legend entries) is uniformly bold for
-    publication-grade legibility.
-
-    Free-floating Text annotations preserve any explicit ``fontweight`` the
-    caller set (so e.g. an annotation passed with ``fontweight='bold'`` keeps
-    its bold styling rather than being reset to regular).
-    """
-    _log = logger if logger is not None else logging.getLogger(__name__)
-    if fig_width is None:
-        fig_width = fig.get_size_inches()[0]
-    if axes is None:
-        all_axes = fig.get_axes()
-    else:
-        all_axes = list(np.array(axes).flat) if hasattr(axes, '__iter__') else [axes]
-
-    sf = scaled_fonts(fig_width)
-    fam = FIG_FONT_FAMILY
-
-    def _set(text_obj, size, weight=None):
-        try:
-            text_obj.set_fontfamily(fam)
-            if weight is not None:
-                text_obj.set_fontweight(weight)
-            text_obj.set_fontsize(size)
-        except Exception as ex:
-            _log.debug("apply_fig_style: text styling skipped: %s", ex)
-
-    for ax in all_axes:
-        try:
-            ax.tick_params(
-                axis="both", labelsize=sf["tick"],
-                length=sf["tick_major"], width=sf["axes_lw"], which="major",
-            )
-            ax.tick_params(length=sf["tick_minor"], width=sf["axes_lw"] * 0.7, which="minor")
-            for spine in ax.spines.values():
-                spine.set_linewidth(sf["axes_lw"])
-
-            # Axis labels.
-            for tobj in (ax.xaxis.label, ax.yaxis.label):
-                if tobj.get_text():
-                    _set(tobj, sf["label"], weight="bold")
-            # Subplot title — bold (axes.titleweight='bold').
-            # If the figure routine intentionally set a smaller fontsize
-            # (e.g. for crowded 3+ column layouts), respect it rather than
-            # overriding back to the 16pt baseline.
-            if ax.title.get_text():
-                try:
-                    cur_title_size = float(ax.title.get_fontsize())
-                except Exception:
-                    cur_title_size = sf["title"]
-                target_title = cur_title_size if cur_title_size < sf["title"] else sf["title"]
-                _set(ax.title, target_title, weight="bold")
-
-            # Tick labels — regular.
-            for tl in ax.get_xticklabels() + ax.get_yticklabels():
-                _set(tl, sf["tick"], weight="bold")
-
-            # In-axes legend — regular.
-            legend = ax.get_legend()
-            if legend is not None:
-                for text in legend.get_texts():
-                    _set(text, sf["legend"], weight="bold")
-                try:
-                    legend.get_frame().set_linewidth(sf["axes_lw"])
-                except Exception:
-                    pass
-        except Exception as ex:
-            _log.debug("apply_fig_style: axis styling skipped: %s", ex)
-
-    # Figure-level legends — regular.
-    for leg in getattr(fig, "legends", []) or []:
-        try:
-            for text in leg.get_texts():
-                _set(text, sf["legend"], weight="bold")
-            leg.get_frame().set_linewidth(sf["axes_lw"])
-        except Exception as ex:
-            _log.debug("apply_fig_style: fig legend styling skipped: %s", ex)
-
-    # Suptitle — bold.
-    if fig._suptitle is not None and fig._suptitle.get_text():
-        _set(fig._suptitle, sf["suptitle"], weight="bold")
-
-    # Free-floating Text annotations (text() / annotate() anchored to axes).
-    # Force bold weight on every annotation so the figure has uniform Arial
-    # bold typography end-to-end.  Family and size still follow the
-    # panel-vs-annot heuristic.
-    for ax in all_axes:
-        for txt in ax.texts:
-            if not txt.get_text():
-                continue
-            try:
-                cur = float(txt.get_fontsize())
-            except Exception:
-                cur = sf["annot"]
-            target = sf["annot"] if cur < sf["panel"] else sf["panel"]
-            _set(txt, target, weight="bold")
-
-
 def set_publication_style():
-    """Set matplotlib defaults to the publication figure style with Arial.
+    """Matplotlib defaults for publication-grade figures.
 
-    Configures rcParams for an 8x6 in figure, font.size 14, axes.labelsize 16,
-    axes.titlesize 16 bold, tick labels 14, legend 12, lines 1.8 pt, markers
-    7 pt, using a sans-serif Arial family.  Individual figure routines should
-    still call :func:`apply_fig_style` before savefig to enforce per-element
-    Arial sizing on tick labels, suptitle, etc.
+    Modest font sizes (10-12 pt) so multi-panel layouts fit cleanly at
+    journal page width without per-figure adjustments.  Layout is
+    handled by matplotlib's constrained_layout engine (enabled
+    globally via figure.constrained_layout.use=True).
     """
     plt.rcParams.update({
-        # Output geometry.
-        "figure.figsize": (8, 6),
-        "figure.dpi":     150,
-        "figure.facecolor": "white",
-        "savefig.dpi":    600,
-        "savefig.bbox":   "tight",
-        "savefig.pad_inches": 0.05,
-        "savefig.facecolor": "white",
-        "pdf.fonttype":   42,   # embed TrueType (editable in Illustrator/Acrobat)
-        "ps.fonttype":    42,
-        # Fonts — Arial (sans-serif), **bold** weight at publication sizes.
-        "font.family":    "sans-serif",
-        "font.sans-serif": FIG_FONT_FAMILY,
-        "font.weight":    "bold",
-        "font.size":      14,
+        # Output geometry
+        "figure.dpi":          150,
+        "figure.facecolor":    "white",
+        "savefig.dpi":         600,
+        "savefig.bbox":        "tight",
+        "savefig.pad_inches":  0.05,
+        "savefig.facecolor":   "white",
+        "pdf.fonttype":        42,
+        "ps.fonttype":         42,
+        # Layout — constrained_layout solves text-overlap problems
+        # automatically; enable it as the default for every figure.
+        "figure.constrained_layout.use": True,
+        # Fonts — Arial with sensible publication sizes (smaller than
+        # body text so panels stay legible at thumbnail scale).
+        "font.family":      "sans-serif",
+        "font.sans-serif":  ["Arial", "Liberation Sans", "DejaVu Sans"],
+        "font.size":        11,
         "mathtext.default": "regular",
         "mathtext.fontset": "dejavusans",
-        # Axes — every text element is bold.
-        "axes.labelsize":   16,
-        "axes.labelweight": "bold",
-        "axes.titlesize":   16,
+        # Axes
+        "axes.titlesize":   12,
         "axes.titleweight": "bold",
-        "axes.linewidth":   1.2,
+        "axes.labelsize":   11,
+        "axes.labelweight": "bold",
+        "axes.linewidth":   1.0,
         "axes.grid":        True,
         "axes.axisbelow":   True,
-        # Ticks — in-pointing.
-        "xtick.labelsize": 14,
-        "ytick.labelsize": 14,
-        "xtick.direction": "in",
-        "ytick.direction": "in",
-        "xtick.major.size": 6,
-        "ytick.major.size": 6,
-        "xtick.minor.size": 3.5,
-        "ytick.minor.size": 3.5,
-        "xtick.major.width": 1.0,
-        "ytick.major.width": 1.0,
+        # Ticks
+        "xtick.labelsize":     10,
+        "ytick.labelsize":     10,
+        "xtick.direction":     "in",
+        "ytick.direction":     "in",
+        "xtick.major.size":    4,
+        "ytick.major.size":    4,
+        "xtick.minor.size":    2.5,
+        "ytick.minor.size":    2.5,
+        "xtick.major.width":   1.0,
+        "ytick.major.width":   1.0,
         "xtick.minor.visible": True,
         "ytick.minor.visible": True,
-        # Legend.
-        "legend.fontsize":   12,
-        "legend.frameon":    True,
-        "legend.framealpha": 0.95,
-        # Lines.
-        "lines.linewidth":  1.8,
-        "lines.markersize": 7,
-        # Grid — subtle, dashed.
-        "grid.alpha":     0.25,
-        "grid.linewidth": 0.5,
-        "grid.linestyle": "--",
+        # Legend
+        "legend.fontsize":     9,
+        "legend.frameon":      True,
+        "legend.framealpha":   0.92,
+        "legend.edgecolor":    "0.7",
+        # Lines / markers
+        "lines.linewidth":  1.4,
+        "lines.markersize": 5,
+        # Grid
+        "grid.alpha":      0.25,
+        "grid.linewidth":  0.5,
+        "grid.linestyle":  "--",
         "errorbar.capsize": 3,
-        # Colour cycle and image.cmap left at matplotlib defaults.
     })
 
 
@@ -3156,10 +2998,7 @@ def fig_classifier_decision_boundary(
     ax2.legend(loc="best")
     plt.colorbar(im2, ax=ax2, label="$\\Phi$ (lower = more plausible)")
 
-    fig.suptitle("Ensemble Classifier: Loading-Condition Plausibility",
-                 fontweight="bold", y=0.98)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.88])
+    fig.suptitle("Ensemble Classifier: Loading-Condition Plausibility")
     fig.savefig(os.path.join(output_dir, "Fig_classifier_decision_boundary.png"),
                 dpi=600, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -4161,8 +4000,6 @@ def fig_solution_landscape(all_inverse_results, output_dir, logger):
         if i == 0:
             ax.set_ylabel(r"Objective $J(\theta)$")
         ax.legend()
-    apply_fig_style(fig)
-    fig.tight_layout()
     path = os.path.join(output_dir, "Fig_solution_landscape.png")
     fig.savefig(path, dpi=600, bbox_inches="tight")
     plt.close(fig)
@@ -4193,8 +4030,6 @@ def fig_forward_map_jacobian(jacobian_results, output_dir, logger):
         axes[1, j].set_title(f"dIPF/d$\\theta$ - {lc}")
         axes[1, j].set_xlabel(r"Angle ($^\circ$)")
         axes[1, j].set_ylabel("kN/deg" if j == 0 else "")
-    apply_fig_style(fig)
-    fig.tight_layout()
     path = os.path.join(output_dir, "Fig_forward_map_jacobian.png")
     fig.savefig(path, dpi=600, bbox_inches="tight")
     plt.close(fig)
@@ -4226,8 +4061,6 @@ def fig_inverse_posterior(all_inverse_results, output_dir, logger):
         if i == 0:
             ax.set_ylabel(r"$P(\theta \mid$ target$)$")
         ax.legend()
-    apply_fig_style(fig)
-    fig.tight_layout()
     path = os.path.join(output_dir, "Fig_inverse_posterior.png")
     fig.savefig(path, dpi=600, bbox_inches="tight")
     plt.close(fig)
@@ -4517,7 +4350,6 @@ def fig_inverse_posterior_likelihood(all_inverse: List[Dict], output_dir: str, l
     if not targets:
         return
     n = len(targets)
-    fonts = scaled_fonts(8.0)
     fig, axes = plt.subplots(2, n, figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 8 / (5.5 * n)), squeeze=False, sharex="col")
     for i, res in enumerate(targets):
         tid = res.get("target_info", {}).get("id", f"T{i+1}")
@@ -4543,8 +4375,6 @@ def fig_inverse_posterior_likelihood(all_inverse: List[Dict], output_dir: str, l
         if bo_best and "x_best" in bo_best:
             for axr in (axes[0, i], axes[1, i]):
                 axr.axvline(bo_best["x_best"], color=COLORS["hard"], linewidth=0.9, linestyle=":", alpha=0.85)
-    apply_fig_style(fig)
-    fig.tight_layout()
     path = os.path.join(output_dir, "Fig_inverse_posterior_likelihood.png")
     fig.savefig(path, dpi=600, bbox_inches="tight")
     plt.close(fig)
@@ -5338,7 +5168,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
                             color=color, alpha=0.15)
     ax1.set_xlabel("Interior Angle θ (°)")
     ax1.set_ylabel("Energy Absorption EA (J)")
-    ax1.set_title("(a) Energy Absorption Landscape", fontweight='bold')
+    ax1.set_title("(a) Energy Absorption Landscape")
     ax1.legend(loc='best')
     ax1.grid(True, alpha=0.3, linestyle='--')
     ax1.xaxis.set_minor_locator(AutoMinorLocator())
@@ -5362,7 +5192,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
                             color=color, alpha=0.15)
     ax2.set_xlabel("Interior Angle θ (°)")
     ax2.set_ylabel("Initial Peak Force IPF (kN)")
-    ax2.set_title("(b) Peak Force Landscape", fontweight='bold')
+    ax2.set_title("(b) Peak Force Landscape")
     ax2.legend(loc='best')
     ax2.grid(True, alpha=0.3, linestyle='--')
     ax2.xaxis.set_minor_locator(AutoMinorLocator())
@@ -5383,7 +5213,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
                      extent=[angles_lc1.min(), angles_lc1.max(), 0, 1])
     ax3.set_xlabel("Interior Angle θ (°)")
     ax3.set_ylabel("EA Weight α")
-    ax3.set_title("(c) Trade-off Surface: LC1", fontweight='bold')
+    ax3.set_title("(c) Trade-off Surface: LC1")
     cbar3 = plt.colorbar(im3, ax=ax3, shrink=0.72, pad=0.02)
     cbar3.set_label("Objective J (lower=better)")
     
@@ -5400,7 +5230,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
                      extent=[angles_lc2.min(), angles_lc2.max(), 0, 1])
     ax4.set_xlabel("Interior Angle θ (°)")
     ax4.set_ylabel("EA Weight α")
-    ax4.set_title("(d) Trade-off Surface: LC2", fontweight='bold')
+    ax4.set_title("(d) Trade-off Surface: LC2")
     cbar4 = plt.colorbar(im4, ax=ax4, shrink=0.72, pad=0.02)
     cbar4.set_label("Objective J (lower=better)")
     
@@ -5433,19 +5263,19 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
         low_alpha = pareto_df[pareto_df["alpha"] == pareto_df["alpha"].min()].iloc[0]
         ax5.annotate("α=0 (Stable)", (low_alpha["EA"], low_alpha["IPF"]),
                     xytext=(-40, 24), textcoords='offset points',
-                    fontsize=12, ha='center',
+                    ha='center',
                     arrowprops=dict(arrowstyle='->', color='gray', lw=0.6))
-        
+
         # High alpha (EA priority)
         high_alpha = pareto_df[pareto_df["alpha"] == pareto_df["alpha"].max()].iloc[0]
         ax5.annotate("α=1 (Max EA)", (high_alpha["EA"], high_alpha["IPF"]),
                     xytext=(36, -28), textcoords='offset points',
-                    fontsize=12, ha='center',
+                    ha='center',
                     arrowprops=dict(arrowstyle='->', color='gray', lw=0.6))
     
     ax5.set_xlabel("Energy Absorption EA (J)")
     ax5.set_ylabel("Initial Peak Force IPF (kN)")
-    ax5.set_title("(e) Pareto Front: EA vs IPF Trade-off", fontweight='bold')
+    ax5.set_title("(e) Pareto Front: EA vs IPF Trade-off")
     ax5.legend(loc='best')
     ax5.grid(True, alpha=0.3, linestyle='--')
     
@@ -5472,17 +5302,15 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
     ax6_twin.set_yticklabels(["LC1", "LC2"])
     ax6_twin.tick_params(axis='y', labelcolor='gray')
     
-    ax6.set_title("(f) Optimal Design vs Priority Weight", fontweight='bold')
+    ax6.set_title("(f) Optimal Design vs Priority Weight")
     ax6.grid(True, alpha=0.3, linestyle='--', axis='x')
     
     # Add annotation boxes
     ax6.axvspan(0, 0.3, alpha=0.1, color='blue', label='IPF priority zone')
     ax6.axvspan(0.7, 1.0, alpha=0.1, color='red', label='EA priority zone')
     
-    fig.suptitle("Multi-Objective Crashworthiness Optimization: EA vs IPF Trade-off",
-                 fontweight='bold', y=0.995)
+    fig.suptitle("Multi-Objective Crashworthiness Optimization: EA vs IPF Trade-off")
     
-    apply_fig_style(fig)
     fig.savefig(os.path.join(output_dir, "Fig_multiobjective_heatmaps.png"), 
                dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
@@ -5493,10 +5321,8 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
 # PLOTTING FUNCTIONS
 # =============================================================================
 def add_subplot_label(ax, label, x=-0.05, y=1.02):
-    """Add subplot label (a), (b), etc. — font matches figure width; position avoids title clash."""
-    fw = float(ax.figure.get_figwidth())
-    sf = scaled_fonts(fw)
-    ax.text(x, y, f"({label})", transform=ax.transAxes, fontsize=sf["panel"],
+    """Add subplot label (a), (b), etc. — bold, positioned above the axes title."""
+    ax.text(x, y, f"({label})", transform=ax.transAxes,
             fontweight='bold', va='top', ha='left', clip_on=False)
 
 
@@ -5525,9 +5351,7 @@ def fig_residual_histograms(dual_results: Dict, output_dir: str, logger: logging
                 label_idx += 1
                 ax.xaxis.set_minor_locator(AutoMinorLocator())
                 ax.yaxis.set_minor_locator(AutoMinorLocator())
-        fig.suptitle(f"Residual Distributions ({protocol_label(protocol)})", fontweight='bold', y=0.995)
-        apply_fig_style(fig)
-        plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.93])
+        fig.suptitle(f"Residual Distributions ({protocol_label(protocol)})")
         fig.savefig(os.path.join(output_dir, f"Fig_residuals_{protocol}.png"), dpi=600, bbox_inches='tight', facecolor='white')
         plt.close(fig)
         logger.info(f"  Saved: Fig_residuals_{protocol}.png")
@@ -5564,13 +5388,11 @@ def fig_boxplot_comparison(dual_results: Dict, output_dir: str, logger: logging.
                 median.set_color('black')
                 median.set_linewidth(1.5)
             ax.set_ylabel(ylabel)
-            ax.set_title(f"{protocol_label(protocol)}", fontweight='bold')
+            ax.set_title(f"{protocol_label(protocol)}")
             ax.yaxis.set_minor_locator(AutoMinorLocator())
             add_subplot_label(ax, chr(ord('a') + row * 2 + col))
     
-    fig.suptitle("Ensemble Performance Distribution", fontweight='bold', y=0.995)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.04, 0.04, 0.98, 0.90])
+    fig.suptitle("Ensemble Performance Distribution")
     fig.savefig(os.path.join(output_dir, "Fig_boxplot_comparison.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_boxplot_comparison.png")
@@ -5606,9 +5428,7 @@ def fig_parity_plots(dual_results: Dict, output_dir: str, logger: logging.Logger
                 label_idx += 1
                 ax.xaxis.set_minor_locator(AutoMinorLocator())
                 ax.yaxis.set_minor_locator(AutoMinorLocator())
-        fig.suptitle(f"Parity Plots ({protocol_label(protocol)})", fontweight='bold', y=0.995)
-        apply_fig_style(fig)
-        plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.93])
+        fig.suptitle(f"Parity Plots ({protocol_label(protocol)})")
         fig.savefig(os.path.join(output_dir, f"Fig_parity_{protocol}.png"), dpi=600, bbox_inches='tight', facecolor='white')
         plt.close(fig)
         logger.info(f"  Saved: Fig_parity_{protocol}.png")
@@ -5652,11 +5472,9 @@ def fig_cross_protocol_comparison(dual_results: Dict, output_dir: str, logger: l
                        mpatches.Patch(facecolor=COLORS["hard"], edgecolor='black', label='Hard-PINN'),
                        mpatches.Patch(facecolor='white', edgecolor='black', hatch='', label='Random Split'),
                        mpatches.Patch(facecolor='white', edgecolor='black', hatch='//', label='Unseen Angle')]
-    fig.suptitle("Cross-Protocol Performance Comparison", fontweight='bold', y=1.01)
+    fig.suptitle("Cross-Protocol Performance Comparison")
     fig.legend(handles=legend_elements, loc='upper center', ncol=5,
                bbox_to_anchor=(0.5, 1.005), frameon=True, columnspacing=0.8, handletextpad=0.35)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.03, 0.06, 0.97, 0.82])
     fig.savefig(os.path.join(output_dir, "Fig_cross_protocol.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_cross_protocol.png")
@@ -5729,9 +5547,7 @@ def fig_unseen_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir: str,
         add_subplot_label(ax, chr(ord('a') + idx))
         ax.xaxis.set_minor_locator(AutoMinorLocator())
         ax.yaxis.set_minor_locator(AutoMinorLocator())
-    fig.suptitle("Load Predictions for Unseen Angle (Ensemble Mean, Conformal ±2σ)", fontweight='bold', y=0.99)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.02, 0.22, 0.98, 0.94])
+    fig.suptitle("Load Predictions for Unseen Angle (Ensemble Mean, Conformal ±2σ)")
     fig.savefig(os.path.join(output_dir, "Fig_unseen_load_curves.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_unseen_load_curves.png")
@@ -5767,9 +5583,7 @@ def fig_unseen_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir: str,
         add_subplot_label(ax, chr(ord('a') + idx))
         ax.xaxis.set_minor_locator(AutoMinorLocator())
         ax.yaxis.set_minor_locator(AutoMinorLocator())
-    fig.suptitle("Energy Predictions for Unseen Angle (Ensemble Mean, Conformal ±2σ)", fontweight='bold', y=0.99)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.02, 0.22, 0.98, 0.94])
+    fig.suptitle("Energy Predictions for Unseen Angle (Ensemble Mean, Conformal ±2σ)")
     fig.savefig(os.path.join(output_dir, "Fig_unseen_energy_curves.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_unseen_energy_curves.png")
@@ -5803,12 +5617,11 @@ def fig_random_grid_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir:
                     models = dual_results["random"][approach]["models"]
                     Fm, _, _, _ = predict_curve_ensemble(models, approach, ang, lc, disps, scaler_disp, enc, params)
                     ax.plot(disps, Fm, color=COLORS[approach], linestyle=LINESTYLES[approach], linewidth=0.8, alpha=0.85)
-            ax.set_title(f"{lc}, {ang}°", fontsize=12, pad=2)
-            ax.tick_params(labelsize=12)
+            ax.set_title(f"{lc}, {ang}°", pad=2)
             if j == 0:
-                ax.set_ylabel("Load (kN)", fontsize=12)
+                ax.set_ylabel("Load (kN)")
             if i == len(lcs) - 1:
-                ax.set_xlabel("Disp. (mm)", fontsize=12)
+                ax.set_xlabel("Disp. (mm)")
             ax.set_xlim(0, disp_end)  # [CHANGE A] LC-specific
     
     # Create legend elements
@@ -5819,8 +5632,6 @@ def fig_random_grid_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir:
     fig.legend(handles=legend_elements, loc='upper center', ncol=4,
                bbox_to_anchor=(0.5, 0.995), frameon=True, framealpha=0.95)
     
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.86])
     fig.savefig(os.path.join(output_dir, "Fig_random_grid_curves.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_random_grid_curves.png")
@@ -5859,14 +5670,11 @@ def fig_ablation_study(df_ablation: pd.DataFrame, output_dir: str, logger: loggi
     best_w = df_ablation.loc[best_idx, "w_phys"]
     protocol_str = df_ablation["protocol"].iloc[0] if "protocol" in df_ablation.columns else "unseen"
     summary_text = f"Ablation Study Summary:\n\n• Protocol: {protocol_str.upper()} angle θ=60°\n\n• Tested $w_{{phys}}$ values: {list(df_ablation['w_phys'].values)}\n\n• Best Load $R^2$ at $w_{{phys}}$ = {best_w:.1f}\n\n• Optimal range: 5-20"
-    _sf_ab = scaled_fonts(10.0)
-    ax.text(0.06, 0.92, summary_text, transform=ax.transAxes, fontsize=_sf_ab["annot"],
+    ax.text(0.06, 0.92, summary_text, transform=ax.transAxes,
             verticalalignment='top',
             bbox=dict(boxstyle='round', facecolor='#f0f0f0', edgecolor='black', pad=0.35))
     add_subplot_label(ax, 'd')
-    fig.suptitle("Ablation Study: Effect of Physics Weight (Unseen θ=60°)", fontweight='bold', y=0.98)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.94])
+    fig.suptitle("Ablation Study: Effect of Physics Weight (Unseen θ=60°)")
     fig.savefig(os.path.join(output_dir, "Fig_ablation_study.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_ablation_study.png")
@@ -5930,7 +5738,7 @@ def fig_bo_convergence(opt_results: Dict, output_dir: str, logger: logging.Logge
                label=fr"$\theta^*$ = {best_theta:.1f}°")
     ax.set_xlabel("Iteration")
     ax.set_ylabel(r"Angle $\theta$ (°)")
-    ax.legend(loc='best', fontsize=9)
+    ax.legend(loc='best')
     add_subplot_label(ax, 'b')
 
     # (c) All evaluations and best so far
@@ -5941,7 +5749,7 @@ def fig_bo_convergence(opt_results: Dict, output_dir: str, logger: logging.Logge
             color=COLORS["hard"], linewidth=2.0, label='Best so far')
     ax.set_xlabel("Iteration")
     ax.set_ylabel("Objective Value")
-    ax.legend(loc='best', fontsize=9)
+    ax.legend(loc='best')
     add_subplot_label(ax, 'c')
 
     # (d) Theta vs Objective landscape
@@ -5969,7 +5777,7 @@ def fig_bo_convergence(opt_results: Dict, output_dir: str, logger: logging.Logge
                zorder=10, edgecolors='black', linewidths=0.8, label='Optimum')
     ax.set_xlabel(r"Angle $\theta$ (°)")
     ax.set_ylabel("Objective Value")
-    ax.legend(loc='best', fontsize=9)
+    ax.legend(loc='best')
     add_subplot_label(ax, 'd')
 
     t_ea = opt_results.get('target_ea', float('nan'))
@@ -5977,9 +5785,7 @@ def fig_bo_convergence(opt_results: Dict, output_dir: str, logger: logging.Logge
     fig.suptitle(
         f"GP-BO Optimization: Target EA@{D_COMMON:.0f}mm = {t_ea:.1f} J, "
         f"IPF = {t_ipf:.2f} kN",
-        fontsize=14, fontweight='bold', y=0.98,
     )
-    plt.tight_layout()
     suffix = f"_{tag}" if tag else ""
     fig.savefig(os.path.join(output_dir, f"Fig_bo_convergence{suffix}.png"),
                 dpi=300, bbox_inches='tight', facecolor='white')
@@ -6094,7 +5900,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
             
             ax.set_xlabel(r"Angle $\theta$ (deg.)")
             ax.set_ylabel("Objective")
-            ax.set_title(f"Iter {iter_num}/{total_evals}\n({obs_str})", fontsize=12)
+            ax.set_title(f"Iter {iter_num}/{total_evals}\n({obs_str})")
             ax.set_xlim(45, 70)
             ax.xaxis.set_minor_locator(AutoMinorLocator())
             ax.yaxis.set_minor_locator(AutoMinorLocator())
@@ -6105,12 +5911,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
                    bbox_to_anchor=(0.5, 0.02), frameon=True, framealpha=0.95, columnspacing=0.6)
         
         title_suffix = f" ({tag})" if tag else ""
-        fig.suptitle(f"GP-BO Posterior Evaluation{title_suffix}", fontweight='bold', y=0.99)
-        apply_fig_style(fig)
-        for _ax in axes:
-            if _ax.get_title():
-                _ax.title.set_fontsize(min(float(_ax.title.get_fontsize()), 12.0))
-        plt.tight_layout(rect=[0.02, 0.10, 0.98, 0.94])
+        fig.suptitle(f"GP-BO Posterior Evaluation{title_suffix}")
         suffix = f"_{tag}" if tag else ""
         out_name = f"Fig_gpbo_posterior_evaluation{suffix}.png"
         fig.savefig(os.path.join(output_dir, out_name), dpi=600, bbox_inches='tight', facecolor='white')
@@ -6187,7 +5988,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
         total_iters = min_iters
         ax.set_xlabel(r"Angle $\theta$ (deg.)")
         ax.set_ylabel("Objective")
-        ax.set_title(f"Iter {snap_idx + 1}/{total_iters}", fontsize=12)
+        ax.set_title(f"Iter {snap_idx + 1}/{total_iters}")
         ax.set_xlim(45, 70)
         ax.xaxis.set_minor_locator(AutoMinorLocator())
         ax.yaxis.set_minor_locator(AutoMinorLocator())
@@ -6197,12 +5998,7 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
                bbox_to_anchor=(0.5, 0.02), frameon=True, framealpha=0.95, columnspacing=0.6)
     
     title_suffix = f" ({tag})" if tag else ""
-    fig.suptitle(f"GP-BO Posterior Evaluation{title_suffix}", fontweight='bold', y=0.99)
-    apply_fig_style(fig)
-    for _ax in axes:
-        if _ax.get_title():
-            _ax.title.set_fontsize(min(float(_ax.title.get_fontsize()), 12.0))
-    plt.tight_layout(rect=[0.02, 0.10, 0.98, 0.94])
+    fig.suptitle(f"GP-BO Posterior Evaluation{title_suffix}")
     suffix = f"_{tag}" if tag else ""
     out_name = f"Fig_gpbo_posterior_evaluation{suffix}.png"
     fig.savefig(os.path.join(output_dir, out_name), dpi=600, bbox_inches='tight', facecolor='white')
@@ -6309,7 +6105,7 @@ def fig_optimizer_comparison(all_inverse_results: List[Dict], output_dir: str, l
                         linewidth=1.8, label=label)
         ax.set_xlabel("Evaluations", color="black")
         ax.set_ylabel("Best Objective", color="black")
-        ax.set_title(f"{tid}", fontweight='bold', color="black")
+        ax.set_title(f"{tid}", color="black")
         ax.tick_params(colors='black')
         if col == 0:
             ax.legend(framealpha=0.95, loc='upper right')
@@ -6349,22 +6145,19 @@ def fig_optimizer_comparison(all_inverse_results: List[Dict], output_dir: str, l
                             bars[i].get_x() + bars[i].get_width() / 2,
                             bars[i].get_height() + 0.08 * max(y_max, 1e-6),
                             "[best]", ha='center', va='bottom',
-                            fontsize=12, fontweight='bold', color='#DAA520'
+                            fontweight='bold', color='#DAA520'
                         )
 
             for bar, val in zip(bars, objs):
                 ax.text(bar.get_x() + bar.get_width() / 2,
                         bar.get_height() + 0.03 * max(y_max, 1e-6),
                         f'{val:.1e}', ha='center', va='bottom',
-                        fontsize=12, fontweight='bold', color="black")
+                        fontweight='bold', color="black")
             ax.set_ylim(0, y_max * 1.3 if y_max > 0 else 0.001)
 
             add_subplot_label(ax, chr(ord('a') + ncols + col))
     
-    fig.suptitle("GP-BO inverse design: objective vs evaluations (all targets)",
-                 fontweight='bold', y=0.98, color="black")
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.03, 0.03, 0.97, 0.94])
+    fig.suptitle("GP-BO inverse design: objective vs evaluations (all targets)")
     fig.savefig(os.path.join(output_dir, "Fig_optimizer_comparison.png"),
                 dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
@@ -6403,8 +6196,6 @@ def fig_inverse_optimizer_convergence(opt_results: Dict, output_dir: str, logger
     ax.yaxis.set_minor_locator(AutoMinorLocator())
 
     ax.set_title(f"Inverse Design Convergence (EA = {opt_results['target_ea']:.1f} J, IPF = {opt_results['target_ipf']:.2f} kN)")
-    apply_fig_style(fig)
-    plt.tight_layout()
 
     suffix = f"_{tag}" if tag else ""
     filepath = os.path.join(output_dir, f"Fig_inverse_convergence{suffix}.png")
@@ -6431,9 +6222,7 @@ def fig_target_feasibility(df_metrics: pd.DataFrame, targets: List[Dict], output
     for t in targets:
         ax.scatter([t["EA"]], [t["IPF"]], s=180, marker='*',
                    facecolor='black', edgecolor='black', linewidths=0.6, zorder=10)
-        _sf_t = scaled_fonts(6.8)
-        ax.annotate(t["id"], (t["EA"], t["IPF"]), textcoords="offset points", xytext=(4, 4),
-                      fontsize=_sf_t["annot"])
+        ax.annotate(t["id"], (t["EA"], t["IPF"]), textcoords="offset points", xytext=(4, 4))
 
     if ea_col == "EA_common":
         ax.set_xlabel(f"Energy absorbed to {D_COMMON:.0f} mm (J)")
@@ -6445,8 +6234,6 @@ def fig_target_feasibility(df_metrics: pd.DataFrame, targets: List[Dict], output
     ax.yaxis.set_minor_locator(AutoMinorLocator())
 
     ax.set_title("Feasibility of Inverse Design Targets in Empirical EA-IPF Space")
-    apply_fig_style(fig)
-    plt.tight_layout()
 
     filepath = os.path.join(output_dir, "Fig_inverse_target_feasibility.png")
     fig.savefig(filepath, dpi=600, bbox_inches='tight', facecolor='white')
@@ -6475,9 +6262,7 @@ def fig_design_space(models: List[nn.Module], approach: str, scaler_disp: Standa
     axes[1].set_ylabel("Initial Peak Force (kN)")
     axes[1].legend(loc='best')
     add_subplot_label(axes[1], 'b')
-    fig.suptitle("Design Space Predictions (Hard-PINN)", fontweight='bold', y=0.98)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.03, 0.06, 0.97, 0.90])
+    fig.suptitle("Design Space Predictions (Hard-PINN)")
     fig.savefig(os.path.join(output_dir, "Fig_design_space.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_design_space.png")
@@ -6598,10 +6383,7 @@ def fig_pareto_tradeoff(df_pareto: pd.DataFrame, output_dir: str, logger: loggin
     ax.yaxis.set_minor_locator(AutoMinorLocator())
     add_subplot_label(ax, 'd')
     
-    fig.suptitle("Multi-Objective EA vs IPF Trade-off",
-                 fontweight='bold', y=0.98, color="black")
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.03, 0.03, 0.97, 0.93])
+    fig.suptitle("Multi-Objective EA vs IPF Trade-off")
     fig.savefig(os.path.join(output_dir, "Fig_pareto_tradeoff.png"),
                 dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
@@ -6635,9 +6417,7 @@ def fig_training_curves(dual_results: Dict, output_dir: str, logger: logging.Log
             ax.set_title(f"{MODEL_LABELS[approach]} ({protocol_label(protocol)})")
             add_subplot_label(ax, labels[label_idx])
             label_idx += 1
-    fig.suptitle("Training Convergence", fontweight='bold', y=0.995)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.93])
+    fig.suptitle("Training Convergence")
     fig.savefig(os.path.join(output_dir, "Fig_training_curves.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_training_curves.png")
@@ -6657,10 +6437,8 @@ def fig_model_complexity(dual_results: Dict, output_dir: str, logger: logging.Lo
     ax.set_xticklabels([MODEL_LABELS[a] for a in approaches])
     ax.set_ylabel("Number of Parameters")
     add_subplot_label(ax, 'a')
-    _sf_mc = scaled_fonts(9.0)
     for bar, val in zip(bars, n_params):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 100, f'{val:,}', ha='center', va='bottom',
-                fontsize=_sf_mc["annot"])
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 100, f'{val:,}', ha='center', va='bottom')
     ax = axes[1]
     bars = ax.bar(x, train_times, color=colors_bar, edgecolor='black', linewidth=1.2, alpha=0.8)
     ax.set_xticks(x)
@@ -6668,11 +6446,8 @@ def fig_model_complexity(dual_results: Dict, output_dir: str, logger: logging.Lo
     ax.set_ylabel("Training Time (s)")
     add_subplot_label(ax, 'b')
     for bar, val in zip(bars, train_times):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1, f'{val:.1f}', ha='center', va='bottom',
-                fontsize=_sf_mc["annot"])
-    fig.suptitle("Model Complexity Comparison", fontweight='bold', y=0.98)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.03, 0.06, 0.97, 0.90])
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1, f'{val:.1f}', ha='center', va='bottom')
+    fig.suptitle("Model Complexity Comparison")
     fig.savefig(os.path.join(output_dir, "Fig_model_complexity.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_model_complexity.png")
@@ -6805,7 +6580,7 @@ def fig_physics_verification(dual_results: Dict, val_df: pd.DataFrame, scaler_di
     
     ax.set_xlabel("|F$_{pred}$ - dE/dd| (kN)")
     ax.set_ylabel("Frequency")
-    ax.set_title("Physics Residual Distribution", fontweight='bold')
+    ax.set_title("Physics Residual Distribution")
     ax.legend(loc='upper right')
     ax.set_yscale('log')
     # FIX: Set x-axis limits with small padding to prevent overlap with y-axis
@@ -6838,7 +6613,7 @@ def fig_physics_verification(dual_results: Dict, val_df: pd.DataFrame, scaler_di
     ax.plot(lims, lims, 'k--', linewidth=2, label='Perfect: dE/dd = F$_{pred}$', zorder=1)
     ax.set_xlabel("Predicted F (kN)")
     ax.set_ylabel("Computed dE/dd (kN)")
-    ax.set_title("Constraint Satisfaction: dE/dd vs F$_{pred}$", fontweight='bold')
+    ax.set_title("Constraint Satisfaction: dE/dd vs F$_{pred}$")
     ax.legend(loc='upper left')
     ax.set_xlim(lims)
     ax.set_ylim(lims)
@@ -6867,7 +6642,7 @@ def fig_physics_verification(dual_results: Dict, val_df: pd.DataFrame, scaler_di
     ax.set_xticks(range(len(approaches)))
     ax.set_xticklabels([MODEL_LABELS[a] for a in approaches])
     ax.set_ylabel("Mean |F$_{pred}$ - dE/dd| (kN)")
-    ax.set_title("Physics Violation Magnitude", fontweight='bold')
+    ax.set_title("Physics Violation Magnitude")
     ax.set_yscale("log")
     
     # FIX: Set y-limits with MORE headroom to prevent annotation overlap with border
@@ -6876,7 +6651,6 @@ def fig_physics_verification(dual_results: Dict, val_df: pd.DataFrame, scaler_di
     ax.set_ylim(ymin, ymax)
     
     # FIX: Add value labels with better positioning
-    _sf_ph = scaled_fonts(7.48)
     for bar, val in zip(bars, means):
         height = float(bar.get_height())
         # Position text INSIDE the bar for tall bars, ABOVE for short bars
@@ -6907,16 +6681,13 @@ def fig_physics_verification(dual_results: Dict, val_df: pd.DataFrame, scaler_di
             label_text,
             ha="center",
             va=va,
-            fontsize=_sf_ph["annot"],
             fontweight=fontweight,
             color=text_color
         )
     
     add_subplot_label(ax, "c")
     
-    fig.suptitle("Thermodynamic Consistency Verification: F$_{pred}$ = dE/dd", fontweight='bold', y=0.995)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.92])
+    fig.suptitle("Thermodynamic Consistency Verification: F$_{pred}$ = dE/dd")
     fig.savefig(os.path.join(output_dir, "Fig_physics_verification.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_physics_verification.png")
@@ -7166,9 +6937,7 @@ def fig_baseline_comparison(baseline_results: Dict, dual_results: Dict, output_d
     ax.set_yscale('log')
     add_subplot_label(ax, 'c')
     
-    fig.suptitle(f"Baseline Model Comparison ({ptitle})", fontweight='bold', y=0.98)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.04, 0.18, 0.98, 0.92])
+    fig.suptitle(f"Baseline Model Comparison ({ptitle})")
     fig.savefig(os.path.join(output_dir, f"Fig_baseline_comparison{tag}.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info(f"  Saved: Fig_baseline_comparison{tag}.png")
@@ -7320,15 +7089,13 @@ def fig_hyperparam_sensitivity(sensitivity_df: pd.DataFrame, output_dir: str, lo
             for j in range(len(lr_vals)):
                 val = matrix[i, j]
                 color = 'white' if val < 0.75 else 'black'
-                ax.text(j, i, f'{val:.2f}', ha='center', va='center', fontsize=12, color=color)
+                ax.text(j, i, f'{val:.2f}', ha='center', va='center', color=color)
         
         plt.colorbar(im, ax=ax, shrink=0.8)
         add_subplot_label(ax, chr(ord('a') + idx))
     
     ptitle = f" ({tag})" if tag else ""
-    fig.suptitle(f"Hyperparameter Sensitivity Analysis (Soft-PINN{ptitle})", fontweight='bold', y=0.98)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.03, 0.05, 0.97, 0.91])
+    fig.suptitle(f"Hyperparameter Sensitivity Analysis (Soft-PINN{ptitle})")
     fig.savefig(os.path.join(output_dir, f"Fig_hyperparam_sensitivity{suffix}.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info(f"  Saved: Fig_hyperparam_sensitivity{suffix}.png")
@@ -7646,20 +7413,17 @@ def fig_reliability_diagram(calibration: Dict, output_dir: str, logger: logging.
         
         ax.set_xlabel("Expected Coverage")
         ax.set_ylabel("Observed Coverage")
-        ax.set_title(f"{protocol_label(protocol)}", fontweight='bold')
+        ax.set_title(f"{protocol_label(protocol)}")
         ax.set_xlim(0, 1.02)
         ax.set_ylim(0, 1.02)
         ax.set_aspect('equal')
         ax.legend(loc='lower right', framealpha=0.95, ncol=1,
-                  borderpad=0.35, labelspacing=0.35, handletextpad=0.45,
-                  fontsize=12)
+                  borderpad=0.35, labelspacing=0.35, handletextpad=0.45)
         ax.grid(True, alpha=0.3)
         add_subplot_label(ax, chr(ord('a') + ax_idx))
         ax_idx += 1
     
-    fig.suptitle("Uncertainty Calibration: Reliability Diagram", fontweight='bold', y=0.98)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.03, 0.05, 0.97, 0.91])
+    fig.suptitle("Uncertainty Calibration: Reliability Diagram")
     fig.savefig(os.path.join(output_dir, "Fig_reliability_diagram.png"), 
                 dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
@@ -7868,8 +7632,8 @@ def fig_same_capacity_comparison(same_cap_results: Dict, dual_results: Dict, out
     for bar, m in zip(bars, models_data):
         va = 'bottom' if m["load_r2"] >= 0 else 'top'
         offset = 0.02 if m["load_r2"] >= 0 else -0.02
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + offset, 
-               f'{m["load_r2"]:.3f}', ha='center', va=va, fontsize=12, fontweight='bold')
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + offset,
+               f'{m["load_r2"]:.3f}', ha='center', va=va, fontweight='bold')
     
     # Panel (b): Energy R²
     ax = axes[1]
@@ -7890,13 +7654,10 @@ def fig_same_capacity_comparison(same_cap_results: Dict, dual_results: Dict, out
     for bar, m in zip(bars, models_data):
         va = 'bottom' if m["energy_r2"] >= 0 else 'top'
         offset = 0.02 if m["energy_r2"] >= 0 else -0.02
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + offset, 
-               f'{m["energy_r2"]:.3f}', ha='center', va=va, fontsize=12, fontweight='bold')
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + offset,
+               f'{m["energy_r2"]:.3f}', ha='center', va=va, fontweight='bold')
     
-    fig.suptitle("Same-Capacity Experiment: Hard-PINN vs Soft-PINN with Identical Architecture", 
-                 fontweight='bold', y=0.98)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.04, 0.12, 0.98, 0.90])
+    fig.suptitle("Same-Capacity Experiment: Hard-PINN vs Soft-PINN with Identical Architecture")
     fig.savefig(os.path.join(output_dir, "Fig_same_capacity_comparison.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_same_capacity_comparison.png")
@@ -8064,9 +7825,7 @@ def fig_extended_ablation(ablation_df: pd.DataFrame, output_dir: str, logger: lo
     ax.axhline(ablation_df["Load_R2"].iloc[0], color='gray', linestyle='--', alpha=0.5, label='Baseline')
     
     ptitle = f" ({tag})" if tag else ""
-    fig.suptitle(f"Extended Ablation Study: Component Contributions{ptitle}", fontweight='bold', y=0.98)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.04, 0.18, 0.98, 0.90])
+    fig.suptitle(f"Extended Ablation Study: Component Contributions{ptitle}")
     fig.savefig(os.path.join(output_dir, f"Fig_extended_ablation{suffix}.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info(f"  Saved: Fig_extended_ablation{suffix}.png")
@@ -8710,7 +8469,7 @@ def fig_inverse_parity_uncertainty(
         for i, lab in enumerate(labels):
             xi, yi = float(tt[i]), float(pp[i])
             if np.isfinite(xi) and np.isfinite(yi):
-                ax.annotate(lab, (xi, yi), textcoords="offset points", xytext=(4, 4), fontsize=12)
+                ax.annotate(lab, (xi, yi), textcoords="offset points", xytext=(4, 4))
         ax.set_xlabel(xlab)
         ax.set_ylabel(ylab)
         ax.grid(True, alpha=0.28, linestyle="--")
@@ -8719,9 +8478,7 @@ def fig_inverse_parity_uncertainty(
         ax.yaxis.set_minor_locator(AutoMinorLocator())
     add_subplot_label(axes[0], "a")
     add_subplot_label(axes[1], "b")
-    fig.suptitle("Inverse design validation: parity with ensemble uncertainty", fontweight="bold", y=0.98)
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.02, 0.04, 0.98, 0.90])
+    fig.suptitle("Inverse design validation: parity with ensemble uncertainty")
     fig.savefig(os.path.join(output_dir, "Fig_inverse_parity_uncertainty.png"),
                 dpi=600, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -8739,7 +8496,7 @@ def fig_inverse_parity_uncertainty(
     for i, lab in enumerate(labels):
         if ok[i]:
             ax2.annotate(lab, (float(ang_a[i]), float(err_pct[i])),
-                         textcoords="offset points", xytext=(3, 3), fontsize=12)
+                         textcoords="offset points", xytext=(3, 3))
     ax2.set_xlabel(r"Recovered angle $\theta$ (°)")
     ax2.set_ylabel("Relative EA error (%)")
     ax2.set_title("Inverse error vs optimised angle")
@@ -8747,8 +8504,6 @@ def fig_inverse_parity_uncertainty(
     ax2.xaxis.set_minor_locator(AutoMinorLocator())
     ax2.yaxis.set_minor_locator(AutoMinorLocator())
     add_subplot_label(ax2, "a")
-    apply_fig_style(fig2)
-    plt.tight_layout(rect=[0.08, 0.08, 0.95, 0.92])
     fig2.savefig(os.path.join(output_dir, "Fig_inverse_error_vs_angle.png"),
                  dpi=600, bbox_inches="tight", facecolor="white")
     plt.close(fig2)
@@ -8765,7 +8520,7 @@ def fig_validation_error_maps(
     fig, axes = plt.subplots(
         2, len(protocols),
         figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 8 / (5.5 * len(protocols))),
-        squeeze=False, constrained_layout=True,
+        squeeze=False,
     )
     for j, protocol in enumerate(protocols):
         dr = dual_results[protocol]
@@ -8789,7 +8544,6 @@ def fig_validation_error_maps(
             ax.set_title(f"{protocol_label(protocol)} — {MODEL_LABELS.get(approach, approach)}")
             ax.grid(True, alpha=0.22, linestyle="--")
             add_subplot_label(ax, chr(ord("a") + i * len(protocols) + j))
-    apply_fig_style(fig)
     # constrained_layout already handles spacing — tight_layout would conflict.
     fig.savefig(
         os.path.join(output_dir, "Fig_validation_error_maps_angle_disp.png"),
@@ -8863,13 +8617,10 @@ def fig_qq_load_residuals(
         ax.set_ylabel("Ordered residuals")
     ax.set_title(
         f"Q–Q (load residuals): unseen θ*={CFG.theta_star}°, "
-        f"{MODEL_LABELS.get(approach, approach)}",
-        fontsize=14,
+        f"{MODEL_LABELS.get(approach, approach)}"
     )
     ax.grid(True, alpha=0.28, linestyle="--")
     add_subplot_label(ax, "a")
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.12, 0.10, 0.96, 0.90])
     fig.savefig(
         os.path.join(output_dir, "Fig_qq_load_residuals_unseen.png"),
         dpi=600, bbox_inches="tight", facecolor="white",
@@ -8899,7 +8650,7 @@ def fig_lc_classifier_diagnostics(
     ax00.set_xticklabels(["Pred LC1", "Pred LC2"])
     ax00.set_yticklabels(["True LC1", "True LC2"])
     for (i, j), v in np.ndenumerate(cm):
-        ax00.text(j, i, int(v), ha="center", va="center", color="black", fontsize=14)
+        ax00.text(j, i, int(v), ha="center", va="center", color="black")
     plt.colorbar(im, ax=ax00, fraction=0.046)
     ax00.set_title("CV confusion")
     fpr, tpr, _ = roc_curve(y, pr)
@@ -8908,7 +8659,7 @@ def fig_lc_classifier_diagnostics(
     ax01.set_xlabel("FPR")
     ax01.set_ylabel("TPR")
     ax01.set_title("ROC (score = P(LC2))")
-    ax01.legend(loc="lower right", fontsize=12)
+    ax01.legend(loc="lower right")
     ax01.grid(True, alpha=0.25)
     prec, rec, _ = precision_recall_curve(y, pr)
     ap = average_precision_score(y, pr)
@@ -8918,7 +8669,7 @@ def fig_lc_classifier_diagnostics(
     ax10.set_title("Precision–recall (CV)")
     ax10.set_xlim(0, 1.02)
     ax10.set_ylim(0, 1.02)
-    ax10.legend(loc="upper right", fontsize=12)
+    ax10.legend(loc="upper right")
     ax10.grid(True, alpha=0.25)
     n_bins = max(3, min(8, len(y) // 3))
     prob_true, prob_pred = calibration_curve(y, pr, n_bins=n_bins, strategy="uniform")
@@ -8931,11 +8682,8 @@ def fig_lc_classifier_diagnostics(
     for ax, lab in zip([ax00, ax01, ax10, ax11], "abcd"):
         add_subplot_label(ax, lab)
     fig.suptitle(
-        f"LC plausibility classifier — {clf_diag.get('cv_method', 'CV')} on design metrics",
-        fontweight="bold", y=0.98,
+        f"LC plausibility classifier — {clf_diag.get('cv_method', 'CV')} on design metrics"
     )
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.93])
     fig.savefig(
         os.path.join(output_dir, "Fig_lc_classifier_cv_diagnostics.png"),
         dpi=600, bbox_inches="tight", facecolor="white",
@@ -8976,12 +8724,10 @@ def fig_landscape_ensemble_disagreement(
         ax.set_xlabel(r"Angle $\theta$ (°)")
         ax.set_ylabel(ylab)
         ax.set_title(f"Ensemble disagreement: {col.replace('_', ' ')}")
-        ax.legend(title="LC", fontsize=12)
+        ax.legend(title="LC")
         ax.grid(True, alpha=0.26, linestyle="--")
     add_subplot_label(axes[0], "a")
     add_subplot_label(axes[1], "b")
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.03, 0.06, 0.98, 0.92])
     fig.savefig(
         os.path.join(output_dir, "Fig_landscape_ensemble_disagreement.png"),
         dpi=600, bbox_inches="tight", facecolor="white",
@@ -9024,16 +8770,13 @@ def fig_d_common_sensitivity_ea(
         ax.set_xlabel(r"Displacement endpoint $d$ (mm) for EA")
         ax.set_ylabel(r"EA (J) to $d$")
         ax.set_title(f"{lc} (d_end={d_end:.0f} mm)")
-        ax.legend(fontsize=12, loc="best")
+        ax.legend(loc="best")
         ax.grid(True, alpha=0.26, linestyle="--")
     for ax, lab in zip(axes, "ab"):
         add_subplot_label(ax, lab)
     fig.suptitle(
-        "Sensitivity of EA metric to displacement endpoint (ensemble mean; same trained models)",
-        fontweight="bold", y=0.98,
+        "Sensitivity of EA metric to displacement endpoint (ensemble mean; same trained models)"
     )
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.03, 0.05, 0.97, 0.88])
     fig.savefig(
         os.path.join(output_dir, "Fig_d_common_sensitivity_EA_vs_disp_endpoint.png"),
         dpi=600, bbox_inches="tight", facecolor="white",
@@ -9096,17 +8839,14 @@ def fig_inverse_vs_nearest_experimental_curve(
         ax.set_xlabel("Displacement (mm)")
         ax.set_ylabel("Load (kN)")
         ax.set_title(f"Target {tid} ({pred_lc})")
-        ax.legend(fontsize=12)
+        ax.legend()
         ax.grid(True, alpha=0.26, linestyle="--")
         add_subplot_label(ax, chr(ord("a") + idx))
     for j in range(len(panels), len(axes_flat)):
         axes_flat[j].set_visible(False)
     fig.suptitle(
-        "Inverse optimum vs nearest experimental load–displacement (same LC)",
-        fontweight="bold", y=0.98,
+        "Inverse optimum vs nearest experimental load–displacement (same LC)"
     )
-    apply_fig_style(fig)
-    plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.92])
     fig.savefig(
         os.path.join(output_dir, "Fig_inverse_vs_nearest_experimental_curve.png"),
         dpi=600, bbox_inches="tight", facecolor="white",
@@ -9236,16 +8976,14 @@ def _savefig(fig, output_dir: str, name: str, logger: logging.Logger, *, dpi: in
     return path
 
 
-def _panel_label(ax, label: str, *, x: float = -0.16, y: float = 1.06,
-                     fontsize: float = 16.0) -> None:
+def _panel_label(ax, label: str, *, x: float = -0.16, y: float = 1.06) -> None:
     """Place a bold panel label '(a)' at axes-fraction coordinates.
 
     Default ``x = -0.16`` keeps the label clear of the y-tick labels;
     override per axes when needed (e.g. for axes without a y-axis label).
     """
     ax.text(x, y, f"({label})", transform=ax.transAxes,
-            fontsize=fontsize, fontweight='bold', va='top', ha='left',
-            clip_on=False)
+            fontweight='bold', va='top', ha='left', clip_on=False)
 
 
 # =============================================================================
@@ -9257,11 +8995,9 @@ def fig_dataset_overview(df_all: pd.DataFrame, output_dir: str,
     distributions per (angle, LC).  Clean 1x3 layout suitable for journal
     full-column width without text overlap."""
     set_publication_style()
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.6 / 16),
-                     constrained_layout=True)
+    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.6 / 16))
     gs = fig.add_gridspec(1, 3)
     ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
-    _t_dense = _BASE_FONT_AT_FULL_WIDTH["title_dense"]
 
     angles = sorted(df_all["Angle"].unique())
     lcs    = sorted(df_all["LC"].unique())
@@ -9286,9 +9022,9 @@ def fig_dataset_overview(df_all: pd.DataFrame, output_dir: str,
     cbar.set_label("Angle θ (°)")
     ax_a.set_xlabel("Displacement d (mm)")
     ax_a.set_ylabel("Load F (kN)")
-    ax_a.set_title("Experimental curves", fontsize=_t_dense, fontweight="bold", pad=4)
+    ax_a.set_title("Experimental curves")
     ax_a.grid(True, alpha=0.3)
-    ax_a.legend(loc="upper left", title="LC", fontsize=10, framealpha=0.92)
+    ax_a.legend(loc="upper left", title="LC")
     _panel_label(ax_a, "a")
 
     # (b, c) EA / IPF per (angle, LC) as grouped boxplots
@@ -9327,22 +9063,20 @@ def fig_dataset_overview(df_all: pd.DataFrame, output_dir: str,
         ax.set_xlim(-0.5, len(angles) - 0.5)
         ax.set_xlabel(r"Angle $\theta$ (°)")
         ax.set_ylabel(ylabel)
-        ax.set_title(title, fontsize=_t_dense, fontweight="bold", pad=4)
+        ax.set_title(title)
         ax.grid(True, axis="y", alpha=0.3)
         handles = [mpatches.Patch(facecolor=_LC_BOX_COLORS[lc],
                                    edgecolor="black", label=lc)
                    for lc in lcs if lc in _LC_BOX_COLORS]
         if handles:
-            ax.legend(handles=handles, title="LC", loc="upper left",
-                      fontsize=10, framealpha=0.92)
+            ax.legend(handles=handles, title="LC", loc="upper left")
 
     _grouped_box(ax_b, "EA",  "Energy absorbed EA (J)",     "EA distribution")
     _grouped_box(ax_c, "IPF", "Initial peak force IPF (kN)", "IPF distribution")
     _panel_label(ax_b, "b")
     _panel_label(ax_c, "c")
 
-    fig.suptitle("Dataset overview", fontweight="bold")
-    apply_fig_style(fig)
+    fig.suptitle("Dataset overview")
     return _savefig(fig, output_dir, "Fig_dataset_overview.png", logger)
 
 

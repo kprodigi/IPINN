@@ -698,22 +698,6 @@ class TestOptionalDeps:
 
 
 # =====================================================================
-# Scaled Fonts
-# =====================================================================
-class TestScaledFonts:
-    def test_returns_dict(self, m):
-        fonts = m.scaled_fonts(7.48)
-        assert isinstance(fonts, dict)
-        assert "label" in fonts
-        assert "tick" in fonts
-
-    def test_narrow_figure_scales_down(self, m):
-        wide = m.scaled_fonts(7.48)
-        narrow = m.scaled_fonts(3.0)
-        assert narrow["label"] <= wide["label"]
-
-
-# =====================================================================
 # Ill-Posedness Analysis: New Functions
 # =====================================================================
 class TestComputeLocalSensitivity:
