@@ -5872,6 +5872,121 @@ def fig_ablation_study(df_ablation: pd.DataFrame, output_dir: str, logger: loggi
     logger.info("  Saved: Fig_ablation_study.png")
 
 
+def fig_bo_convergence(opt_results: Dict, output_dir: str, logger: logging.Logger, tag: str = ""):
+    """Generate GP-BO convergence figure (2x2 grid per inverse target).
+
+    Panels:
+      (a) Best objective vs iteration (running min).
+      (b) Sampled angle θ vs iteration, coloured by LC.
+      (c) Per-iteration objective + running-min trace.
+      (d) Sampled (θ, J) scatter with the optimum highlighted.
+    """
+    gpbo = opt_results.get("gpbo_best")
+    if not gpbo:
+        return
+
+    x_history = gpbo.get("x_history", [])
+    y_history = gpbo.get("y_history", [])
+    best_y_history = gpbo.get("best_y_history", [])
+
+    if len(x_history) > 0:
+        if isinstance(x_history[0], (tuple, list)):
+            theta_history = [float(x[0]) for x in x_history]
+            lc_history = [int(x[1]) for x in x_history]
+        else:
+            theta_history = [float(x) for x in x_history]
+            lc_history = None
+    else:
+        theta_history = []
+        lc_history = None
+
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+
+    # (a) Best objective over iterations
+    ax = axes[0, 0]
+    ax.plot(range(1, len(best_y_history) + 1), best_y_history,
+            color=COLORS["gpbo"], marker='o', markersize=4, linewidth=1.5)
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Best Objective")
+    add_subplot_label(ax, 'a')
+
+    # (b) Theta over iterations
+    ax = axes[0, 1]
+    lc_colors = {0: COLORS["LC1"], 1: COLORS["LC2"]}
+    if lc_history is not None:
+        for i, (th, lc) in enumerate(zip(theta_history, lc_history)):
+            ax.scatter(i + 1, th, c=lc_colors.get(lc, COLORS["soft"]),
+                       s=30, edgecolors='black', linewidths=0.3, zorder=5)
+        ax.plot(range(1, len(theta_history) + 1), theta_history,
+                color='gray', linewidth=0.5, alpha=0.5, zorder=1)
+    else:
+        ax.plot(range(1, len(theta_history) + 1), theta_history,
+                color=COLORS["soft"], marker='D', markersize=4, linewidth=1.0)
+
+    best_theta = gpbo.get("x_best", theta_history[-1] if theta_history else 0)
+    if isinstance(best_theta, (tuple, list)):
+        best_theta = float(best_theta[0])
+    ax.axhline(best_theta, color=COLORS["hard"], linestyle='--', linewidth=1.5,
+               label=fr"$\theta^*$ = {best_theta:.1f}°")
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel(r"Angle $\theta$ (°)")
+    ax.legend(loc='best', fontsize=9)
+    add_subplot_label(ax, 'b')
+
+    # (c) All evaluations and best so far
+    ax = axes[1, 0]
+    ax.scatter(range(1, len(y_history) + 1), y_history, c=COLORS["ddns"], s=30,
+               alpha=0.7, edgecolors='black', linewidths=0.5)
+    ax.plot(range(1, len(best_y_history) + 1), best_y_history,
+            color=COLORS["hard"], linewidth=2.0, label='Best so far')
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Objective Value")
+    ax.legend(loc='best', fontsize=9)
+    add_subplot_label(ax, 'c')
+
+    # (d) Theta vs Objective landscape
+    ax = axes[1, 1]
+    if lc_history is not None:
+        for i, (th, y, lc) in enumerate(zip(theta_history, y_history, lc_history)):
+            marker = '*' if lc == 0 else 'D'
+            ax.scatter(th, y, c=lc_colors.get(lc, COLORS["soft"]),
+                       s=40, marker=marker, alpha=0.7,
+                       edgecolors='black', linewidths=0.3, zorder=5)
+    else:
+        ax.scatter(theta_history, y_history, c=COLORS["soft"], s=30,
+                   alpha=0.7, edgecolors='black', linewidths=0.5,
+                   label='Evaluations')
+
+    best_y = gpbo.get("y_best", None)
+    if best_y is None:
+        if isinstance(y_history, np.ndarray):
+            best_y = float(np.min(y_history)) if y_history.size > 0 else 0.0
+        else:
+            best_y = float(min(y_history)) if len(y_history) > 0 else 0.0
+    else:
+        best_y = float(best_y)
+    ax.scatter([best_theta], [best_y], c='#DC143C', marker='*', s=250,
+               zorder=10, edgecolors='black', linewidths=0.8, label='Optimum')
+    ax.set_xlabel(r"Angle $\theta$ (°)")
+    ax.set_ylabel("Objective Value")
+    ax.legend(loc='best', fontsize=9)
+    add_subplot_label(ax, 'd')
+
+    t_ea = opt_results.get('target_ea', float('nan'))
+    t_ipf = opt_results.get('target_ipf', float('nan'))
+    fig.suptitle(
+        f"GP-BO Optimization: Target EA@{D_COMMON:.0f}mm = {t_ea:.1f} J, "
+        f"IPF = {t_ipf:.2f} kN",
+        fontsize=14, fontweight='bold', y=0.98,
+    )
+    plt.tight_layout()
+    suffix = f"_{tag}" if tag else ""
+    fig.savefig(os.path.join(output_dir, f"Fig_bo_convergence{suffix}.png"),
+                dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    logger.info(f"  Saved: Fig_bo_convergence{suffix}.png")
+
+
 def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logging.Logger, tag: str = ""):
     """Generate GP-BO Posterior Evaluation figure (one file per inverse target).
 
@@ -9134,15 +9249,14 @@ def _panel_label(ax, label: str, *, x: float = -0.16, y: float = 1.06,
 
 
 # =============================================================================
-# FIGURE 1 — Dataset overview (3 panels)
+# Dataset overview — single focused figure (1x3 grid)
 # =============================================================================
-def fig_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
-                               logger: logging.Logger) -> str:
-    """Fig. 1: representative experimental curves and target distributions."""
+def fig_dataset_overview(df_all: pd.DataFrame, output_dir: str,
+                          logger: logging.Logger) -> str:
+    """Dataset overview: representative load–displacement curves, EA and IPF
+    distributions per (angle, LC).  Clean 1x3 layout suitable for journal
+    full-column width without text overlap."""
     set_publication_style()
-    # 3-column layout @ 7.48 in is dense — use constrained_layout to keep
-    # subplot titles, suptitle, colorbar labels, and y-axis labels from
-    # colliding.  Subplot titles are sized down to title_dense (12 pt).
     fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.6 / 16),
                      constrained_layout=True)
     gs = fig.add_gridspec(1, 3)
@@ -9153,7 +9267,7 @@ def fig_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
     lcs    = sorted(df_all["LC"].unique())
     cmap   = plt.get_cmap("viridis", max(1, len(angles)))
 
-    # (a) sample load–displacement curves
+    # (a) sample load–displacement curves coloured by angle
     seen_lc = set()
     for i, ang in enumerate(angles):
         for lc in lcs:
@@ -9177,18 +9291,16 @@ def fig_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
     ax_a.legend(loc="upper left", title="LC", fontsize=10, framealpha=0.92)
     _panel_label(ax_a, "a")
 
-    # (b, c) EA / IPF per (angle, LC)
+    # (b, c) EA / IPF per (angle, LC) as grouped boxplots
     df_metrics = compute_design_space_metrics(df_all, logger)
     if "Angle" not in df_metrics.columns and df_metrics.index.name == "Angle":
         df_metrics = df_metrics.reset_index()
 
-    # Color each LC distinctly; group boxes by angle so the x-axis has one
-    # readable tick per angle instead of 12 cramped (angle, LC) pairs at 45°.
     _LC_BOX_COLORS = {"LC1": "#a8d5f7", "LC2": "#ffc999"}
 
     def _grouped_box(ax, value_col: str, ylabel: str, title: str) -> None:
         n_lc = max(1, len(lcs))
-        bw = 0.8 / n_lc                       # box width per LC
+        bw = 0.8 / n_lc
         any_data = False
         for i, ang in enumerate(angles):
             for j, lc in enumerate(lcs):
@@ -9217,7 +9329,6 @@ def fig_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
         ax.set_ylabel(ylabel)
         ax.set_title(title, fontsize=_t_dense, fontweight="bold", pad=4)
         ax.grid(True, axis="y", alpha=0.3)
-        # LC proxy legend
         handles = [mpatches.Patch(facecolor=_LC_BOX_COLORS[lc],
                                    edgecolor="black", label=lc)
                    for lc in lcs if lc in _LC_BOX_COLORS]
@@ -9230,991 +9341,9 @@ def fig_01_dataset_overview(df_all: pd.DataFrame, output_dir: str,
     _panel_label(ax_b, "b")
     _panel_label(ax_c, "c")
 
-    # With constrained_layout, omit explicit y= so matplotlib places suptitle
-    # above the row of subplot titles automatically.
     fig.suptitle("Dataset overview", fontweight="bold")
     apply_fig_style(fig)
-    return _savefig(fig, output_dir, "Fig01_dataset_overview.png", logger)
-
-
-# =============================================================================
-# FIGURE 2 — Forward parity across protocols (4 panels)
-# =============================================================================
-def fig_02_forward_parity(dual_results: Dict, output_dir: str,
-                             logger: logging.Logger) -> str:
-    """Fig. 2: predicted vs ground-truth scatter for load and energy under
-    available evaluation protocols (random 80/20 and/or unseen θ=60°)."""
-    set_publication_style()
-
-    APPROACHES = ["ddns", "soft", "hard"]
-    CHANNELS   = [("load", "Load (kN)"), ("energy", "Energy (J)")]
-
-    # Skip protocols that have no data — avoids the empty top row when only
-    # the unseen protocol was trained.
-    PROTOS_ALL = [("random", "Random 80/20"), ("unseen", r"Unseen θ=60°")]
-    available = [
-        (p, lbl) for (p, lbl) in PROTOS_ALL
-        if p in dual_results and dual_results[p]
-    ]
-    if not available:
-        logger.warning("  Fig. 2 skipped — no protocol results.")
-        return ""
-
-    n_rows = len(available)
-    # Single-protocol case: render a 1x2 strip instead of a 2x2 with empties.
-    fig_h = PRINT_WIDTH_IN * (5.6 if n_rows == 1 else 11) / 13
-    fig, axes_arr = plt.subplots(n_rows, 2,
-                                 figsize=(PRINT_WIDTH_IN, fig_h),
-                                 squeeze=False, constrained_layout=True)
-    axes = axes_arr.tolist()
-
-    for r, (proto, plabel) in enumerate(available):
-        for c, (ch_key, ch_label) in enumerate(CHANNELS):
-            ax = axes[r][c]
-            for app in APPROACHES:
-                if app not in dual_results[proto]:
-                    continue
-                m = dual_results[proto][app].get("metrics", {})
-                preds = m.get("predictions", {})
-                trues = m.get("true_values", {})
-                yt = np.asarray(trues.get(ch_key, []))
-                yp = np.asarray(preds.get(ch_key, []))
-                if yt.size == 0 or yp.size == 0:
-                    continue
-                r2 = r2_safe(yt, yp)
-                ax.scatter(yt, yp, s=12, alpha=0.5, color=COLORS[app],
-                           edgecolors="none",
-                           label=f"{MODEL_LABELS[app]}  R²={r2:.3f}")
-            # parity line
-            lo = min(ax.get_xlim()[0], ax.get_ylim()[0])
-            hi = max(ax.get_xlim()[1], ax.get_ylim()[1])
-            ax.plot([lo, hi], [lo, hi], "k--", lw=0.9, alpha=0.6, zorder=0)
-            ax.set_xlim(lo, hi)
-            ax.set_ylim(lo, hi)
-            ax.set_aspect("equal", adjustable="box")
-            ax.set_xlabel(f"True {ch_label}")
-            ax.set_ylabel(f"Predicted {ch_label}")
-            ax.set_title(f"{plabel} — {ch_label.split(' ')[0]}")
-            ax.grid(True, alpha=0.3)
-            # Legend OUTSIDE the data area (upper-right, above the axes) so
-            # it never obscures the scatter near the origin or the parity line.
-            ax.legend(loc="upper left",
-                      bbox_to_anchor=(1.02, 1.0),
-                      fontsize=10, frameon=False, borderaxespad=0.)
-            _panel_label(ax, "abcd"[2 * r + c])
-
-    fig.suptitle("Forward-model accuracy across evaluation protocols",
-                 fontweight="bold")
-    apply_fig_style(fig)
-    return _savefig(fig, output_dir, "Fig02_forward_parity.png", logger)
-
-
-# =============================================================================
-# FIGURE 3 — Unseen-angle generalization with conformal bands (4 panels)
-# =============================================================================
-def fig_03_unseen_generalization(dual_results: Dict, df_all: pd.DataFrame,
-                                    output_dir: str, logger: logging.Logger,
-                                    calibration: Optional[Dict] = None) -> str:
-    """Fig. 3: predicted load and energy curves at unseen θ=60° for both LCs,
-    ensemble mean ± 2σ (conformally calibrated)."""
-    set_publication_style()
-    proto = "unseen"
-    if proto not in dual_results:
-        logger.warning("  Fig. 3 skipped — no unseen-protocol results.")
-        return ""
-    res = dual_results[proto]
-
-    # constrained_layout handles the suptitle + 2x2 grid + bottom-anchored
-    # figure legend without manual gridspec offsets.  Slightly taller height
-    # to give the bottom legend room.
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 9.5 / 14),
-                     constrained_layout=True)
-    gs  = fig.add_gridspec(2, 2)
-    axes = [[fig.add_subplot(gs[r, c]) for c in range(2)] for r in range(2)]
-    CHANNELS = [("load_kN", "Load (kN)"), ("energy_J", "Energy (J)")]
-    lcs = sorted(df_all["LC"].unique())[:2]
-
-    legend_handles, legend_labels = [], []
-    seen_legend = False
-    for r, lc in enumerate(lcs):
-        d_end = disp_end_mm(lc)
-        n_steps = get_n_steps_curve(lc)
-        disps = np.linspace(0.0, d_end, n_steps)
-        exp = df_all[(df_all["Angle"] == CFG.theta_star) & (df_all["LC"] == lc)].sort_values("disp_mm")
-        for c, (col, ylab) in enumerate(CHANNELS):
-            ax = axes[r][c]
-            if not exp.empty:
-                h_exp, = ax.plot(exp["disp_mm"], exp[col], color="black", lw=2.0,
-                                 label="Experiment")
-                if not seen_legend:
-                    legend_handles.append(h_exp); legend_labels.append("Experiment")
-            for app in ["ddns", "soft", "hard"]:
-                if app not in res:
-                    continue
-                models = res[app].get("models")
-                params = res.get("params")
-                scaler_disp = res.get("scaler_disp")
-                enc = res.get("enc")
-                if models is None or params is None or scaler_disp is None or enc is None:
-                    continue
-                Fm, Em, Fs, Es = predict_curve_ensemble(
-                    models, app, CFG.theta_star, lc, disps, scaler_disp, enc, params)
-                cf_F, cf_E = 1.0, 1.0
-                if calibration and proto in calibration and app in calibration[proto]:
-                    cf_F = float(calibration[proto][app].get("conformal_factor", 1.0))
-                    cf_E = float(calibration[proto][app].get("energy_conformal_factor", 1.0))
-                y_mean = Fm if c == 0 else Em
-                y_std  = (Fs if c == 0 else Es) * (cf_F if c == 0 else cf_E)
-                line, = ax.plot(disps, y_mean, color=COLORS[app],
-                                linestyle=LINESTYLES[app], lw=1.4,
-                                label=MODEL_LABELS[app])
-                ax.fill_between(disps, y_mean - 2 * y_std, y_mean + 2 * y_std,
-                                color=COLORS[app], alpha=0.18)
-                if not seen_legend:
-                    legend_handles.append(line); legend_labels.append(MODEL_LABELS[app])
-            seen_legend = True
-            ax.set_xlim(0, d_end)
-            ax.set_xlabel("Displacement d (mm)")
-            ax.set_ylabel(ylab)
-            ax.set_title(f"{lc} — {ylab.split(' ')[0]} (θ=60°)")
-            ax.grid(True, alpha=0.3)
-            _panel_label(ax, "abcd"[2 * r + c])
-
-    # shared figure-level legend below all panels — bbox_to_anchor y=-0.02
-    # keeps it clear of the row-2 x-axis labels.  constrained_layout will
-    # reserve space for it.
-    fig.legend(legend_handles, legend_labels, loc="lower center",
-               ncol=max(2, len(legend_handles)),
-               bbox_to_anchor=(0.5, -0.02), fontsize=12, frameon=False)
-    # Shortened suptitle — the "(ensemble mean ± conformal 2σ)" parenthetical
-    # belongs in the caption, not the on-figure title.
-    fig.suptitle(r"Generalization to unseen angle $\theta=60°$",
-                 fontweight="bold")
-    apply_fig_style(fig)
-    return _savefig(fig, output_dir, "Fig03_unseen_generalization.png", logger)
-
-
-# =============================================================================
-# FIGURE 4 — Physics consistency + uncertainty calibration (3 panels)
-# =============================================================================
-def fig_04_physics_calibration(dual_results: Dict, calibration: Dict,
-                                  val_df_u: pd.DataFrame, scaler_disp_u,
-                                  enc_u, params_u: ScalingParams,
-                                  output_dir: str,
-                                  logger: logging.Logger) -> str:
-    """Fig. 4: (a) |dE/dd − F| residual histogram per approach,
-    (b) reliability diagram raw vs conformal coverage,
-    (c) Q–Q plot of standardized load residuals.
-    """
-    set_publication_style()
-    # 3 panels @ 7.48 in: shrink subplot-title font to title_dense (12 pt) so
-    # "Physics residual" / "Reliability diagram" / "Q–Q load residuals" each
-    # fit in their ~2.5 in column.  constrained_layout takes care of suptitle
-    # padding and inter-axis spacing.
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.8 / 16),
-                     constrained_layout=True)
-    gs  = fig.add_gridspec(1, 3)
-    ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
-    _t_dense = _BASE_FONT_AT_FULL_WIDTH["title_dense"]
-
-    # (a) residual histogram |dE/dd - F| per approach (unseen protocol)
-    proto = "unseen"
-    res = dual_results.get(proto, {})
-    bins = np.logspace(-4, 2, 50)
-    for app in ["ddns", "soft", "hard"]:
-        if app not in res:
-            continue
-        models = res[app].get("models")
-        if models is None:
-            continue
-        Xv = to_tensor(build_features(val_df_u, scaler_disp_u, enc_u))
-        residuals = []
-        for m in models:
-            Xv_g = Xv.detach().clone().requires_grad_(True)
-            with torch.enable_grad():
-                pv = m(Xv_g)
-                if app == "hard":
-                    E_n = pv[:, 0:1]
-                    dE = torch.autograd.grad(E_n.sum(), Xv_g, create_graph=False)[0]
-                    F_phys = (dE[:, U_COL:U_COL+1] * params_u.grad_factor).detach().cpu().numpy().reshape(-1)
-                    residuals.append(np.zeros_like(F_phys))  # by construction
-                else:
-                    F_n = pv[:, 0:1]; E_n = pv[:, 1:2]
-                    res_t = compute_physics_residual(Xv_g, F_n, E_n, params_u)
-                    residuals.append(np.abs(res_t.detach().cpu().numpy().reshape(-1)))
-        if not residuals:
-            continue
-        all_res = np.concatenate(residuals)
-        all_res = np.clip(all_res, 1e-4, None)
-        ax_a.hist(all_res, bins=bins, alpha=0.55, color=COLORS[app],
-                  label=MODEL_LABELS[app], log=True, edgecolor="black", lw=0.4)
-    ax_a.set_xscale("log")
-    ax_a.set_xlabel(r"$|\,\partial E/\partial d - F\,|$ (kN)")
-    ax_a.set_ylabel("Count (log)")
-    ax_a.set_title("Physics residual", fontsize=_t_dense, fontweight="bold", pad=4)
-    ax_a.legend(loc="upper left", fontsize=10, framealpha=0.92)
-    ax_a.grid(True, alpha=0.3)
-    _panel_label(ax_a, "a")
-
-    # (b) reliability diagram: raw vs conformal-corrected coverage at fixed
-    # sigma levels (compute_uncertainty_calibration stores arrays for
-    # σ ∈ {0.5, 1.0, 1.5, 2.0} → nominal coverage from N(0,1).
-    sigma_levels = np.array([0.5, 1.0, 1.5, 2.0])
-    if HAS_SCIPY:
-        from scipy.stats import norm as _norm
-        nominal = 2 * _norm.cdf(sigma_levels) - 1
-    else:
-        nominal = np.array([0.383, 0.683, 0.866, 0.954])
-    drew_b_data = False
-    if calibration and proto in calibration:
-        for app in ["ddns", "soft", "hard"]:
-            cal = calibration[proto].get(app, {})
-            cov_raw = cal.get("observed_coverage")
-            cov_cal = cal.get("corrected_coverage")
-            if cov_raw is None or cov_cal is None:
-                continue
-            cov_raw = np.asarray(cov_raw); cov_cal = np.asarray(cov_cal)
-            n = min(nominal.size, cov_raw.size, cov_cal.size)
-            if n == 0:
-                continue
-            # No per-line label — a custom 5-entry legend (3 colors + 2 linestyles)
-            # is built below; cleaner than 6 verbose "Model (raw)/(conformal)" entries.
-            ax_b.plot(nominal[:n], cov_raw[:n], marker="o", linestyle="--",
-                      color=COLORS[app], lw=1.0, ms=6)
-            ax_b.plot(nominal[:n], cov_cal[:n], marker="s", linestyle="-",
-                      color=COLORS[app], lw=1.4, ms=6)
-            drew_b_data = True
-    ax_b.plot([0, 1], [0, 1], "k:", lw=0.8, alpha=0.7)
-    ax_b.set_xlim(0, 1); ax_b.set_ylim(0, 1)
-    ax_b.set_aspect("equal", adjustable="box")
-    ax_b.set_xlabel("Nominal coverage")
-    ax_b.set_ylabel("Empirical coverage")
-    ax_b.set_title("Reliability diagram", fontsize=_t_dense, fontweight="bold", pad=4)
-    # Drop the x-axis "0.0" tick so it doesn't collide with the y-axis "0.0"
-    # at the origin under bold-Arial sizing.  Keep the rest of the grid intact.
-    ax_b.set_xticks([0.2, 0.4, 0.6, 0.8, 1.0])
-    ax_b.set_yticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
-    if drew_b_data:
-        # Compact 5-entry legend: 3 model colors + 2 linestyle markers.
-        legend_items = [
-            Line2D([0], [0], color=COLORS[a], lw=2.0, label=MODEL_LABELS[a])
-            for a in ["ddns", "soft", "hard"]
-        ]
-        legend_items.append(Line2D([0], [0], color="0.4", linestyle="--",
-                                   marker="o", lw=1.0, ms=6, label="raw"))
-        legend_items.append(Line2D([0], [0], color="0.4", linestyle="-",
-                                   marker="s", lw=1.4, ms=6, label="conformal"))
-        ax_b.legend(handles=legend_items, loc="upper left", fontsize=10,
-                    ncol=1, framealpha=0.92, borderpad=0.5,
-                    handlelength=1.6, labelspacing=0.35)
-    ax_b.grid(True, alpha=0.3)
-    _panel_label(ax_b, "b")
-
-    # (c) Q–Q plot of standardized load residuals (Hard-PINN, unseen)
-    if "hard" in res:
-        m = res["hard"].get("metrics", {})
-        yt = np.asarray(m.get("true_values", {}).get("load", []))
-        yp = np.asarray(m.get("predictions", {}).get("load", []))
-        if yt.size > 0 and yp.size > 0:
-            r = yt - yp
-            r_std = (r - r.mean()) / max(r.std(), 1e-9)
-            r_sorted = np.sort(r_std)
-            qs = np.linspace(0, 1, len(r_sorted) + 2)[1:-1]
-            theo = np.sqrt(2) * np.array([
-                stats.norm.ppf(q) if HAS_SCIPY else (
-                    -1.96 if q < 0.025 else (1.96 if q > 0.975 else 0)
-                )
-                for q in qs
-            ]) if HAS_SCIPY else np.zeros_like(r_sorted)
-            if HAS_SCIPY:
-                from scipy.stats import norm as _norm
-                theo = _norm.ppf(qs)
-            ax_c.scatter(theo, r_sorted, s=14, color=COLORS["hard"], alpha=0.7,
-                         label="Hard-PINN")
-            mn, mx = float(np.min(theo)), float(np.max(theo))
-            ax_c.plot([mn, mx], [mn, mx], "k--", lw=0.9, alpha=0.6,
-                      label="N(0,1)")
-    ax_c.set_xlabel("Theoretical quantiles")
-    ax_c.set_ylabel("Standardized residual")
-    ax_c.set_title("Q–Q load residuals", fontsize=_t_dense, fontweight="bold", pad=4)
-    ax_c.legend(loc="upper left", fontsize=10, framealpha=0.92)
-    ax_c.grid(True, alpha=0.3)
-    _panel_label(ax_c, "c")
-
-    fig.suptitle("Physics consistency and uncertainty calibration",
-                 fontweight="bold")
-    apply_fig_style(fig)
-    return _savefig(fig, output_dir, "Fig04_physics_calibration.png", logger)
-
-
-# =============================================================================
-# FIGURE 5 — Inverse-problem ill-posedness (3 panels)
-# =============================================================================
-def fig_05_ill_posedness(jacobian_results: Optional[Dict],
-                            all_inverse_results: Optional[List[Dict]],
-                            landscape_df: Optional[pd.DataFrame],
-                            output_dir: str, logger: logging.Logger) -> str:
-    """Fig. 5: (a) forward-map Jacobian ∂{EA, IPF}/∂θ per LC,
-    (b) GP-BO objective landscape J(θ, LC) for one inverse target
-        showing local minima,
-    (c) ensemble-disagreement σ(θ, LC) heat-map.
-    """
-    set_publication_style()
-    # 3 panels @ 7.48 in: use title_dense (12 pt) on subplot titles and let
-    # constrained_layout handle padding for the suptitle and per-panel labels.
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.8 / 16),
-                     constrained_layout=True)
-    gs  = fig.add_gridspec(1, 3)
-    ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
-    _t_dense = _BASE_FONT_AT_FULL_WIDTH["title_dense"]
-
-    # (a) Forward Jacobian — dEA/dθ + dIPF/dθ per LC
-    if jacobian_results:
-        theta = np.asarray(jacobian_results.get("theta_grid", []))
-        for lc in sorted({k.split("_")[-1] for k in jacobian_results
-                          if k.startswith("dEA_dtheta_")}):
-            dea = np.asarray(jacobian_results.get(f"dEA_dtheta_{lc}", []))
-            if theta.size == 0 or dea.size == 0:
-                continue
-            ax_a.plot(theta, dea, color=COLORS.get(lc, "gray"),
-                      linestyle=LINESTYLES.get(lc, "-"), lw=1.6,
-                      label=f"dEA/dθ ({lc})")
-    ax_a.axhline(0, color="0.4", lw=0.6, linestyle="--")
-    ax_a.set_xlabel(r"Angle $\theta$ (°)")
-    ax_a.set_ylabel(r"$\partial$EA / $\partial\theta$  (J/°)")
-    ax_a.set_title("Forward-map sensitivity", fontsize=_t_dense, fontweight="bold", pad=4)
-    ax_a.legend(loc="upper left", fontsize=10, framealpha=0.92)
-    ax_a.grid(True, alpha=0.3)
-    _panel_label(ax_a, "a")
-
-    # (b) GP-BO objective landscape for one target — pick first with landscape
-    drew_b = False
-    if all_inverse_results:
-        for res in all_inverse_results:
-            sl = res.get("solution_landscape")
-            if sl is None:
-                continue
-            tid = res.get("target_info", {}).get("id", "T?")
-            t = np.asarray(sl.get("theta_grid", []))
-            if t.size == 0:
-                continue
-            # Derive LC list from keys: "J_LC1", "J_LC2", ...
-            lcs_in = [k[2:] for k in sl.keys() if k.startswith("J_")]
-            for lc in lcs_in:
-                j = np.asarray(sl[f"J_{lc}"])
-                if j.size != t.size:
-                    continue
-                ax_b.plot(t, j, color=COLORS.get(lc, "gray"),
-                          linestyle=LINESTYLES.get(lc, "-"), lw=1.4,
-                          label=f"{tid} • {lc}")
-                # mark stored local minima (compute_solution_landscape persists them)
-                local_minima = sl.get(f"local_minima_{lc}", []) or []
-                if local_minima:
-                    lm_t = [m["theta"] for m in local_minima]
-                    lm_j = [m["J"] for m in local_minima]
-                    ax_b.scatter(lm_t, lm_j, color=COLORS.get(lc, "gray"),
-                                 marker="v", s=44, edgecolors="black", lw=0.5,
-                                 zorder=5)
-            drew_b = True
-            break
-    if not drew_b:
-        ax_b.text(0.5, 0.5, "no landscape data", ha="center", va="center",
-                  transform=ax_b.transAxes, fontsize=12)
-    ax_b.set_xlabel(r"Angle $\theta$ (°)")
-    ax_b.set_ylabel(r"BO objective $J(\theta, LC)$")
-    ax_b.set_title("BO objective landscape", fontsize=_t_dense, fontweight="bold", pad=4)
-    if ax_b.get_legend_handles_labels()[0]:
-        ax_b.legend(loc="upper left", fontsize=10, framealpha=0.92)
-    ax_b.grid(True, alpha=0.3)
-    _panel_label(ax_b, "b")
-
-    # (c) Ensemble disagreement σ(θ, LC) — std across members from landscape_df
-    if landscape_df is not None and not landscape_df.empty:
-        for lc in sorted(landscape_df["lc"].unique()):
-            sub = landscape_df[landscape_df["lc"] == lc].sort_values("angle")
-            for col, ylab in [("EA_std", "σ(EA)"), ("IPF_std", "σ(IPF)")]:
-                if col not in sub.columns:
-                    continue
-                ax_c.plot(sub["angle"], sub[col], color=COLORS.get(lc, "gray"),
-                          linestyle="-" if "EA" in col else "--", lw=1.4,
-                          label=f"{ylab} {lc}")
-    ax_c.set_xlabel(r"Angle $\theta$ (°)")
-    ax_c.set_ylabel("Ensemble disagreement (std)")
-    ax_c.set_title("Ensemble disagreement", fontsize=_t_dense, fontweight="bold", pad=4)
-    ax_c.legend(loc="upper left", fontsize=10, framealpha=0.92)
-    ax_c.grid(True, alpha=0.3)
-    _panel_label(ax_c, "c")
-
-    # Shortened suptitle — the descriptive subclause belongs in the caption.
-    fig.suptitle("Inverse problem ill-posedness",
-                 fontweight="bold")
-    apply_fig_style(fig)
-    return _savefig(fig, output_dir, "Fig05_ill_posedness.png", logger)
-
-
-# =============================================================================
-# FIGURE 6 — LC plausibility classifier diagnostics (4 panels)
-# =============================================================================
-def fig_06_classifier(clf_diag: Dict, output_dir: str,
-                         logger: logging.Logger) -> str:
-    """Fig. 6: confusion matrix, ROC, PR, and reliability for the calibrated
-    soft-voting LC classifier (LOO cross-validation)."""
-    set_publication_style()
-    if not clf_diag or "cv_y" not in clf_diag:
-        logger.warning("  Fig. 6 skipped — classifier diagnostics absent.")
-        return ""
-    y    = np.asarray(clf_diag["cv_y"], dtype=int)
-    pred = np.asarray(clf_diag["cv_pred"], dtype=int)
-    pr   = np.asarray(clf_diag["cv_prob_lc2"], dtype=np.float64)
-    if len(y) < 4 or np.unique(y).size < 2:
-        logger.warning("  Fig. 6 skipped — need both classes in CV labels.")
-        return ""
-
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 11 / 13),
-                     constrained_layout=True)
-    gs  = fig.add_gridspec(2, 2)
-    ax_a = fig.add_subplot(gs[0, 0])
-    ax_b = fig.add_subplot(gs[0, 1])
-    ax_c = fig.add_subplot(gs[1, 0])
-    ax_d = fig.add_subplot(gs[1, 1])
-
-    # (a) confusion matrix
-    cm = confusion_matrix(y, pred, labels=[0, 1])
-    im = ax_a.imshow(cm, cmap="Blues")
-    ax_a.set_xticks([0, 1], ["Pred LC1", "Pred LC2"])
-    ax_a.set_yticks([0, 1], ["True LC1", "True LC2"])
-    for (i, j), v in np.ndenumerate(cm):
-        ax_a.text(j, i, int(v), ha="center", va="center",
-                  color="black" if cm[i, j] < cm.max() * 0.6 else "white",
-                  fontsize=14)
-    plt.colorbar(im, ax=ax_a, fraction=0.046)
-    ax_a.set_title("Confusion matrix (LOO)")
-    _panel_label(ax_a, "a")
-
-    # (b) ROC
-    fpr, tpr, _ = roc_curve(y, pr)
-    auc_v = auc(fpr, tpr)
-    ax_b.plot(fpr, tpr, color=COLORS.get("hard", "#0072B2"), lw=2.0,
-              label=f"AUC = {auc_v:.3f}")
-    ax_b.plot([0, 1], [0, 1], "k--", alpha=0.6)
-    ax_b.set_xlabel("False positive rate")
-    ax_b.set_ylabel("True positive rate")
-    ax_b.set_title("ROC")
-    ax_b.legend(loc="lower right")
-    ax_b.grid(True, alpha=0.3)
-    _panel_label(ax_b, "b")
-
-    # (c) PR
-    prec, rec, _ = precision_recall_curve(y, pr)
-    ap = average_precision_score(y, pr)
-    ax_c.plot(rec, prec, color=COLORS.get("soft", "#4DBBD5"), lw=2.0,
-              label=f"AP = {ap:.3f}")
-    ax_c.set_xlim(0, 1.02); ax_c.set_ylim(0, 1.02)
-    ax_c.set_xlabel("Recall (LC2)")
-    ax_c.set_ylabel("Precision (LC2)")
-    ax_c.set_title("Precision–recall")
-    ax_c.legend(loc="lower left")
-    ax_c.grid(True, alpha=0.3)
-    _panel_label(ax_c, "c")
-
-    # (d) calibration / reliability
-    n_bins = max(3, min(8, len(y) // 3))
-    prob_true, prob_pred = calibration_curve(y, pr, n_bins=n_bins, strategy="uniform")
-    ax_d.plot(prob_pred, prob_true, "s-",
-              color=COLORS.get("ddns", "#E69F00"), lw=1.6, ms=7,
-              label="Soft-voting")
-    ax_d.plot([0, 1], [0, 1], "k--", alpha=0.6, label="Perfect")
-    ax_d.set_xlabel("Mean predicted P(LC2)")
-    ax_d.set_ylabel("Empirical fraction LC2")
-    ax_d.set_title("Calibration")
-    ax_d.legend(loc="upper left")
-    ax_d.grid(True, alpha=0.3)
-    _panel_label(ax_d, "d")
-
-    fig.suptitle("Loading-condition plausibility classifier (LOO diagnostics)",
-                 fontweight="bold")
-    apply_fig_style(fig)
-    return _savefig(fig, output_dir, "Fig06_classifier_diagnostics.png", logger)
-
-
-# =============================================================================
-# FIGURE 7 — GP-BO inverse design (4 panels)
-# =============================================================================
-def fig_07_inverse_design(all_inverse_results: List[Dict],
-                             df_all: pd.DataFrame,
-                             inv_models: List[nn.Module],
-                             inv_scaler_disp, inv_enc, inv_params,
-                             robust_inverse_results: Optional[List[Dict]],
-                             output_dir: str, logger: logging.Logger) -> str:
-    """Fig. 7: (a) GP-BO best-objective convergence per target,
-    (b) predicted vs target EA/IPF parity with uncertainty,
-    (c) recovered design's load curve vs nearest experimental curve,
-    (d) multi-seed θ stability boxplot.
-    """
-    set_publication_style()
-    if not all_inverse_results:
-        logger.warning("  Fig. 7 skipped — no inverse results.")
-        return ""
-
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 10.5 / 14.5),
-                     constrained_layout=True)
-    gs  = fig.add_gridspec(2, 2)
-    ax_a = fig.add_subplot(gs[0, 0])
-    ax_b = fig.add_subplot(gs[0, 1])
-    ax_c = fig.add_subplot(gs[1, 0])
-    ax_d = fig.add_subplot(gs[1, 1])
-
-    cmap = plt.get_cmap("tab10", max(2, len(all_inverse_results)))
-
-    # (a) convergence traces.  ``run_inverse_design`` stores per-LC GP-BO
-    # results under ``res["gpbo"][lc]``; each contains a ``func_vals`` array
-    # of objective values per evaluation.  We plot the running-min trace.
-    for i, res in enumerate(all_inverse_results):
-        tid = res.get("target_info", {}).get("id", f"T{i+1}")
-        gp_per_lc = res.get("gpbo", {})
-        if not isinstance(gp_per_lc, dict):
-            continue
-        first_for_target = True
-        for lc_key, lc_res in gp_per_lc.items():
-            if not isinstance(lc_res, dict):
-                continue
-            y = np.asarray(lc_res.get("func_vals", []), dtype=float)
-            if y.size == 0:
-                continue
-            best = np.minimum.accumulate(y)
-            ax_a.plot(np.arange(1, best.size + 1), best,
-                      color=cmap(i),
-                      linestyle="-" if lc_key == "LC1" else "--",
-                      lw=1.2, alpha=0.85,
-                      label=tid if first_for_target else None)
-            first_for_target = False
-    ax_a.set_xlabel("Evaluation #")
-    ax_a.set_ylabel("Best objective J")
-    ax_a.set_title("GP-BO convergence per target")
-    ax_a.set_yscale("log")
-    # Legend outside the data area so it doesn't sit on top of the traces.
-    ax_a.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0),
-                fontsize=9, frameon=False, borderaxespad=0., ncol=1)
-    ax_a.grid(True, which="both", alpha=0.3)
-    _panel_label(ax_a, "a")
-
-    # (b) predicted vs target parity (EA, IPF)
-    tgt_EA, pred_EA, std_EA = [], [], []
-    tgt_IPF, pred_IPF, std_IPF = [], [], []
-    for res in all_inverse_results:
-        info = res.get("target_info", {})
-        best = res.get("gpbo_best", {})
-        if not best:
-            continue
-        tgt_EA.append(info.get("EA", float("nan")))
-        tgt_IPF.append(info.get("IPF", float("nan")))
-        pred_EA.append(best.get("pred_ea", float("nan")))
-        pred_IPF.append(best.get("pred_ipf", float("nan")))
-        std_EA.append(best.get("pred_ea_std", 0.0))
-        std_IPF.append(best.get("pred_ipf_std", 0.0))
-    if tgt_EA:
-        ax_b.errorbar(tgt_EA, pred_EA, yerr=2*np.array(std_EA),
-                      fmt="o", color="#0072B2", capsize=3, label="EA (J)",
-                      ms=8, alpha=0.85)
-        ax_b.errorbar(tgt_IPF, pred_IPF, yerr=2*np.array(std_IPF),
-                      fmt="s", color="#D55E00", capsize=3, label="IPF (kN)",
-                      ms=8, alpha=0.85)
-        all_v = np.concatenate([np.asarray(tgt_EA + pred_EA + tgt_IPF + pred_IPF, dtype=float)])
-        all_v = all_v[np.isfinite(all_v)]
-        if all_v.size:
-            mn, mx = float(all_v.min()), float(all_v.max())
-            pad = 0.05 * (mx - mn + 1e-9)
-            ax_b.plot([mn - pad, mx + pad], [mn - pad, mx + pad], "k--",
-                      lw=0.9, alpha=0.6)
-            ax_b.set_xlim(mn - pad, mx + pad)
-            ax_b.set_ylim(mn - pad, mx + pad)
-    ax_b.set_xlabel("Target value")
-    ax_b.set_ylabel("Recovered value (mean ± 2σ)")
-    ax_b.set_title("Recovered vs target value")
-    ax_b.legend(loc="upper left", fontsize=10, framealpha=0.92)
-    ax_b.grid(True, alpha=0.3)
-    _panel_label(ax_b, "b")
-
-    # (c) recovered curve vs nearest experimental
-    drew_c = False
-    for i, res in enumerate(all_inverse_results[:3]):  # limit to 3 for legibility
-        info = res.get("target_info", {})
-        best = res.get("gpbo_best", {})
-        if not best:
-            continue
-        ang  = float(best.get("x_best", float("nan")))
-        lc   = best.get("lc", best.get("best_lc", ""))
-        if not lc or not np.isfinite(ang):
-            continue
-        d_end = disp_end_mm(lc)
-        disps = np.linspace(0.0, d_end, get_n_steps_curve(lc))
-        Fm, _, _, _ = predict_curve_ensemble(
-            inv_models, "hard", ang, lc, disps, inv_scaler_disp, inv_enc, inv_params)
-        ax_c.plot(disps, Fm, color=cmap(i), lw=1.6,
-                  label=f"{info.get('id', f'T{i+1}')}: pred θ={ang:.1f}° {lc}")
-        # nearest experimental angle for the same LC
-        exp_ang = sorted(df_all[df_all["LC"] == lc]["Angle"].unique())
-        if exp_ang:
-            nearest = exp_ang[int(np.argmin([abs(a - ang) for a in exp_ang]))]
-            sub = df_all[(df_all["LC"] == lc) & (df_all["Angle"] == nearest)].sort_values("disp_mm")
-            if not sub.empty:
-                ax_c.plot(sub["disp_mm"], sub["load_kN"],
-                          color=cmap(i), linestyle="--", lw=1.0, alpha=0.6,
-                          label=f"  exp θ={nearest:.0f}° {lc}")
-        drew_c = True
-    if not drew_c:
-        ax_c.text(0.5, 0.5, "no recovered curves", ha="center", va="center",
-                  transform=ax_c.transAxes, fontsize=12)
-    ax_c.set_xlabel("Displacement d (mm)")
-    ax_c.set_ylabel("Load F (kN)")
-    ax_c.set_title("Recovered curves vs experiment")
-    # Outside-axes legend so traces are not occluded.
-    ax_c.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0),
-                fontsize=8, frameon=False, borderaxespad=0., ncol=1)
-    ax_c.grid(True, alpha=0.3)
-    _panel_label(ax_c, "c")
-
-    # (d) multi-seed θ stability — ``run_inverse_design_robust`` returns
-    # aggregates (``gpbo_x_mean``, ``gpbo_x_std``, plus min/max in
-    # ``gpbo_restart_summary``).  We plot mean ± std as error bars and shade
-    # the [min, max] envelope so a single chart shows central tendency and
-    # extremes simultaneously.
-    if robust_inverse_results:
-        labels, means, stds, mins, maxs = [], [], [], [], []
-        for r in robust_inverse_results:
-            tid = r.get("target_info", {}).get("id", "T?")
-            mu  = r.get("gpbo_x_mean", float("nan"))
-            sd  = r.get("gpbo_x_std",  float("nan"))
-            rs  = r.get("gpbo_restart_summary", {}) or {}
-            lo  = rs.get("theta_best_min", mu - sd)
-            hi  = rs.get("theta_best_max", mu + sd)
-            if np.isfinite(mu):
-                labels.append(tid); means.append(mu); stds.append(sd)
-                mins.append(lo);    maxs.append(hi)
-        if labels:
-            x = np.arange(len(labels))
-            arr_means = np.asarray(means); arr_stds = np.asarray(stds)
-            arr_mins  = np.asarray(mins);  arr_maxs = np.asarray(maxs)
-            ax_d.fill_between(x, arr_mins, arr_maxs, alpha=0.18,
-                              color="#0072B2", label="[min, max]")
-            ax_d.errorbar(x, arr_means, yerr=arr_stds, fmt="o", color="#0072B2",
-                          ms=10, capsize=5, lw=1.4, label=r"mean ± 1σ")
-            ax_d.set_xticks(x, labels)
-        else:
-            ax_d.text(0.5, 0.5, "no multi-seed data", ha="center", va="center",
-                      transform=ax_d.transAxes, fontsize=12)
-    else:
-        ax_d.text(0.5, 0.5, "no multi-seed data", ha="center", va="center",
-                  transform=ax_d.transAxes, fontsize=12)
-    ax_d.set_xlabel("Target")
-    ax_d.set_ylabel(r"Recovered angle $\theta$ (°)")
-    ax_d.set_title(r"Multi-seed θ stability")
-    if ax_d.get_legend_handles_labels()[0]:
-        ax_d.legend(loc="upper left", fontsize=10, framealpha=0.92)
-    ax_d.grid(True, axis="y", alpha=0.3)
-    _panel_label(ax_d, "d")
-
-    fig.suptitle("Inverse design via GP-Bayesian optimisation",
-                 fontweight="bold")
-    apply_fig_style(fig)
-    return _savefig(fig, output_dir, "Fig07_inverse_design.png", logger)
-
-
-# =============================================================================
-# FIGURE 8 — Multi-objective Pareto sweep (3 panels)
-# =============================================================================
-def fig_08_pareto(pareto_df: pd.DataFrame, landscape_df: pd.DataFrame,
-                     output_dir: str, logger: logging.Logger) -> str:
-    """Fig. 8: (a) EA vs IPF Pareto front coloured by α,
-    (b) optimal θ vs α with LC transitions,
-    (c) J(θ, α) heat-map (LC1 and LC2 stacked).
-    """
-    set_publication_style()
-    # 3 panels @ 7.48 in — shrink subplot titles and let constrained_layout
-    # handle colorbar + suptitle spacing.
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 6.0 / 16),
-                     constrained_layout=True)
-    gs  = fig.add_gridspec(1, 3)
-    ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
-    _t_dense = _BASE_FONT_AT_FULL_WIDTH["title_dense"]
-
-    if pareto_df is not None and not pareto_df.empty and {"EA", "IPF", "alpha"} <= set(pareto_df.columns):
-        sc = ax_a.scatter(pareto_df["EA"], pareto_df["IPF"],
-                          c=pareto_df["alpha"], cmap="viridis", s=44,
-                          edgecolors="black", lw=0.4)
-        cb = plt.colorbar(sc, ax=ax_a, fraction=0.05, pad=0.03)
-        cb.set_label(r"weight $\alpha$ (EA priority)")
-        ax_a.set_xlabel(f"EA@{int(D_COMMON)}mm (J)")
-        ax_a.set_ylabel("IPF (kN)")
-        ax_a.set_title("Pareto front EA–IPF",
-                       fontsize=_t_dense, fontweight="bold", pad=4)
-    ax_a.grid(True, alpha=0.3)
-    _panel_label(ax_a, "a")
-
-    # (b) optimal θ vs α   (pareto_df column is 'angle', not 'theta')
-    if pareto_df is not None and not pareto_df.empty and {"alpha", "angle"} <= set(pareto_df.columns):
-        lcs_unique = sorted(pareto_df["lc"].unique()) if "lc" in pareto_df.columns else [None]
-        for lc in lcs_unique:
-            if lc is None:
-                sub = pareto_df.sort_values("alpha")
-            else:
-                sub = pareto_df[pareto_df["lc"] == lc].sort_values("alpha")
-            if sub.empty:
-                continue
-            ax_b.plot(sub["alpha"], sub["angle"],
-                      color=COLORS.get(lc, "black"),
-                      marker=MARKERS.get(lc, "o"),
-                      linestyle=LINESTYLES.get(lc, "-"),
-                      lw=1.4, ms=6, label=str(lc) if lc else "Pareto")
-    ax_b.set_xlabel(r"weight $\alpha$ (EA priority)")
-    ax_b.set_ylabel(r"Optimal $\theta^\ast$ (°)")
-    ax_b.set_title(r"Optimal θ vs α",
-                   fontsize=_t_dense, fontweight="bold", pad=4)
-    ax_b.legend(loc="upper left", title="LC", fontsize=10, framealpha=0.92)
-    ax_b.grid(True, alpha=0.3)
-    _panel_label(ax_b, "b")
-
-    # (c) J(θ, α) heat-map — combined LC1+LC2 (best per α, θ).  ``pareto_df``
-    # carries one row per (α, candidate-angle, lc); pivoting by (α, angle) and
-    # taking the minimum J across LCs gives the achievable objective surface.
-    # ``landscape_df`` lacks both ``alpha`` and ``J`` columns by construction,
-    # so only ``pareto_df`` is read here.
-    if pareto_df is not None and not pareto_df.empty and {"alpha", "angle", "J"} <= set(pareto_df.columns):
-        piv = pareto_df.pivot_table(index="alpha", columns="angle",
-                                    values="J", aggfunc="min")
-        if not piv.empty:
-            im = ax_c.imshow(piv.values, aspect="auto", origin="lower",
-                             cmap="viridis_r",
-                             extent=[float(piv.columns.min()), float(piv.columns.max()),
-                                     float(piv.index.min()),   float(piv.index.max())])
-            cb = plt.colorbar(im, ax=ax_c, fraction=0.05, pad=0.03)
-            cb.set_label("min objective J")
-            ax_c.set_xlabel(r"angle $\theta$ (°)")
-            ax_c.set_ylabel(r"weight $\alpha$")
-            ax_c.set_title(r"J(θ, α) min over LC",
-                           fontsize=_t_dense, fontweight="bold", pad=4)
-    else:
-        ax_c.text(0.5, 0.5, "no landscape data", ha="center", va="center",
-                  transform=ax_c.transAxes, fontsize=12)
-    _panel_label(ax_c, "c")
-
-    fig.suptitle(f"Multi-objective design space — EA@{int(D_COMMON)}mm vs IPF",
-                 fontweight="bold")
-    apply_fig_style(fig)
-    return _savefig(fig, output_dir, "Fig08_pareto.png", logger)
-
-
-# =============================================================================
-# FIGURE 9 — Pareto-target recovery (2 panels)
-# =============================================================================
-def fig_09_pareto_recovery(pareto_inverse_results: Optional[List[Dict]],
-                              pareto_targets: Optional[List[Dict]],
-                              output_dir: str, logger: logging.Logger) -> str:
-    """Fig. 9: GP-BO recovery on Pareto-optimal targets — recovered θ vs reference
-    (parity) and per-target angle error with LC-match indicator."""
-    set_publication_style()
-    if not pareto_inverse_results or not pareto_targets:
-        logger.info("  Fig. 9 skipped — no Pareto-target recovery results.")
-        return ""
-
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.6 / 13),
-                     constrained_layout=True)
-    gs  = fig.add_gridspec(1, 2)
-    ax_a, ax_b = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])
-
-    ref_theta, rec_theta, lc_match, ids = [], [], [], []
-    for tgt, res in zip(pareto_targets, pareto_inverse_results):
-        ref_theta.append(float(tgt.get("angle_hint", float("nan"))))
-        rec_theta.append(float(res.get("gpbo_best", {}).get("x_best", float("nan"))))
-        lc_match.append(res.get("gpbo_best", {}).get("lc", "") == tgt.get("lc_hint", ""))
-        ids.append(str(tgt.get("id", "")))
-
-    # (a) parity θ_recovered vs θ_reference
-    ref = np.asarray(ref_theta); rec = np.asarray(rec_theta)
-    colors = ["#009E73" if m else "#D55E00" for m in lc_match]
-    ax_a.scatter(ref, rec, c=colors, s=80, edgecolors="black", lw=0.6, zorder=4)
-    for i, txt in enumerate(ids):
-        ax_a.annotate(txt, (ref[i], rec[i]), textcoords="offset points",
-                      xytext=(6, 6), fontsize=12)
-    if np.isfinite(ref).any() and np.isfinite(rec).any():
-        mn = float(np.nanmin([ref.min(), rec.min()])) - 1.0
-        mx = float(np.nanmax([ref.max(), rec.max()])) + 1.0
-        ax_a.plot([mn, mx], [mn, mx], "k--", lw=0.9, alpha=0.6)
-        ax_a.set_xlim(mn, mx); ax_a.set_ylim(mn, mx)
-    ax_a.set_aspect("equal", adjustable="box")
-    ax_a.set_xlabel(r"Pareto reference $\theta$ (°)")
-    ax_a.set_ylabel(r"GP-BO recovered $\theta$ (°)")
-    ax_a.set_title("Pareto-target recovery (parity)")
-    legend_h = [plt.Line2D([0], [0], marker="o", color="w",
-                           markerfacecolor="#009E73", markeredgecolor="black",
-                           markersize=10, label="LC matches reference"),
-                plt.Line2D([0], [0], marker="o", color="w",
-                           markerfacecolor="#D55E00", markeredgecolor="black",
-                           markersize=10, label="LC mismatch")]
-    ax_a.legend(handles=legend_h, loc="upper left", fontsize=10, framealpha=0.92)
-    ax_a.grid(True, alpha=0.3)
-    _panel_label(ax_a, "a")
-
-    # (b) per-target angle error
-    err = np.abs(rec - ref)
-    bars = ax_b.bar(ids, err, color=colors, edgecolor="black", lw=0.6)
-    for b, e in zip(bars, err):
-        if np.isfinite(e):
-            ax_b.text(b.get_x() + b.get_width()/2, e + 0.05,
-                      f"{e:.1f}°", ha="center", va="bottom", fontsize=12)
-    ax_b.set_xlabel("Pareto target")
-    ax_b.set_ylabel(r"$|\theta_{\mathrm{rec}} - \theta_{\mathrm{ref}}|$ (°)")
-    ax_b.set_title("Recovery angle error")
-    ax_b.grid(True, axis="y", alpha=0.3)
-    _panel_label(ax_b, "b")
-
-    fig.suptitle("Pareto-optimal target recovery",
-                 fontweight="bold")
-    apply_fig_style(fig)
-    return _savefig(fig, output_dir, "Fig09_pareto_recovery.png", logger)
-
-
-# =============================================================================
-# FIGURE 10 — Robustness & sensitivity (3 panels)
-# =============================================================================
-def fig_10_robustness(lambda_diag: Optional[pd.DataFrame],
-                         dcommon_diag: Optional[pd.DataFrame],
-                         classifier_ablation_diag: Optional[pd.DataFrame],
-                         output_dir: str, logger: logging.Logger) -> str:
-    """Fig. 10: (a) λ-sensitivity of the classifier penalty,
-    (b) D_COMMON sensitivity of the EA metric,
-    (c) classifier ablation (with vs without penalty).
-    """
-    set_publication_style()
-    # 3 panels @ 7.48 in — title_dense + constrained_layout.
-    fig = plt.figure(figsize=(PRINT_WIDTH_IN, PRINT_WIDTH_IN * 5.8 / 16),
-                     constrained_layout=True)
-    gs  = fig.add_gridspec(1, 3)
-    ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
-    _t_dense = _BASE_FONT_AT_FULL_WIDTH["title_dense"]
-
-    # (a) λ-sensitivity
-    if lambda_diag is not None and not lambda_diag.empty and "lambda" in lambda_diag.columns:
-        x = lambda_diag["lambda"].values
-        if "ea_err_pct" in lambda_diag.columns:
-            ax_a.plot(x, lambda_diag["ea_err_pct"], "o-",
-                      color="#0072B2", label="EA error (%)")
-        if "ipf_err_pct" in lambda_diag.columns:
-            ax_a.plot(x, lambda_diag["ipf_err_pct"], "s--",
-                      color="#D55E00", label="IPF error (%)")
-        ax_a.set_xscale("log")
-        ax_a.set_xlabel(r"classifier penalty $\lambda$")
-        ax_a.set_ylabel("Inverse-design error (%)")
-        ax_a.set_title(r"$\lambda$-sensitivity",
-                       fontsize=_t_dense, fontweight="bold", pad=4)
-        ax_a.legend(loc="upper left", fontsize=10, framealpha=0.92)
-    else:
-        ax_a.text(0.5, 0.5, "no λ-sensitivity data", ha="center", va="center",
-                  transform=ax_a.transAxes, fontsize=12)
-    ax_a.grid(True, which="both", alpha=0.3)
-    _panel_label(ax_a, "a")
-
-    # (b) D_COMMON sensitivity
-    if dcommon_diag is not None and not dcommon_diag.empty and "d_common" in dcommon_diag.columns:
-        for lc in sorted(dcommon_diag.get("lc", pd.Series(["all"])).unique()):
-            sub = dcommon_diag[dcommon_diag["lc"] == lc] if "lc" in dcommon_diag.columns else dcommon_diag
-            if "EA_mean" in sub.columns and "EA_std" in sub.columns:
-                ax_b.errorbar(sub["d_common"], sub["EA_mean"],
-                              yerr=2*sub["EA_std"],
-                              marker=MARKERS.get(lc, "o"),
-                              color=COLORS.get(lc, "black"), lw=1.4, capsize=3,
-                              label=str(lc))
-    else:
-        ax_b.text(0.5, 0.5, "no D_COMMON sweep data", ha="center", va="center",
-                  transform=ax_b.transAxes, fontsize=12)
-    ax_b.axvline(D_COMMON, color="0.4", linestyle=":", lw=0.9,
-                 label=f"adopted d*={int(D_COMMON)}mm")
-    ax_b.set_xlabel(r"common displacement $d^\ast$ (mm)")
-    ax_b.set_ylabel(r"EA at $d^\ast$ (J)")
-    ax_b.set_title(r"$D_{\mathrm{common}}$ sensitivity",
-                   fontsize=_t_dense, fontweight="bold", pad=4)
-    ax_b.legend(loc="upper left", title="LC", fontsize=10, framealpha=0.92)
-    ax_b.grid(True, alpha=0.3)
-    _panel_label(ax_b, "b")
-
-    # (c) classifier ablation
-    if classifier_ablation_diag is not None and not classifier_ablation_diag.empty:
-        df = classifier_ablation_diag
-        if {"Target", "With_Penalty_p_LC", "No_Penalty_p_LC"} <= set(df.columns):
-            x = np.arange(len(df))
-            with_p = pd.to_numeric(df["With_Penalty_p_LC"], errors="coerce")
-            no_p   = pd.to_numeric(df["No_Penalty_p_LC"],   errors="coerce")
-            w = 0.35
-            ax_c.bar(x - w/2, with_p, width=w, color="#009E73",
-                     edgecolor="black", lw=0.5, label="with penalty")
-            ax_c.bar(x + w/2, no_p,   width=w, color="#D55E00",
-                     edgecolor="black", lw=0.5, label="no penalty")
-            ax_c.set_xticks(x, df["Target"].astype(str))
-            ax_c.set_xlabel("Target")
-            ax_c.set_ylabel(r"$P(\mathrm{LC}\,|\,\mathrm{recovered\ design})$")
-            ax_c.set_title("Classifier ablation",
-                           fontsize=_t_dense, fontweight="bold", pad=4)
-            ax_c.legend(loc="upper left", fontsize=10, framealpha=0.92)
-        else:
-            ax_c.text(0.5, 0.5, "incompatible ablation table",
-                      ha="center", va="center", transform=ax_c.transAxes)
-    else:
-        ax_c.text(0.5, 0.5, "no classifier-ablation data",
-                  ha="center", va="center", transform=ax_c.transAxes, fontsize=12)
-    ax_c.grid(True, axis="y", alpha=0.3)
-    _panel_label(ax_c, "c")
-
-    fig.suptitle("Robustness and sensitivity",
-                 fontweight="bold")
-    apply_fig_style(fig)
-    return _savefig(fig, output_dir, "Fig10_robustness.png", logger)
-
-
-# =============================================================================
-# APPENDIX FIGURES — single-panel wrappers around the supplementary routines
-# =============================================================================
-def fig_appendix_all(forward_state: Optional[Dict],
-                        inverse_state: Optional[Dict],
-                        analysis_state: Optional[Dict],
-                        output_dir: str, logger: logging.Logger) -> None:
-    """Generate the 7 appendix figures by reusing the supplementary plotting
-    routines defined in this module.
-
-    These are already styled with apply_fig_style(); they go to the same
-    output directory but with FigAx_*.png filenames.
-    """
-    if forward_state is None:
-        return
-    dual_results = forward_state.get("dual_results")
-    df_all       = forward_state.get("df_all")
-    val_df_u     = forward_state.get("val_df_u")
-    scaler_disp_u = forward_state.get("scaler_disp_u")
-    enc_u        = forward_state.get("enc_u")
-    params_u     = forward_state.get("params_u")
-    baseline     = forward_state.get("baseline_results_u")
-    sensitivity  = forward_state.get("sensitivity_df_u")
-    calibration  = forward_state.get("calibration", {})
-
-    if dual_results is not None:
-        try: fig_training_curves(dual_results, output_dir, logger)
-        except Exception as e: logger.debug(f"  FigA1 skipped: {e}")
-        try: fig_validation_error_maps(dual_results, output_dir, logger)
-        except Exception as e: logger.debug(f"  FigA2 skipped: {e}")
-        try: fig_random_grid_curves(dual_results, df_all, output_dir, logger)
-        except Exception as e: logger.debug(f"  FigA6 skipped: {e}")
-        try: fig_model_complexity(dual_results, output_dir, logger)
-        except Exception as e: logger.debug(f"  FigA5 skipped: {e}")
-    if baseline is not None and dual_results is not None:
-        try: fig_baseline_comparison(baseline, dual_results, output_dir, logger, protocol="unseen")
-        except Exception as e: logger.debug(f"  FigA3 skipped: {e}")
-    if sensitivity is not None:
-        try: fig_hyperparam_sensitivity(sensitivity, output_dir, logger, tag="unseen")
-        except Exception as e: logger.debug(f"  FigA4 skipped: {e}")
-    if analysis_state is not None:
-        all_inv = analysis_state.get("all_inverse_results")
-        if all_inv:
-            try: fig_inverse_posterior_likelihood(all_inv, output_dir, logger)
-            except Exception as e: logger.debug(f"  FigA7 skipped: {e}")
+    return _savefig(fig, output_dir, "Fig_dataset_overview.png", logger)
 
 
 # =============================================================================
@@ -10719,7 +9848,18 @@ def run_pipeline(data_dir: str, output_dir: str,
 def _render_all_figures(forward_state: Dict, inverse_state: Dict,
                             analysis_state: Dict, output_dir: str,
                             logger: logging.Logger) -> None:
-    """Produce the 10 manuscript figures + 7 appendix figures from bundles."""
+    """Render the full focused figure suite from already-prepared bundles.
+
+    Each figure handles ONE analysis (parity, residuals, calibration, etc.)
+    and renders cleanly in a 3x2 grid (or smaller).  Every call is guarded
+    by data availability so missing bundles silently skip their figures
+    rather than crashing the replot.
+
+    The figure inventory roughly matches the v16 / v17 focused-figure suite,
+    plus a few project-specific additions (validation error maps,
+    classifier decision boundary, jacobian) that were already in this
+    module.
+    """
     set_publication_style()
     F = forward_state or {}
     I = inverse_state or {}
@@ -10732,12 +9872,17 @@ def _render_all_figures(forward_state: Dict, inverse_state: Dict,
     scaler_disp_u= F.get("scaler_disp_u")
     enc_u        = F.get("enc_u")
     params_u     = F.get("params_u")
+    baseline_u   = F.get("baseline_results_u")
+    sensitivity_u= F.get("sensitivity_df_u")
 
     inv_models   = I.get("inv_models")
     inv_sd       = I.get("inv_scaler_disp")
     inv_en       = I.get("inv_enc")
     inv_p        = I.get("inv_params")
     clf_diag     = I.get("clf_diag")
+    cal_ens      = I.get("cal_ens")
+    clf_feat_sc  = I.get("clf_feat_scaler")
+    df_metrics_i = I.get("df_metrics")
 
     all_inv      = A.get("all_inverse_results")
     robust_inv   = A.get("robust_inverse_results")
@@ -10749,35 +9894,144 @@ def _render_all_figures(forward_state: Dict, inverse_state: Dict,
     lambda_diag  = A.get("lambda_sweep_df")
     dcommon_diag = A.get("dcommon_diag")
     clf_ab_diag  = A.get("classifier_ablation_diag")
+    inv_targets  = A.get("inverse_targets")
 
-    # Manuscript figures
+    def _try(name: str, fn, *args, **kwargs):
+        """Call ``fn`` and log/swallow any exception."""
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:
+            logger.warning(f"  {name} skipped: {e}")
+
+    # ---- Dataset overview ----
     if df_all is not None:
-        fig_01_dataset_overview(df_all, output_dir, logger)
-    if dual_results is not None:
-        fig_02_forward_parity(dual_results, output_dir, logger)
-        if df_all is not None:
-            fig_03_unseen_generalization(dual_results, df_all, output_dir,
-                                            logger, calibration=calibration)
-        if val_df_u is not None and scaler_disp_u is not None and enc_u is not None and params_u is not None:
-            fig_04_physics_calibration(dual_results, calibration, val_df_u,
-                                          scaler_disp_u, enc_u, params_u,
-                                          output_dir, logger)
-    fig_05_ill_posedness(jacobian, all_inv, landscape_df, output_dir, logger)
-    if clf_diag is not None:
-        fig_06_classifier(clf_diag, output_dir, logger)
-    if all_inv and inv_models is not None and df_all is not None:
-        fig_07_inverse_design(all_inv, df_all, inv_models, inv_sd, inv_en,
-                                 inv_p, robust_inv, output_dir, logger)
-    if pareto_df is not None and not pareto_df.empty:
-        fig_08_pareto(pareto_df, landscape_df, output_dir, logger)
-    if pareto_inv and pareto_tgts:
-        fig_09_pareto_recovery(pareto_inv, pareto_tgts, output_dir, logger)
-    fig_10_robustness(lambda_diag, dcommon_diag, clf_ab_diag,
-                         output_dir, logger)
+        _try("Fig_dataset_overview", fig_dataset_overview,
+             df_all, output_dir, logger)
 
-    # Appendix figures (reuse the supplementary plotting routines)
-    fig_appendix_all(forward_state, inverse_state, analysis_state,
-                        output_dir, logger)
+    # ---- Forward-model accuracy figures ----
+    if dual_results is not None:
+        _try("Fig_parity_*", fig_parity_plots,
+             dual_results, output_dir, logger)
+        _try("Fig_residuals_*", fig_residual_histograms,
+             dual_results, output_dir, logger)
+        _try("Fig_boxplot_comparison", fig_boxplot_comparison,
+             dual_results, output_dir, logger)
+        _try("Fig_training_curves", fig_training_curves,
+             dual_results, output_dir, logger)
+        _try("Fig_model_complexity", fig_model_complexity,
+             dual_results, output_dir, logger)
+        _try("Fig_validation_error_maps", fig_validation_error_maps,
+             dual_results, output_dir, logger)
+        if {"random", "unseen"} & set(dual_results.keys()):
+            _try("Fig_cross_protocol", fig_cross_protocol_comparison,
+                 dual_results, output_dir, logger)
+        if df_all is not None:
+            _try("Fig_unseen_curves", fig_unseen_curves,
+                 dual_results, df_all, output_dir, logger,
+                 calibration=calibration)
+            _try("Fig_random_grid_curves", fig_random_grid_curves,
+                 dual_results, df_all, output_dir, logger)
+
+    # ---- Physics consistency + calibration ----
+    if (dual_results is not None and val_df_u is not None
+            and scaler_disp_u is not None and enc_u is not None
+            and params_u is not None):
+        _try("Fig_physics_verification", fig_physics_verification,
+             dual_results, val_df_u, scaler_disp_u, enc_u, params_u,
+             output_dir, logger)
+        _try("Fig_qq_load_residuals_unseen", fig_qq_load_residuals,
+             dual_results, output_dir, logger)
+    if calibration:
+        _try("Fig_reliability_diagram", fig_reliability_diagram,
+             calibration, output_dir, logger)
+
+    # ---- Baselines and HP sensitivity (optional) ----
+    if baseline_u is not None and dual_results is not None:
+        _try("Fig_baseline_comparison_unseen", fig_baseline_comparison,
+             baseline_u, dual_results, output_dir, logger, protocol="unseen")
+    if sensitivity_u is not None:
+        _try("Fig_hyperparam_sensitivity_unseen", fig_hyperparam_sensitivity,
+             sensitivity_u, output_dir, logger, tag="unseen")
+
+    # ---- Inverse problem ill-posedness diagnostics ----
+    if jacobian is not None:
+        _try("Fig_forward_map_jacobian", fig_forward_map_jacobian,
+             jacobian, output_dir, logger)
+    if all_inv:
+        _try("Fig_solution_landscape", fig_solution_landscape,
+             all_inv, output_dir, logger)
+        _try("Fig_inverse_posterior", fig_inverse_posterior,
+             all_inv, output_dir, logger)
+        _try("Fig_inverse_posterior_likelihood",
+             fig_inverse_posterior_likelihood,
+             all_inv, output_dir, logger)
+    if landscape_df is not None and not landscape_df.empty:
+        _try("Fig_landscape_ensemble_disagreement",
+             fig_landscape_ensemble_disagreement,
+             landscape_df, output_dir, logger)
+
+    # ---- LC plausibility classifier ----
+    if clf_diag is not None:
+        _try("Fig_lc_classifier_cv_diagnostics",
+             fig_lc_classifier_diagnostics,
+             clf_diag, output_dir, logger)
+    if (cal_ens is not None and clf_feat_sc is not None
+            and df_metrics_i is not None):
+        _try("Fig_classifier_decision_boundary",
+             fig_classifier_decision_boundary,
+             cal_ens, clf_feat_sc, df_metrics_i, output_dir, logger)
+
+    # ---- Inverse design (GP-BO target matching) ----
+    if all_inv:
+        for res in all_inv:
+            tid = (res.get("target_info") or {}).get("id", "T?")
+            _try(f"Fig_bo_convergence_{tid}", fig_bo_convergence,
+                 res, output_dir, logger, tag=tid)
+            _try(f"Fig_gpbo_posterior_evaluation_{tid}",
+                 fig_bo_posterior_evaluation,
+                 res, output_dir, logger, tag=tid)
+            _try(f"Fig_inverse_convergence_{tid}",
+                 fig_inverse_optimizer_convergence,
+                 res, output_dir, logger, tag=tid)
+        _try("Fig_optimizer_comparison", fig_optimizer_comparison,
+             all_inv, output_dir, logger)
+        _try("Fig_inverse_parity_uncertainty",
+             fig_inverse_parity_uncertainty,
+             all_inv, output_dir, logger)
+    if (all_inv and inv_models is not None and df_all is not None
+            and inv_sd is not None and inv_en is not None
+            and inv_p is not None):
+        _try("Fig_inverse_vs_nearest_experimental_curve",
+             fig_inverse_vs_nearest_experimental_curve,
+             df_all, all_inv, inv_models, inv_sd, inv_en, inv_p,
+             output_dir, logger)
+    if df_metrics_i is not None and inv_targets:
+        _try("Fig_inverse_target_feasibility", fig_target_feasibility,
+             df_metrics_i, inv_targets, output_dir, logger)
+
+    # ---- Design space sweep ----
+    if (inv_models is not None and inv_sd is not None
+            and inv_en is not None and inv_p is not None):
+        _try("Fig_design_space", fig_design_space,
+             inv_models, "hard", inv_sd, inv_en, inv_p, output_dir, logger)
+
+    # ---- Multi-objective Pareto ----
+    if pareto_df is not None and not pareto_df.empty:
+        _try("Fig_pareto_tradeoff", fig_pareto_tradeoff,
+             pareto_df, output_dir, logger)
+        if landscape_df is not None and not landscape_df.empty:
+            _try("Fig_multiobjective_heatmaps", fig_multiobjective_heatmaps,
+                 pareto_df, landscape_df, output_dir, logger,
+                 calibration=calibration)
+
+    # ---- Robustness / sensitivity sweeps ----
+    if (landscape_df is not None and not landscape_df.empty
+            and inv_models is not None and inv_sd is not None
+            and inv_en is not None and inv_p is not None):
+        _try("Fig_d_common_sensitivity_EA_vs_disp_endpoint",
+             fig_d_common_sensitivity_ea,
+             inv_models, "hard", inv_sd, inv_en, inv_p,
+             landscape_df, output_dir, logger)
 
 
 # =============================================================================

@@ -127,23 +127,33 @@ reliability diagram, same-capacity experiment, extended ablation.
 | 7817–8035 | Pipeline state save/load (`save_pipeline_state`, `load_pipeline_state`, `replot_figures_from_state`) |
 | 8036–8230 | Compute-budget summary, statistical-testing policy text, dry-run settings |
 
-### Manuscript figures (9525 – 10510)
+### Manuscript figures (focused single-purpose suite)
 
-The 10 multi-panel paper figures, each a single function with the same
-gridspec/styling discipline:
+Each figure handles ONE analysis (parity, residuals, calibration, etc.)
+and renders cleanly in a 3×2 grid or smaller — no subplot-title overflow,
+no x-label / row-2 collisions, no legend obscuring data.  See
+`paper/figures/README.md` for the full inventory; key functions:
 
-| Function | Lines | Paper figure |
-|----------|-------|--------------|
-| `fig_01_dataset_overview` | 9525–9622 | Fig. 1 — dataset summary, layup-angle distribution |
-| `fig_02_forward_parity` | 9623–9681 | Fig. 2 — parity, residuals, R² boxplots across approaches |
-| `fig_03_unseen_generalization` | 9682–9758 | Fig. 3 — load/energy curves at unseen θ=60° with conformal bands |
-| `fig_04_physics_calibration` | 9759–9906 | Fig. 4 — calibration / reliability / coverage |
-| `fig_05_ill_posedness` | 9907–10007 | Fig. 5 — solution landscape, Jacobian, multiplicity |
-| `fig_06_classifier` | 10008–10092 | Fig. 6 — LC plausibility classifier diagnostics |
-| `fig_07_inverse_design` | 10093–10271 | Fig. 7 — inverse-design recovered θ vs target |
-| `fig_08_pareto` | 10272–10349 | Fig. 8 — Pareto front (EA vs IPF) |
-| `fig_09_pareto_recovery` | 10350–10419 | Fig. 9 — recovery on Pareto-optimal targets |
-| `fig_10_robustness` | 10420–10510 | Fig. 10 — robustness, ablation, λ-sensitivity |
+| Function | Output file | Purpose |
+|----------|-------------|---------|
+| `fig_dataset_overview` | `Fig_dataset_overview.png` | Experimental curves + EA/IPF distributions |
+| `fig_parity_plots` | `Fig_parity_unseen.png` | 3×2 parity grid (approach × load/energy) |
+| `fig_residual_histograms` | `Fig_residuals_unseen.png` | 3×2 residual-histogram grid with μ/σ |
+| `fig_boxplot_comparison` | `Fig_boxplot_comparison.png` | Ensemble R² boxplots per approach |
+| `fig_unseen_curves` | `Fig_unseen_{load,energy}_curves.png` | Load + energy curves at θ\*=60° with conformal ±2σ |
+| `fig_physics_verification` | `Fig_physics_verification.png` | |∂E/∂d − F| residual histogram |
+| `fig_reliability_diagram` | `Fig_reliability_diagram.png` | Calibration (raw + conformal) |
+| `fig_lc_classifier_diagnostics` | `Fig_lc_classifier_cv_diagnostics.png` | Confusion matrix, ROC, PR, calibration |
+| `fig_bo_convergence` | `Fig_bo_convergence_T*.png` | Per-target GP-BO convergence trace |
+| `fig_inverse_parity_uncertainty` | `Fig_inverse_parity_uncertainty.png` | Recovered vs target (EA, IPF) with ±2σ |
+| `fig_pareto_tradeoff` | `Fig_pareto_tradeoff.png` | EA-IPF Pareto front |
+| `fig_multiobjective_heatmaps` | `Fig_multiobjective_heatmaps.png` | 2D objective heat-maps |
+| `fig_training_curves` | `Fig_training_curves.png` | Per-approach training loss curves |
+| `fig_model_complexity` | `Fig_model_complexity.png` | Parameter count + training time |
+
+The `_render_all_figures` orchestrator at the bottom of the module calls
+every figure whose input data is available; missing bundles silently
+skip their figures.
 
 ### Bundle save/load (9447 – 9524)
 
@@ -157,10 +167,15 @@ These three bundles are what `--mode replot` re-loads to regenerate every
 figure without retraining. The forward-only and inverse-only HPC modes
 emit the matching subset.
 
-### Appendix figures (10511 – 10844)
+### Appendix / supplementary figures
 
-`fig_appendix_all` calls 7 single-purpose appendix wrappers (per-approach
-training curves, conformal histograms, classifier confusion matrices, etc.).
+The remaining single-purpose plot routines (random-grid curves, baseline
+comparison, hyperparameter sensitivity, classifier decision boundary,
+solution landscape, inverse-posterior likelihood, validation error maps,
+Q–Q plot, etc.) are all called directly by `_render_all_figures` when
+their input data is present.  There is no longer a separate
+`fig_appendix_all` aggregator — every supplementary figure is treated as
+a first-class citizen of the focused suite.
 
 ### Pipeline and CLI (10845 – 11094)
 
