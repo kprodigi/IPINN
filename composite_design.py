@@ -3981,11 +3981,16 @@ def fig_solution_landscape(all_inverse_results, output_dir, logger):
     if not targets_with_landscape:
         return
     n = len(targets_with_landscape)
-    fig, axes = plt.subplots(1, n, figsize=(5.0 * n, 4.5), squeeze=False)
+    # Grid (<=3 per row) instead of a single 1xn strip: a 1x5 row at ~5"/panel
+    # is ~25" wide and shrinks to unreadable text when placed at column width.
+    ncols = n if n <= 3 else 3
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 3.7 * nrows), squeeze=False)
+    axes_flat = list(axes.flat)
     lc_color = {"LC1": COLORS["LC1"], "LC2": COLORS["LC2"]}
     lc_ls = {"LC1": LINESTYLES["LC1"], "LC2": LINESTYLES["LC2"]}
     for i, res in enumerate(targets_with_landscape):
-        ax = axes[0, i]
+        ax = axes_flat[i]
         sl = res["solution_landscape"]
         tid = res.get("target_info", {}).get("id", f"T{i+1}")
         for lc in sorted(k.replace("J_", "") for k in sl if k.startswith("J_")):
@@ -3997,9 +4002,11 @@ def fig_solution_landscape(all_inverse_results, output_dir, logger):
                 ax.plot(m_pt["theta"], m_pt["J"], "v", markersize=5, color=COLORS["gpbo"])
         ax.set_title(f"{tid} (SMI={sl['multiplicity_index']})")
         ax.set_xlabel(r"Angle ($^\circ$)")
-        if i == 0:
+        if i % ncols == 0:
             ax.set_ylabel(r"Objective $J(\theta)$")
         ax.legend()
+    for j in range(n, len(axes_flat)):
+        axes_flat[j].set_visible(False)
     path = os.path.join(output_dir, "Fig_solution_landscape.png")
     fig.savefig(path, dpi=600, bbox_inches="tight")
     plt.close(fig)
@@ -4042,9 +4049,13 @@ def fig_inverse_posterior(all_inverse_results, output_dir, logger):
     if not targets_with_post:
         return
     n = len(targets_with_post)
-    fig, axes = plt.subplots(1, n, figsize=(5.5 * n, 4.5), squeeze=False)
+    # Grid (<=3 per row) instead of a 1xn strip (see fig_solution_landscape).
+    ncols = n if n <= 3 else 3
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.6 * ncols, 3.7 * nrows), squeeze=False)
+    axes_flat = list(axes.flat)
     for i, res in enumerate(targets_with_post):
-        ax = axes[0, i]
+        ax = axes_flat[i]
         post = res["inverse_posterior"]
         tid = res.get("target_info", {}).get("id", f"T{i+1}")
         ax.plot(post["theta_grid"], post["posterior"], linewidth=1.0, color=COLORS["soft"])
@@ -4058,9 +4069,11 @@ def fig_inverse_posterior(all_inverse_results, output_dir, logger):
                        label=f"BO opt={bo_best['x_best']:.1f}$^\\circ$")
         ax.set_title(tid)
         ax.set_xlabel(r"Angle ($^\circ$)")
-        if i == 0:
+        if i % ncols == 0:
             ax.set_ylabel(r"$P(\theta \mid$ target$)$")
         ax.legend()
+    for j in range(n, len(axes_flat)):
+        axes_flat[j].set_visible(False)
     path = os.path.join(output_dir, "Fig_inverse_posterior.png")
     fig.savefig(path, dpi=600, bbox_inches="tight")
     plt.close(fig)
@@ -5320,10 +5333,20 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
 # =============================================================================
 # PLOTTING FUNCTIONS
 # =============================================================================
-def add_subplot_label(ax, label, x=-0.05, y=1.02):
-    """Add subplot label (a), (b), etc. — bold, positioned above the axes title."""
-    ax.text(x, y, f"({label})", transform=ax.transAxes,
-            fontweight='bold', va='top', ha='left', clip_on=False)
+def add_subplot_label(ax, label, dx=-6.0, dy=6.0):
+    """Add a bold panel label "(a)" just outside the axes' top-left corner.
+
+    Anchored to the corner (0, 1) in axes-fraction coordinates with a *points*
+    offset and right/bottom alignment, so the label grows up-and-left into the
+    empty margin.  This clears the y-tick labels (which sit below the top spine,
+    regardless of their width) and any in-axes upper-left legend, fixing the
+    text-overlap seen with the previous in-margin placement.  Clipping is
+    disabled and ``savefig(bbox_inches='tight')`` expands to include it.
+    """
+    ax.annotate(f"({label})", xy=(0.0, 1.0), xycoords="axes fraction",
+                xytext=(dx, dy), textcoords="offset points",
+                fontweight='bold', va='bottom', ha='right',
+                clip_on=False, annotation_clip=False)
 
 
 def fig_residual_histograms(dual_results: Dict, output_dir: str, logger: logging.Logger):
@@ -6072,92 +6095,61 @@ def select_most_efficient_optimizer(result: Dict, error_threshold_pct: float = 3
 
 
 def fig_optimizer_comparison(all_inverse_results: List[Dict], output_dir: str, logger: logging.Logger):
-    """GP-BO inverse design: objective convergence and final loss for each target.
+    """GP-BO inverse-design summary across all targets.
 
-    Layout: one column per target, two rows (best-so-far objective vs evaluations,
-    plus final objective bar). Only GP-BO is run in this pipeline.
-
-    The lowest-objective run per target is highlighted with a gold border.
+    A compact 1x2 panel: (a) best-so-far objective convergence overlaid for
+    every target, and (b) the converged (final) objective per target.  This
+    replaces the previous one-column-per-target grid, whose per-panel
+    single-bar charts (only GP-BO is run) read as uninformative filled boxes;
+    per-target convergence detail lives in ``Fig_inverse_convergence_T*``.
     """
     if not all_inverse_results:
         return
-    
-    # Dark, high-contrast optimizer colours
-    OPT_COLORS = {"GP-BO": COLORS["gpbo"]}
-    OPT_ORDER = ["GP-BO"]
-    # Map internal keys to display labels
-    KEY_TO_LABEL = {"gpbo_best": "GP-BO"}
-    
-    n = len(all_inverse_results)
-    ncols = min(n, 5)
-    fig, axes = plt.subplots(2, ncols, figsize=(3.6 * ncols, 7.5), squeeze=False)
-    
-    for col, result in enumerate(all_inverse_results[:ncols]):
-        tid = result.get("target_info", {}).get("id", f"T{col + 1}")
-        
-        # ---- Row 0: convergence curves ----
-        ax = axes[0, col]
-        for mkey, label, ls in [("gpbo_best", "GP-BO", "-")]:
-            if mkey in result and "best_y_history" in result[mkey]:
-                hist = result[mkey]["best_y_history"]
-                ax.plot(range(1, len(hist) + 1), hist,
-                        color=OPT_COLORS.get(label, "black"), linestyle=ls,
-                        linewidth=1.8, label=label)
-        ax.set_xlabel("Evaluations", color="black")
-        ax.set_ylabel("Best Objective", color="black")
-        ax.set_title(f"{tid}", color="black")
-        ax.tick_params(colors='black')
-        if col == 0:
-            ax.legend(framealpha=0.95, loc='upper right')
-        ax.xaxis.set_minor_locator(AutoMinorLocator())
-        ax.yaxis.set_minor_locator(AutoMinorLocator())
-        add_subplot_label(ax, chr(ord('a') + col))
-        
-        # ---- Row 1: final-objective bar chart ----
-        ax = axes[1, col]
-        names, objs, wtimes, bcolors = [], [], [], []
-        for label in OPT_ORDER:
-            mkey = {"GP-BO": "gpbo_best"}[label]
-            if mkey in result:
-                names.append(label)
-                objs.append(result[mkey]["y_best"])
-                wtimes.append(result[mkey].get("wall_time", 0))
-                bcolors.append(OPT_COLORS.get(label, "black"))
-        
-        if names:
-            x = np.arange(len(names))
-            bars = ax.bar(x, objs, color=bcolors, edgecolor='black', linewidth=1, width=0.65)
-            ax.set_xticks(x)
-            ax.set_xticklabels(names, rotation=28, ha='right', color="black")
-            ax.set_ylabel("Final Objective", color="black")
-            ax.tick_params(colors='black')
 
-            y_max = max(objs) if objs else 1
+    fig, axes = plt.subplots(1, 2, figsize=(10.0, 4.2), squeeze=False)
+    ax_conv, ax_bar = axes[0, 0], axes[0, 1]
+    cmap = plt.get_cmap("viridis", max(2, len(all_inverse_results)))
 
-            # Highlight the best optimizer with a gold border and star
-            winner = select_best_optimizer(result)
-            if winner:
-                for i, name in enumerate(names):
-                    if name == winner["name"]:
-                        bars[i].set_edgecolor('#DAA520')
-                        bars[i].set_linewidth(3.0)
-                        ax.text(
-                            bars[i].get_x() + bars[i].get_width() / 2,
-                            bars[i].get_height() + 0.08 * max(y_max, 1e-6),
-                            "[best]", ha='center', va='bottom',
-                            fontweight='bold', color='#DAA520'
-                        )
+    tids, finals, fcolors = [], [], []
+    for i, result in enumerate(all_inverse_results):
+        tid = result.get("target_info", {}).get("id", f"T{i + 1}")
+        best = result.get("gpbo_best", {})
+        color = cmap(i)
+        hist = best.get("best_y_history", [])
+        if len(hist):
+            ax_conv.plot(range(1, len(hist) + 1), hist, color=color, linewidth=1.8, label=tid)
+        if "y_best" in best:
+            tids.append(tid)
+            finals.append(float(best["y_best"]))
+            fcolors.append(color)
 
-            for bar, val in zip(bars, objs):
-                ax.text(bar.get_x() + bar.get_width() / 2,
-                        bar.get_height() + 0.03 * max(y_max, 1e-6),
-                        f'{val:.1e}', ha='center', va='bottom',
-                        fontweight='bold', color="black")
-            ax.set_ylim(0, y_max * 1.3 if y_max > 0 else 0.001)
+    # (a) convergence overlay
+    ax_conv.set_xlabel("Function evaluations")
+    ax_conv.set_ylabel("Best objective (lower is better)")
+    ax_conv.set_title("GP-BO convergence (all targets)")
+    ax_conv.xaxis.set_minor_locator(AutoMinorLocator())
+    ax_conv.yaxis.set_minor_locator(AutoMinorLocator())
+    if 0 < len(all_inverse_results) <= 8:
+        ax_conv.legend(title="Target", fontsize=8, loc="upper right", framealpha=0.92)
+    add_subplot_label(ax_conv, "a")
 
-            add_subplot_label(ax, chr(ord('a') + ncols + col))
-    
-    fig.suptitle("GP-BO inverse design: objective vs evaluations (all targets)")
+    # (b) converged objective per target
+    if tids:
+        x = np.arange(len(tids))
+        bars = ax_bar.bar(x, finals, color=fcolors, edgecolor="black", linewidth=0.7, width=0.7)
+        ax_bar.set_xticks(x)
+        ax_bar.set_xticklabels(tids)
+        ax_bar.set_xlabel("Target")
+        ax_bar.set_ylabel("Final objective")
+        ax_bar.set_title("Converged objective per target")
+        for b, val in zip(bars, finals):
+            ax_bar.annotate(f"{val:.1e}", (b.get_x() + b.get_width() / 2, b.get_height()),
+                            ha="center", va="bottom", fontsize=8, fontweight="bold",
+                            xytext=(0, 2), textcoords="offset points")
+        ax_bar.margins(y=0.18)
+    add_subplot_label(ax_bar, "b")
+
+    fig.suptitle("GP-BO inverse design summary")
     fig.savefig(os.path.join(output_dir, "Fig_optimizer_comparison.png"),
                 dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
@@ -8503,7 +8495,7 @@ def fig_inverse_parity_uncertainty(
     ax2.grid(True, alpha=0.28, linestyle="--")
     ax2.xaxis.set_minor_locator(AutoMinorLocator())
     ax2.yaxis.set_minor_locator(AutoMinorLocator())
-    add_subplot_label(ax2, "a")
+    # Single-panel figure: no "(a)" label.
     fig2.savefig(os.path.join(output_dir, "Fig_inverse_error_vs_angle.png"),
                  dpi=600, bbox_inches="tight", facecolor="white")
     plt.close(fig2)
@@ -8541,9 +8533,12 @@ def fig_validation_error_maps(
             plt.colorbar(hb, ax=ax, fraction=0.046, pad=0.02, label=title)
             ax.set_xlabel(r"Angle $\theta$ (°)")
             ax.set_ylabel("Displacement (mm)")
-            ax.set_title(f"{protocol_label(protocol)} — {MODEL_LABELS.get(approach, approach)}")
+            # Keep titles short (model name goes in the suptitle) so they do not
+            # run into the panel label in these colorbar-narrowed panels.
+            ax.set_title(protocol_label(protocol))
             ax.grid(True, alpha=0.22, linestyle="--")
             add_subplot_label(ax, chr(ord("a") + i * len(protocols) + j))
+    fig.suptitle(f"Validation error maps: {MODEL_LABELS.get(approach, approach)}")
     # constrained_layout already handles spacing — tight_layout would conflict.
     fig.savefig(
         os.path.join(output_dir, "Fig_validation_error_maps_angle_disp.png"),
@@ -8620,7 +8615,7 @@ def fig_qq_load_residuals(
         f"{MODEL_LABELS.get(approach, approach)}"
     )
     ax.grid(True, alpha=0.28, linestyle="--")
-    add_subplot_label(ax, "a")
+    # Single-panel figure: no "(a)" panel label needed.
     fig.savefig(
         os.path.join(output_dir, "Fig_qq_load_residuals_unseen.png"),
         dpi=600, bbox_inches="tight", facecolor="white",
