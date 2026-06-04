@@ -6411,6 +6411,18 @@ def fig_pareto_tradeoff(df_pareto: pd.DataFrame, output_dir: str, logger: loggin
         ax.errorbar(pareto_sorted["EA"], pareto_sorted["IPF"],
                     xerr=pareto_sorted["EA_std"], yerr=pareto_sorted["IPF_std"],
                     fmt="none", ecolor=C_GLOBAL, elinewidth=0.8, capsize=2, alpha=0.5, zorder=4)
+    # Recommended "knee": front point nearest the utopia (max EA, min IPF) in
+    # normalised objective space — an actionable single-design takeaway.
+    _ea = pareto_sorted["EA"].to_numpy(dtype=float)
+    _ipf = pareto_sorted["IPF"].to_numpy(dtype=float)
+    if _ea.size >= 3 and np.ptp(_ea) > 0 and np.ptp(_ipf) > 0:
+        nE = (_ea - _ea.min()) / np.ptp(_ea)
+        nI = (_ipf - _ipf.min()) / np.ptp(_ipf)
+        k = int(np.argmin(np.hypot(1.0 - nE, nI)))
+        ax.scatter([_ea[k]], [_ipf[k]], s=280, marker="*", facecolor="#F0E442",
+                   edgecolor="black", linewidth=1.4, zorder=7, label="Recommended (knee)")
+        ax.annotate("recommended", (_ea[k], _ipf[k]), textcoords="offset points",
+                    xytext=(6, 8), fontsize=8, fontweight="bold", zorder=8)
     ax.set_xlabel(f"Energy Absorption, EA (J)", color="black")
     ax.set_ylabel("Initial Peak Force, IPF (kN)", color="black")
     ax.tick_params(colors='black')
@@ -8127,6 +8139,10 @@ def replot_figures_from_state(state: Dict, output_dir: str, logger: logging.Logg
     os.makedirs(output_dir, exist_ok=True)
     set_publication_style()
 
+    # Conceptual schematics (data-independent) — always rendered.
+    fig_framework_schematic(output_dir, logger)
+    fig_architecture_schematic(output_dir, logger)
+
     dual_results        = state.get("dual_results")
     df_all              = state.get("df_all")
     df_metrics          = state.get("df_metrics")
@@ -8176,6 +8192,8 @@ def replot_figures_from_state(state: Dict, output_dir: str, logger: logging.Logg
         fig_baseline_comparison(baseline_results_u, dual_results, output_dir, logger, protocol="unseen")
     if sensitivity_df_u is not None:
         fig_hyperparam_sensitivity(sensitivity_df_u, output_dir, logger, tag="unseen")
+    if sensitivity_df_u is not None and len(sensitivity_df_u):
+        fig_penalty_weight_sensitivity(sensitivity_df_u, dual_results, output_dir, logger)
     if calibration:
         fig_reliability_diagram(calibration, output_dir, logger)
 
@@ -8185,6 +8203,12 @@ def replot_figures_from_state(state: Dict, output_dir: str, logger: logging.Logg
         fig_lc_classifier_diagnostics(clf_diag, output_dir, logger)
         if cal_ens is not None and clf_feat_scaler is not None and df_metrics is not None:
             fig_classifier_decision_boundary(cal_ens, clf_feat_scaler, df_metrics, output_dir, logger)
+    _clf_ab = state.get("classifier_ablation_diag")
+    if _clf_ab is not None and len(_clf_ab):
+        fig_classifier_effect(_clf_ab, output_dir, logger)
+    _lam_df = state.get("lambda_sweep_df")
+    if _lam_df is not None and len(_lam_df):
+        fig_lambda_sensitivity(_lam_df, output_dir, logger, lambda_opt=state.get("lambda_opt"))
 
     if all_inverse_results:
         logger.info("[REPLOT] Inverse-design figures")
@@ -9060,6 +9084,218 @@ def _panel_label(ax, label: str, *, x: float = -0.16, y: float = 1.06) -> None:
 
 
 # =============================================================================
+# Conceptual schematics (data-independent): framework + architectures
+# =============================================================================
+def _schematic_box(ax, cx, cy, w, h, text, *, fc="white", ec="black",
+                   fontsize=9, fontcolor="black", lw=1.3):
+    """Rounded box centred at (cx, cy) with wrapped, centred text (axes coords)."""
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (cx - w / 2, cy - h / 2), w, h,
+        boxstyle="round,pad=0.012,rounding_size=0.02",
+        linewidth=lw, edgecolor=ec, facecolor=fc, mutation_aspect=0.6, zorder=2))
+    ax.text(cx, cy, text, ha="center", va="center", fontsize=fontsize,
+            fontweight="bold", color=fontcolor, zorder=3)
+
+
+def _schematic_arrow(ax, x1, y1, x2, y2, *, color="black", style="-|>",
+                     lw=1.6, ls="-"):
+    ax.annotate("", xy=(x2, y2), xytext=(x1, y1),
+                arrowprops=dict(arrowstyle=style, color=color, lw=lw,
+                                linestyle=ls, shrinkA=2, shrinkB=2), zorder=1)
+
+
+def fig_architecture_schematic(output_dir: str, logger: logging.Logger) -> str:
+    """Schematic contrasting the three surrogate architectures and how each
+    treats the work–energy identity F = dE/dd (data-independent)."""
+    set_publication_style()
+    fig, axes = plt.subplots(1, 3, figsize=(11.0, 4.8))
+    in_txt = r"inputs:  $d,\ \sin\theta,\ \cos\theta,\ \mathrm{LC}$"
+    for ax, kind, title in [
+        (axes[0], "ddns", "DDNS — data-driven"),
+        (axes[1], "soft", "Soft-PINN — penalty"),
+        (axes[2], "hard", "Hard-PINN — exact"),
+    ]:
+        ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
+        ax.set_title(title, fontweight="bold", color=COLORS[kind])
+        col = COLORS[kind]
+        _schematic_box(ax, 0.5, 0.90, 0.94, 0.13, in_txt, fc="#EEEEEE", fontsize=8.5)
+        _schematic_box(ax, 0.5, 0.635, 0.6, 0.15, "MLP\n(Softplus)", fc="#F6F6F6")
+        _schematic_arrow(ax, 0.5, 0.825, 0.5, 0.715)
+        if kind == "ddns":
+            _schematic_box(ax, 0.27, 0.34, 0.34, 0.13, r"$\hat F$", fc="#FBE6D9", ec=col)
+            _schematic_box(ax, 0.73, 0.34, 0.34, 0.13, r"$\hat E$", fc="#FBE6D9", ec=col)
+            _schematic_arrow(ax, 0.42, 0.56, 0.30, 0.41)
+            _schematic_arrow(ax, 0.58, 0.56, 0.70, 0.41)
+            ax.text(0.5, 0.12, "two independent heads\n(no physics coupling)",
+                    ha="center", va="center", fontsize=8, style="italic")
+        elif kind == "soft":
+            _schematic_box(ax, 0.27, 0.40, 0.34, 0.13, r"$\hat F$", fc="#DCE9F5", ec=col)
+            _schematic_box(ax, 0.73, 0.40, 0.34, 0.13, r"$\hat E$", fc="#DCE9F5", ec=col)
+            _schematic_arrow(ax, 0.42, 0.56, 0.30, 0.47)
+            _schematic_arrow(ax, 0.58, 0.56, 0.70, 0.47)
+            _schematic_arrow(ax, 0.44, 0.40, 0.56, 0.40, color=col, style="<|-|>", ls="--", lw=1.4)
+            ax.text(0.5, 0.15,
+                    r"penalty $w_\phi\,\|\hat F-\partial\hat E/\partial d\|^2$",
+                    ha="center", va="center", fontsize=8.5, color=col, fontweight="bold")
+            ax.text(0.5, 0.06, "(soft; weight-tuned)", ha="center", va="center",
+                    fontsize=8, style="italic")
+        else:  # hard
+            _schematic_box(ax, 0.5, 0.40, 0.5, 0.13, r"$\hat E$  (single output)",
+                           fc="#E6E6E6", ec=col)
+            _schematic_arrow(ax, 0.5, 0.56, 0.5, 0.47)
+            _schematic_arrow(ax, 0.5, 0.335, 0.5, 0.245, color=col, lw=1.8)
+            _schematic_box(ax, 0.5, 0.16, 0.74, 0.135,
+                           r"$\hat F=\partial\hat E/\partial d$  (autograd)",
+                           fc="#1A1A1A", ec="#1A1A1A", fontcolor="white", fontsize=8.5)
+            ax.text(0.5, 0.035, "exact by construction", ha="center", va="center",
+                    fontsize=8, style="italic")
+    fig.suptitle("Surrogate architectures: physics-enforcement strategies",
+                 fontweight="bold")
+    return _savefig(fig, output_dir, "Fig_architecture_schematic.png", logger)
+
+
+def fig_framework_schematic(output_dir: str, logger: logging.Logger) -> str:
+    """End-to-end IPINN framework pipeline (data-independent graphical abstract)."""
+    set_publication_style()
+    fig, ax = plt.subplots(1, 1, figsize=(13.0, 3.4))
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
+    stages = [
+        ("Experimental\ncrush data\n(LC1, LC2;\n$\\theta\\in[45,70]^\\circ$)", "#EEEEEE"),
+        ("Three surrogates\nDDNS · Soft-PINN ·\nHard-PINN\n($M{=}20$ ensemble)", "#FBE6D9"),
+        ("Dual-protocol\nvalidation\n(random + unseen $\\theta$)\n+ conformal UQ", "#DCE9F5"),
+        ("Full-data Hard-PINN\n+ GP-BO inverse\n+ LC plausibility\nclassifier", "#E2EFE8"),
+        ("Outcomes:\ntarget matching,\nPareto EA–IPF,\nill-posedness", "#F3E6F0"),
+    ]
+    n = len(stages)
+    cxs = np.linspace(0.10, 0.90, n)
+    w, h, cy = 0.155, 0.66, 0.55
+    for i, ((text, fc), cx) in enumerate(zip(stages, cxs)):
+        ec = COLORS["hard"] if i == 1 else "black"
+        _schematic_box(ax, cx, cy, w, h, text, fc=fc, ec=ec, fontsize=8.4,
+                       lw=1.6 if i == 1 else 1.3)
+        if i > 0:
+            _schematic_arrow(ax, cxs[i - 1] + w / 2, cy, cx - w / 2, cy, lw=2.0)
+    fig.suptitle("IPINN framework: forward surrogates → inverse design → trade-off",
+                 fontweight="bold", y=1.02)
+    return _savefig(fig, output_dir, "Fig_framework_schematic.png", logger)
+
+
+# =============================================================================
+# Methodology-justification figures (classifier, sensitivity sweeps)
+# =============================================================================
+def _as_floats(seq):
+    out = []
+    for v in seq:
+        try:
+            out.append(float(str(v).replace("%", "")))
+        except (TypeError, ValueError):
+            out.append(np.nan)
+    return out
+
+
+def fig_classifier_effect(clf_ablation_df, output_dir: str, logger: logging.Logger):
+    """Effect of the LC-plausibility penalty on inverse design: the loading-mode
+    plausibility p(LC) at the recovered optimum, with vs without the classifier
+    penalty, per target.  Justifies the plausibility-gate contribution."""
+    if clf_ablation_df is None or len(clf_ablation_df) == 0:
+        return None
+    set_publication_style()
+    tids = [str(t) for t in clf_ablation_df["Target"]]
+    no_p = _as_floats(clf_ablation_df["No_Penalty_p_LC"])
+    with_p = _as_floats(clf_ablation_df["With_Penalty_p_LC"])
+    x = np.arange(len(tids)); w = 0.38
+    fig, ax = plt.subplots(1, 1, figsize=(7.4, 4.3))
+    ax.bar(x - w / 2, no_p, w, label="without penalty", color="#BBBBBB",
+           edgecolor="black", linewidth=0.8)
+    ax.bar(x + w / 2, with_p, w, label="with penalty", color=COLORS["gpbo"],
+           edgecolor="black", linewidth=0.8)
+    ax.axhline(0.5, color="0.4", lw=0.8, ls="--")
+    ax.set_xticks(x); ax.set_xticklabels(tids)
+    ax.set_xlabel("Inverse-design target")
+    ax.set_ylabel(r"$p(\mathrm{LC})$ at recovered optimum")
+    ax.set_ylim(0, 1.05)
+    ax.legend(loc="lower right", framealpha=0.95)
+    ax.set_title("Plausibility penalty steers GP-BO toward LC-consistent designs")
+    return _savefig(fig, output_dir, "Fig_classifier_effect.png", logger)
+
+
+def fig_lambda_sensitivity(lambda_df, output_dir: str, logger: logging.Logger,
+                           lambda_opt=None):
+    """Sensitivity to the classifier-penalty weight λ: target-matching error and
+    LC plausibility vs λ (λ values shown on an even axis; auto-tuned λ marked)."""
+    if lambda_df is None or len(lambda_df) == 0:
+        return None
+    set_publication_style()
+    lam = _as_floats(lambda_df["lambda"])
+    order = np.argsort(lam)
+    lam = [lam[i] for i in order]
+    ea = [_as_floats(lambda_df["EA_err%"])[i] for i in order]
+    ipf = [_as_floats(lambda_df["IPF_err%"])[i] for i in order]
+    plc = [_as_floats(lambda_df["p_LC"])[i] for i in order]
+    xi = np.arange(len(lam))
+    fig, ax = plt.subplots(1, 1, figsize=(7.4, 4.4))
+    l1 = ax.plot(xi, ea, "o-", color=COLORS["gpbo"], label="EA error (%)")
+    l2 = ax.plot(xi, ipf, "s--", color="#CC79A7", label="IPF error (%)")
+    ax.set_xticks(xi); ax.set_xticklabels([f"{v:g}" for v in lam])
+    ax.set_xlabel(r"Classifier penalty weight $\lambda$")
+    ax.set_ylabel("Target-matching error (%)")
+    ax2 = ax.twinx()
+    l3 = ax2.plot(xi, plc, "^:", color=COLORS["hard"], label=r"$p(\mathrm{LC})$ at optimum")
+    ax2.set_ylabel(r"$p(\mathrm{LC})$ at optimum"); ax2.set_ylim(0, 1.05)
+    lines = l1 + l2 + l3
+    if lambda_opt is not None:
+        try:
+            j = int(np.argmin([abs(v - float(lambda_opt)) for v in lam]))
+            ax.axvline(xi[j], color="0.3", lw=1.3, ls="-.")
+            ax.text(xi[j], ax.get_ylim()[1] * 0.96, f" auto-tuned λ={float(lambda_opt):.3g}",
+                    fontsize=8, color="0.2", ha="left", va="top")
+        except Exception:
+            pass
+    ax.legend(lines, [ln.get_label() for ln in lines], loc="best", fontsize=8, framealpha=0.95)
+    ax.set_title(r"Sensitivity to the classifier penalty weight $\lambda$")
+    return _savefig(fig, output_dir, "Fig_lambda_sensitivity.png", logger)
+
+
+def fig_penalty_weight_sensitivity(sensitivity_df, dual_results, output_dir: str,
+                                   logger: logging.Logger):
+    """Soft-PINN accuracy vs physics-penalty weight w_phi, with Hard-PINN as a
+    weight-free reference (Hard enforces the constraint by construction, so it
+    has no such knob).  Justifies the 'eliminates penalty-weight sensitivity' claim.
+
+    Derived from the hyperparameter-sensitivity sweep (``sensitivity_df`` with
+    columns w_phys, lr, load_r2, energy_r2): for each w_phys we take the best R²
+    over the learning-rate axis, i.e. the accuracy attainable at that weight.
+    """
+    if sensitivity_df is None or len(sensitivity_df) == 0:
+        return None
+    set_publication_style()
+    df = sensitivity_df.copy()
+    df["w_phys"] = _as_floats(df["w_phys"])
+    df["load_r2"] = _as_floats(df["load_r2"])
+    df["energy_r2"] = _as_floats(df["energy_r2"])
+    g = (df.groupby("w_phys", as_index=False)
+           .agg(load_r2=("load_r2", "max"), energy_r2=("energy_r2", "max"))
+           .sort_values("w_phys"))
+    w = list(g["w_phys"]); lr = list(g["load_r2"]); er = list(g["energy_r2"])
+    fig, ax = plt.subplots(1, 1, figsize=(7.4, 4.4))
+    ax.plot(w, lr, "o-", color=COLORS["soft"], label=r"Soft-PINN load $R^2$")
+    ax.plot(w, er, "s--", color="#56B4E9", label=r"Soft-PINN energy $R^2$")
+    try:
+        hm = dual_results["unseen"]["hard"]["metrics"]
+        ax.axhline(hm["load_r2"], color=COLORS["hard"], lw=1.6, ls="-",
+                   label=r"Hard-PINN load $R^2$ (no $w_\phi$ knob)")
+    except (TypeError, KeyError):
+        pass
+    ax.set_xscale("symlog", linthresh=0.1)
+    ax.set_xlim(-0.05, (max(w) * 1.6) if w else 100)  # crop empty negative decades
+    ax.set_xlabel(r"Physics-penalty weight $w_\phi$ (Soft-PINN)")
+    ax.set_ylabel(r"Validation $R^2$ (unseen $\theta$)")
+    ax.legend(loc="best", fontsize=8, framealpha=0.95)
+    ax.set_title(r"Soft-PINN depends on $w_\phi$; Hard-PINN is weight-free")
+    return _savefig(fig, output_dir, "Fig_penalty_weight_sensitivity.png", logger)
+
+
+# =============================================================================
 # Dataset overview — single focused figure (1x3 grid)
 # =============================================================================
 def fig_dataset_overview(df_all: pd.DataFrame, output_dir: str,
@@ -9710,6 +9946,10 @@ def _render_all_figures(forward_state: Dict, inverse_state: Dict,
         except Exception as e:
             logger.warning(f"  {name} skipped: {e}")
 
+    # ---- Conceptual schematics (data-independent) ----
+    _try("Fig_framework_schematic", fig_framework_schematic, output_dir, logger)
+    _try("Fig_architecture_schematic", fig_architecture_schematic, output_dir, logger)
+
     # ---- Dataset overview ----
     if df_all is not None:
         _try("Fig_dataset_overview", fig_dataset_overview,
@@ -9759,6 +9999,8 @@ def _render_all_figures(forward_state: Dict, inverse_state: Dict,
     if sensitivity_u is not None:
         _try("Fig_hyperparam_sensitivity_unseen", fig_hyperparam_sensitivity,
              sensitivity_u, output_dir, logger, tag="unseen")
+        _try("Fig_penalty_weight_sensitivity", fig_penalty_weight_sensitivity,
+             sensitivity_u, dual_results, output_dir, logger)
 
     # ---- Inverse problem ill-posedness diagnostics ----
     if jacobian is not None:
@@ -9787,6 +10029,12 @@ def _render_all_figures(forward_state: Dict, inverse_state: Dict,
         _try("Fig_classifier_decision_boundary",
              fig_classifier_decision_boundary,
              cal_ens, clf_feat_sc, df_metrics_i, output_dir, logger)
+    if clf_ab_diag is not None and len(clf_ab_diag):
+        _try("Fig_classifier_effect", fig_classifier_effect,
+             clf_ab_diag, output_dir, logger)
+    if lambda_diag is not None and len(lambda_diag):
+        _try("Fig_lambda_sensitivity", fig_lambda_sensitivity,
+             lambda_diag, output_dir, logger, lambda_opt=A.get("lambda_opt"))
 
     # ---- Inverse design (GP-BO target matching) ----
     if all_inv:

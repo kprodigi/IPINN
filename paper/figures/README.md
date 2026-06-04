@@ -9,6 +9,46 @@ analysis (parity, residuals, calibration, etc.) and renders cleanly in a
 3×2 grid (or smaller).  No subplot-title overflow, no x-label / row-2
 collisions, no legend obscuring data.
 
+## Recommended placement: main text vs supplementary
+
+**Main text:** `Fig_framework_schematic`, `Fig_architecture_schematic`,
+`Fig_dataset_overview`, `Fig_parity_unseen`, `Fig_residuals_unseen`,
+`Fig_cross_protocol`, `Fig_physics_verification`, `Fig_reliability_diagram`,
+`Fig_baseline_comparison_unseen`, `Fig_penalty_weight_sensitivity`,
+`Fig_classifier_decision_boundary`, `Fig_classifier_effect`,
+`Fig_design_space`, `Fig_pareto_tradeoff`, `Fig_multiobjective_heatmaps`,
+`Fig_solution_landscape`, `Fig_inverse_parity_uncertainty`,
+`Fig_optimizer_comparison`.
+
+**Supplementary:** the 15 per-target GP-BO traces (`Fig_bo_convergence_T*`,
+`Fig_gpbo_posterior_evaluation_T*`, `Fig_inverse_convergence_T*` — keep one
+representative + `Fig_optimizer_comparison` in the main text), plus
+`Fig_lambda_sensitivity`, `Fig_hyperparam_sensitivity_unseen`,
+`Fig_unseen_load_curves`, `Fig_unseen_energy_curves`,
+`Fig_random_grid_curves`, `Fig_qq_load_residuals_unseen`,
+`Fig_validation_error_maps_angle_disp`, `Fig_forward_map_jacobian`,
+`Fig_inverse_posterior`, `Fig_inverse_posterior_likelihood`,
+`Fig_landscape_ensemble_disagreement`, `Fig_inverse_error_vs_angle`,
+`Fig_inverse_target_feasibility`,
+`Fig_inverse_vs_nearest_experimental_curve`,
+`Fig_d_common_sensitivity_EA_vs_disp_endpoint`, `Fig_model_complexity`,
+`Fig_training_curves`.
+
+## Methodology / framework (conceptual schematics)
+
+| File | Caption summary |
+|---|---|
+| `Fig_framework_schematic.png` | End-to-end pipeline: data → three surrogates → dual-protocol validation → full-data Hard-PINN + GP-BO + LC classifier → Pareto trade-off (graphical abstract) |
+| `Fig_architecture_schematic.png` | DDNS (two independent heads), Soft-PINN (heads + soft penalty), Hard-PINN (single energy output → autograd F = ∂E/∂d) |
+
+## Methodology-justification figures
+
+| File | Caption summary |
+|---|---|
+| `Fig_penalty_weight_sensitivity.png` | Soft-PINN R² vs physics-penalty weight w_φ, with Hard-PINN as a weight-free reference line (no such knob) |
+| `Fig_classifier_effect.png` | p(LC) at the recovered optimum, with vs without the plausibility penalty, per inverse target |
+| `Fig_lambda_sensitivity.png` | Target-matching error and p(LC) vs the classifier penalty weight λ, with the auto-tuned λ marked |
+
 ## Forward model accuracy
 
 | File | Caption summary |
