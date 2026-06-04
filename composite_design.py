@@ -107,6 +107,41 @@ except (ImportError, TypeError, AttributeError) as _skopt_err:
     # Install compatible version: pip install "scikit-optimize>=0.10.1"
 
 # =============================================================================
+# OPTIONAL DISK CACHE (resume long training across interruptions / reduced runs)
+# =============================================================================
+# Opt-in via the env var IPINN_CACHE_DIR.  ``_explicit_disk_cache`` memoises a
+# unit of work (e.g. one ensemble member) under an explicit, order-independent
+# key, so an interrupted run keeps every finished unit and only recomputes the
+# rest on re-run.  Unset IPINN_CACHE_DIR (all production/HPC runs) => transparent
+# pass-through with zero behavioural change.
+import functools as _functools  # noqa: E402
+_CACHE_DIR = os.environ.get("IPINN_CACHE_DIR") or None
+
+
+def _explicit_disk_cache(key: str, compute_fn):
+    """Memoise ``compute_fn()`` to ``$IPINN_CACHE_DIR/<key>.pkl`` (resume-friendly)."""
+    if not _CACHE_DIR:
+        return compute_fn()
+    path = os.path.join(_CACHE_DIR, f"{key}.pkl")
+    if os.path.exists(path):
+        try:
+            with open(path, "rb") as fh:
+                return pickle.load(fh)
+        except Exception:
+            pass
+    result = compute_fn()
+    try:
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as fh:
+            pickle.dump(result, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+    return result
+
+
+# =============================================================================
 # LOGGING CONFIGURATION
 # =============================================================================
 class _SafeUnicodeStreamHandler(logging.StreamHandler):
@@ -462,6 +497,9 @@ class Config:
     run_inverse_member_spread: bool = True
     # CI / smoke: tiny budgets, robustness extras skipped, GP-BO replaced by coarse grid inverse.
     dry_run: bool = False
+    # Cap every training config's epochs at this value when > 0 (feasible
+    # reduced/local "real" runs; 0 = full tuned budgets).
+    max_epochs: int = 0
     show_plots: bool = False
     save_plots: bool = True
     # Convergence filter: discard members that are statistical outliers in
@@ -685,6 +723,17 @@ def get_model_config(approach: str, protocol: str = "random", w_phys_override: f
     
     cfg = {"ddns": cfg_ddns, "soft": cfg_soft, "hard": cfg_hard}[approach]
     _dry_run_shrink_training_cfg(cfg)
+    # Reduced-run mode (CFG.max_epochs>0): cap epochs and, for the tiny-batch
+    # Hard config, enlarge the batch so a feasible local run trains quickly.
+    _cap = int(getattr(CFG, "max_epochs", 0) or 0)
+    if _cap > 0:
+        if int(cfg.get("epochs", 0)) > _cap:
+            cfg["epochs"] = _cap
+            cfg["eval_every"] = max(1, min(int(cfg.get("eval_every", 20)), max(1, _cap // 8)))
+            if "warmup_epochs" in cfg:
+                cfg["warmup_epochs"] = max(2, min(int(cfg["warmup_epochs"]), max(2, _cap // 3)))
+        if int(cfg.get("batch_size", 32)) < 16:
+            cfg["batch_size"] = 64
     return cfg
 
 
@@ -2151,9 +2200,13 @@ def train_ensemble(approach: str, train_df: pd.DataFrame, val_df: pd.DataFrame,
     for m in range(CFG.n_ensemble):
         seed = CFG.seed_base + m * 1000
         try:
-            model, hist, r2, meta = train_fn(
-                train_df, val_df, scaler_disp, scaler_out, enc, params,
-                seed, protocol, logger,
+            # Per-member disk cache (resume-friendly): an interrupted ensemble
+            # keeps every finished member; re-running trains only the missing ones.
+            _mkey = f"member_{approach}_{protocol}_m{m}_ep{getattr(CFG, 'max_epochs', 0)}_seed{seed}"
+            model, hist, r2, meta = _explicit_disk_cache(
+                _mkey,
+                lambda: train_fn(train_df, val_df, scaler_disp, scaler_out, enc,
+                                 params, seed, protocol, logger),
             )
             metrics = evaluate_model(model, approach, val_df, scaler_disp, scaler_out, enc, params)
             models.append(model)
@@ -4797,6 +4850,7 @@ def run_multiobjective_sweep(models: List[nn.Module], approach: str, scaler_disp
                     best_result = {
                         "alpha": alpha, "angle": ang, "lc": lc,
                         "EA": c["EA"], "IPF": c["IPF"],
+                        "EA_std": c.get("EA_std", 0.0), "IPF_std": c.get("IPF_std", 0.0),
                         "EA_full": c["EA_full"],
                         "EA_norm": c["ea_norm"], "IPF_norm": c["ipf_norm"], "J": J,
                         "crushing_mode": "Stable" if lc == "LC1" else "Progressive/Catastrophic"
@@ -6238,14 +6292,21 @@ def fig_design_space(models: List[nn.Module], approach: str, scaler_disp: Standa
     angles = np.linspace(CFG.angle_opt_min, CFG.angle_opt_max, 26)
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
     for lc, marker, ls, color in [("LC1", "o", "-", COLORS["soft"]), ("LC2", "s", "--", COLORS["ddns"])]:
-        EA_vals, IPF_vals = [], []
+        EA_vals, IPF_vals, EA_std, IPF_std = [], [], [], []
         for ang in angles:
             m = compute_ea_ipf_ensemble(
                 models, approach, ang, lc, scaler_disp, enc, params, d_eval=D_COMMON)
             EA_vals.append(m["EA"])
             IPF_vals.append(m["IPF"])
+            EA_std.append(float(m.get("EA_std", 0.0)))
+            IPF_std.append(float(m.get("IPF_std", 0.0)))
+        EA_vals = np.asarray(EA_vals); IPF_vals = np.asarray(IPF_vals)
+        EA_std = np.asarray(EA_std);   IPF_std = np.asarray(IPF_std)
         axes[0].plot(angles, EA_vals, linestyle=ls, marker=marker, markersize=5, linewidth=1.5, label=lc, color=color, markerfacecolor='white', markeredgecolor=color)
+        # ±1σ ensemble band (epistemic spread across the M members).
+        axes[0].fill_between(angles, EA_vals - EA_std, EA_vals + EA_std, color=color, alpha=0.16, linewidth=0)
         axes[1].plot(angles, IPF_vals, linestyle=ls, marker=marker, markersize=5, linewidth=1.5, label=lc, color=color, markerfacecolor='white', markeredgecolor=color)
+        axes[1].fill_between(angles, IPF_vals - IPF_std, IPF_vals + IPF_std, color=color, alpha=0.16, linewidth=0)
     axes[0].set_xlabel("Angle $\\theta$ (°)")
     axes[0].set_ylabel(f"Energy absorption (J) @ $d$={D_COMMON:.0f} mm")
     axes[0].legend(loc='best')
@@ -6254,7 +6315,7 @@ def fig_design_space(models: List[nn.Module], approach: str, scaler_disp: Standa
     axes[1].set_ylabel("Initial Peak Force (kN)")
     axes[1].legend(loc='best')
     add_subplot_label(axes[1], 'b')
-    fig.suptitle("Design Space Predictions (Hard-PINN)")
+    fig.suptitle("Design Space Predictions (Hard-PINN; shaded ±1σ ensemble)")
     fig.savefig(os.path.join(output_dir, "Fig_design_space.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_design_space.png")
@@ -6345,6 +6406,11 @@ def fig_pareto_tradeoff(df_pareto: pd.DataFrame, output_dir: str, logger: loggin
             color=C_GLOBAL, linestyle='-', linewidth=1.5,
             marker='*', markersize=10, markerfacecolor=C_GLOBAL,
             label="Global front", zorder=5)
+    # ±1σ ensemble error bars on each Pareto-optimal design (EA and IPF).
+    if "EA_std" in pareto_sorted.columns and "IPF_std" in pareto_sorted.columns:
+        ax.errorbar(pareto_sorted["EA"], pareto_sorted["IPF"],
+                    xerr=pareto_sorted["EA_std"], yerr=pareto_sorted["IPF_std"],
+                    fmt="none", ecolor=C_GLOBAL, elinewidth=0.8, capsize=2, alpha=0.5, zorder=4)
     ax.set_xlabel(f"Energy Absorption, EA (J)", color="black")
     ax.set_ylabel("Initial Peak Force, IPF (kN)", color="black")
     ax.tick_params(colors='black')
@@ -6869,9 +6935,17 @@ def fig_baseline_comparison(baseline_results: Dict, dual_results: Dict, output_d
     for approach in ["ddns", "soft", "hard"]:
         if approach in dual_results.get(protocol, {}):
             m = dual_results[protocol][approach]["metrics"]
+            # Ensemble member spread -> error bars on the PINN bars (baselines
+            # are single models, so they carry no ensemble std).
+            _mem = dual_results[protocol][approach].get("member_metrics", [])
+            _lr = [mm["load_r2"] for mm in _mem]
+            _er = [mm["energy_r2"] for mm in _mem]
+            _dd = 1 if len(_lr) > 1 else 0
             all_results[MODEL_LABELS[approach]] = {
                 "load_r2": m["load_r2"],
                 "energy_r2": m["energy_r2"],
+                "load_r2_std": float(np.std(_lr, ddof=_dd)) if _lr else 0.0,
+                "energy_r2_std": float(np.std(_er, ddof=_dd)) if _er else 0.0,
                 "load_rmse": m["load_rmse"],
                 "energy_rmse": m["energy_rmse"],
                 "load_mae": m.get("load_mae", 0),
@@ -6899,20 +6973,24 @@ def fig_baseline_comparison(baseline_results: Dict, dual_results: Dict, output_d
     
     x = np.arange(len(models))
     
-    # Panel (a): Load R²
+    # Panel (a): Load R²  (PINN bars carry ±1σ ensemble error bars)
     ax = axes[0]
     load_r2 = [all_results[m]["load_r2"] for m in models]
-    bars = ax.bar(x, load_r2, color=colors_list, edgecolor='black', linewidth=1)
+    load_r2_err = [all_results[m].get("load_r2_std", 0.0) for m in models]
+    bars = ax.bar(x, load_r2, yerr=load_r2_err, color=colors_list, edgecolor='black',
+                  linewidth=1, capsize=3, error_kw={'linewidth': 1.0})
     ax.set_xticks(x)
     ax.set_xticklabels(models, rotation=40, ha='right')
     ax.set_ylabel("Load R²")
     ax.set_ylim(0, 1.05)
     add_subplot_label(ax, 'a')
-    
+
     # Panel (b): Energy R²
     ax = axes[1]
     energy_r2 = [all_results[m]["energy_r2"] for m in models]
-    bars = ax.bar(x, energy_r2, color=colors_list, edgecolor='black', linewidth=1)
+    energy_r2_err = [all_results[m].get("energy_r2_std", 0.0) for m in models]
+    bars = ax.bar(x, energy_r2, yerr=energy_r2_err, color=colors_list, edgecolor='black',
+                  linewidth=1, capsize=3, error_kw={'linewidth': 1.0})
     ax.set_xticks(x)
     ax.set_xticklabels(models, rotation=40, ha='right')
     ax.set_ylabel("Energy R²")
@@ -9804,6 +9882,9 @@ def main() -> None:
                         help="Output directory for figures, tables, and bundles.")
     parser.add_argument("--n_ensemble", type=int, default=20,
                         help="Forward ensemble size (default: 20).")
+    parser.add_argument("--max_epochs", type=int, default=0,
+                        help="Cap every training config's epochs at this value (>0) for "
+                             "feasible reduced/local runs; 0 = full tuned budgets (default).")
     parser.add_argument("--seed",       type=int, default=2026,
                         help="Random seed base.")
     parser.add_argument("--no_robustness", action="store_true",
@@ -9843,6 +9924,7 @@ def main() -> None:
 
     CFG.dry_run                = bool(args.dry_run)
     CFG.n_ensemble             = args.n_ensemble
+    CFG.max_epochs             = int(args.max_epochs)
     CFG.seed                   = args.seed
     CFG.seed_base              = args.seed
     CFG.split_seed             = args.seed
