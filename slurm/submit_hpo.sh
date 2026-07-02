@@ -81,7 +81,10 @@ HPO_EPOCHS="${HPO_EPOCHS:-800}"
 # matches the single-angle paper protocol; "45,60,70" gives a 3-fold subset
 # covering both boundary angles + interior; "45,50,55,60,65,70" gives full
 # 6-fold LOAO.  Per-trial cost scales linearly with the number of folds.
-LOAO_FOLDS="${LOAO_FOLDS:-60}"
+# Default 55 = INNER holdout angle so hyperparameter selection stays disjoint
+# from the reported theta*=60 generalization result (no selection
+# contamination).  Set LOAO_FOLDS=60 only to reproduce the original search.
+LOAO_FOLDS="${LOAO_FOLDS:-55}"
 N_WORKERS="${N_WORKERS:-1}"
 SEED="${SEED:-2026}"
 DATA_DIR="${DATA_DIR:-./data}"

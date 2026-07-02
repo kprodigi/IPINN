@@ -114,12 +114,20 @@ def main():
                         "same flag) and writes the resulting bundle as "
                         "``forward_<approach>_t<theta>_bundle.pt`` so LOAO "
                         "folds do not overwrite each other.")
+    p.add_argument("--protocol", choices=["unseen", "random"], default="unseen",
+                   help="Validation protocol matching the per-member jobs: "
+                        "'random' reads parts_<approach>_random/ and writes "
+                        "forward_<approach>_random_{results.json,bundle.pt} "
+                        "so the random-protocol production ensemble comes "
+                        "from the same SLURM workflow as the unseen one.")
     args = p.parse_args()
 
     # Resolve theta_star and decide the output filename suffix BEFORE
     # opening the log file, so per-fold logs go to distinct paths.
     theta_for_paths: Optional[int] = None
-    if args.theta_star is not None:
+    if args.protocol == "random":
+        approach_tag = f"{args.approach}_random"
+    elif args.theta_star is not None:
         cd.CFG.theta_star = float(args.theta_star)
         theta_for_paths = int(round(float(args.theta_star)))
         approach_tag = f"{args.approach}_t{theta_for_paths}"
@@ -139,7 +147,9 @@ def main():
     cd.refresh_device()
     cd.set_publication_style()
 
-    if theta_for_paths is not None:
+    if args.protocol == "random":
+        parts_dir = os.path.join(args.output_dir, f"parts_{args.approach}_random")
+    elif theta_for_paths is not None:
         parts_dir = os.path.join(
             args.output_dir, f"parts_{args.approach}_t{theta_for_paths}",
         )
@@ -151,7 +161,7 @@ def main():
             f"Did forward_member.py run?",
         )
 
-    cfg = cd.get_model_config(args.approach, "unseen")
+    cfg = cd.get_model_config(args.approach, args.protocol)
 
     logger.info("=" * 80)
     logger.info(f"FORWARD MERGE — approach={args.approach}")
@@ -163,7 +173,10 @@ def main():
     # Reload data & preprocessors EXACTLY as the per-member jobs did, so the
     # val-set features fed to the merged ensemble match what each member saw.
     df_all = cd.load_data(args.data_dir, logger)
-    train_df, val_df = cd.split_unseen_angle(df_all, cd.CFG.theta_star, logger)
+    if args.protocol == "random":
+        train_df, val_df = cd.split_random_80_20(df_all, cd.CFG.split_seed, logger)
+    else:
+        train_df, val_df = cd.split_unseen_angle(df_all, cd.CFG.theta_star, logger)
     scaler_disp, scaler_out, enc, params = cd.create_preprocessors(train_df, logger)
 
     # Collect partials.
@@ -314,7 +327,7 @@ def main():
     out_json = os.path.join(args.output_dir, f"forward_{approach_tag}_results.json")
     payload = _json_safe({
         "approach":             args.approach,
-        "protocol":             "unseen",
+        "protocol":             args.protocol,
         "theta_star_deg":       cd.CFG.theta_star,
         "cfg":                  cfg,
         "n_ensemble_requested": int(args.n_ensemble),

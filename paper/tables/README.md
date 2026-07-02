@@ -11,7 +11,7 @@ CSV tables that back every numerical result in the manuscript.
 | `Table3_inverse_design.csv` | Table 3 | Inverse-design recovery: target vs recovered θ, residual error, multiplicity, posterior credible intervals |
 | `Table4_model_complexity.csv` | Table 4 | Parameter counts and training time per approach |
 | `Table5_per_LC_breakdown.csv` | Table 5 | LC1 vs LC2 split of forward metrics |
-| `Table_optimizer_comparison.csv` | Table 6 | Optimizer comparison (Adam vs AdamW vs SGD) on the reference Hard-PINN |
+| `Table_optimizer_comparison.csv` | Table 6 | GP-BO inverse-design outcomes across the 5 strategic targets: best angle, selected LC, EA/IPF errors, delivered crashworthiness metrics, evaluation count, iterations-to-99%, and wall time |
 
 ## Supplementary tables
 
@@ -24,7 +24,7 @@ CSV tables that back every numerical result in the manuscript.
 | `Table_pareto_lc_dominance_audit.csv` | Pareto dominance check broken down by loading-case |
 | `Table_lambda_sensitivity.csv` | Sensitivity of inverse design to the classifier-penalty weight λ |
 | `Table_d_common_sensitivity.csv` | Sensitivity to the common-displacement (d_common) cap |
-| `Table_classifier_ablation.csv` | LC plausibility classifier — ablation across the four learner backends |
+| `Table_classifier_ablation.csv` | LC plausibility-penalty ablation: p(LC) at each inverse target with vs without the classifier penalty |
 
 ## Per-approach forward results
 

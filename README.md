@@ -24,7 +24,9 @@ held out; M=20 bootstrap ensemble; conformal-calibrated):
 | **Hard-PINN** | **0.8217** | **0.9888** |     **0.065** |    **0.046** | **20/20**   |
 
 Full results in [`paper/tables/Table1_forward_results.csv`](paper/tables/Table1_forward_results.csv).
-All 10 paper figures rendered at 600 DPI in [`paper/figures/`](paper/figures/).
+All 43 figures (main text + supplementary) rendered at 600 DPI in
+[`paper/figures/`](paper/figures/); see
+[`paper/figures/README.md`](paper/figures/README.md) for the main-vs-SI split.
 
 ---
 
@@ -40,7 +42,7 @@ IPINN/
 ├── tests/                      # 124 unit + integration tests
 ├── docs/                       # ARCHITECTURE.md (file/line map for reviewers)
 ├── paper/                      # Publication artifacts
-│   ├── figures/                # 10 main figures + appendix (PNG, 600 DPI)
+│   ├── figures/                # 43 figures: main text + SI (PNG, 600 DPI)
 │   └── tables/                 # Numerical tables (CSV) backing the manuscript
 └── CHANGELOG.md
 ```
@@ -107,20 +109,37 @@ warm-start configuration and the resume-from-preemption protocol.
 ## Methodology highlights
 
 - **Hard-PINN architecture:** single-output energy network with force
-  recovered exactly by autograd as F = ∂E/∂d, enforcing the work-energy
-  identity by construction.  Boundary conditions E(0)=0 and F(0)=0 are
-  shaped through three auxiliary soft regularisers (monotonicity, angle
+  recovered exactly by autograd as F = ∂E/∂d — the *derivative consistency*
+  F = dE/dd holds by construction.  Boundary conditions E(0)=0 and F(0)=0
+  are **not** architecturally enforced in production; they are shaped
+  through three auxiliary soft regularisers (monotonicity, angle
   smoothness, energy curvature).
 - **Soft-PINN architecture:** two-headed (F, E) network with the
   work-energy identity penalised by a soft residual loss and a paired
   E(0)/F(0) BC penalty.
 - **DDNS baseline:** data-driven only — same two-headed network, no
   physics terms.
+- **Honest-reporting note:** in the experimental data the energy channel is
+  the trapezoidal integral of the load channel (verified to machine
+  precision), so F = dE/dd holds in the data *by construction*.  The PINN
+  physics terms act as an inductive bias / structural regulariser — they are
+  not validation against an independently measured physical channel.
 - **M=20 bootstrap ensemble** with Tukey-fence convergence filter on
-  training-set R² to drop unconverged members before reporting.
-- **Conformal calibration:** split-conformal estimation of ±1σ and ±2σ
-  inflation factors so reported uncertainty bands attain nominal coverage
-  on the held-out angle.
+  training-set R²; survivor-only and all-member statistics are both
+  reported (`Mean_Member_Load_R2` vs `Mean_Member_Load_R2_all`) so the
+  filter's effect is visible.
+- **Split-conformal calibration (curve-level):** ±1σ/±2σ inflation factors
+  are fit on a calibration half of the validation *curves* and coverage is
+  reported on the held-out half — corrected coverage is a measurement, not
+  a tautology.  In-sample factors are retained under `*_insample` keys for
+  reference.
+- **Design-level validation:** predicted vs experimental EA@80mm / IPF at
+  every measured design (`Table_forward_design_errors.csv`, overlay stars in
+  `Fig_design_space`), a no-model interpolation baseline
+  (`Table_null_baseline_design_level.csv`), a deployment-time physics audit
+  (`Table_physical_plausibility_audit.csv`), and inverse-design ground-truth
+  recovery (Δθ / LC-match columns in Table 3, off-grid + infeasibility
+  verification targets in `Table_inverse_verification.csv`).
 - **Multi-start GP-BO inverse design:** 5 restarts × 20 calls/restart,
   joint kernel over continuous θ and the categorical loading case, with
   a calibrated VotingClassifier penalty enforcing LC plausibility.

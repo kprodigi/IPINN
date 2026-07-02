@@ -1114,18 +1114,29 @@ def main():
     p.add_argument("--no_warm_starts", action="store_true",
                    help="Disable the WARM_START priors and rely entirely on "
                         "the random-startup + TPE sampler.")
-    p.add_argument("--loao_folds", type=str, default="60",
-                   help="Comma-separated held-out angles (degrees) for "
-                        "leave-one-angle-out cross-validation HPO.  Default "
-                        "is '60' (single-angle protocol, current paper).  "
-                        "Use e.g. '45,60,70' for a 3-fold subset covering "
-                        "both boundary angles + interior, or "
-                        "'45,50,55,60,65,70' for full 6-fold LOAO. "
-                        "Per-trial cost scales linearly with the number of "
-                        "folds.  The objective is the mean val R^2_load "
-                        "across all (fold × seed) trainings; per-fold "
-                        "metrics are persisted on every trial.")
+    p.add_argument("--loao_folds", type=str, default="55",
+                   help="Comma-separated held-out angles (degrees) used as the "
+                        "HPO validation objective.  DEFAULT IS '55' (an INNER "
+                        "holdout angle): tuning hyperparameters on the same "
+                        "theta*=60 that the paper reports as the unseen-angle "
+                        "generalization result CONTAMINATES that result (model "
+                        "selection optimizes the reported test set).  Keep the "
+                        "HPO objective disjoint from the reported holdout.  "
+                        "Use '60' only to reproduce the original (contaminated) "
+                        "search; '45,50,55,65,70' for a 5-fold mean objective "
+                        "excluding the reported angle.  Per-trial cost scales "
+                        "linearly with the number of folds.  The objective is "
+                        "the mean val R^2_load across all (fold × seed) "
+                        "trainings; per-fold metrics are persisted per trial.")
     args = p.parse_args()
+
+    if any(abs(f - 60.0) < 1e-9 for f in
+           [float(x.strip()) for x in args.loao_folds.split(",") if x.strip()] or []):
+        print("WARNING: --loao_folds includes 60 — hyperparameters will be "
+              "selected on the SAME angle reported as the unseen-angle "
+              "generalization result (selection contamination). Use an inner "
+              "angle (default '55') unless deliberately reproducing the "
+              "original search.", file=sys.stderr)
 
     # Parse the LOAO folds (comma-separated angles in degrees).
     try:

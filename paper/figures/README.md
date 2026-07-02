@@ -9,30 +9,35 @@ analysis (parity, residuals, calibration, etc.) and renders cleanly in a
 3×2 grid (or smaller).  No subplot-title overflow, no x-label / row-2
 collisions, no legend obscuring data.
 
+**This snapshot ships 43 figures** (2 schematics + 26 analysis figures +
+15 per-target GP-BO traces).  The pipeline can additionally emit 9
+*optional* figures that depend on analysis data not included in this
+snapshot — they are listed at the end under
+[Optional figures](#optional-figures-not-included-in-this-snapshot).
+
 ## Recommended placement: main text vs supplementary
+
+Every figure named below is present on disk in this snapshot.
 
 **Main text:** `Fig_framework_schematic`, `Fig_architecture_schematic`,
 `Fig_dataset_overview`, `Fig_parity_unseen`, `Fig_residuals_unseen`,
 `Fig_cross_protocol`, `Fig_physics_verification`, `Fig_reliability_diagram`,
-`Fig_baseline_comparison_unseen`, `Fig_penalty_weight_sensitivity`,
-`Fig_classifier_decision_boundary`, `Fig_classifier_effect`,
-`Fig_design_space`, `Fig_pareto_tradeoff`, `Fig_multiobjective_heatmaps`,
+`Fig_classifier_decision_boundary`, `Fig_design_space`,
+`Fig_pareto_tradeoff`, `Fig_multiobjective_heatmaps`,
 `Fig_solution_landscape`, `Fig_inverse_parity_uncertainty`,
 `Fig_optimizer_comparison`.
 
-**Supplementary:** the 15 per-target GP-BO traces (`Fig_bo_convergence_T*`,
-`Fig_gpbo_posterior_evaluation_T*`, `Fig_inverse_convergence_T*` — keep one
-representative + `Fig_optimizer_comparison` in the main text), plus
-`Fig_lambda_sensitivity`, `Fig_hyperparam_sensitivity_unseen`,
-`Fig_unseen_load_curves`, `Fig_unseen_energy_curves`,
-`Fig_random_grid_curves`, `Fig_qq_load_residuals_unseen`,
-`Fig_validation_error_maps_angle_disp`, `Fig_forward_map_jacobian`,
-`Fig_inverse_posterior`, `Fig_inverse_posterior_likelihood`,
-`Fig_landscape_ensemble_disagreement`, `Fig_inverse_error_vs_angle`,
-`Fig_inverse_target_feasibility`,
+**Supplementary:** `Fig_boxplot_comparison`, `Fig_unseen_load_curves`,
+`Fig_unseen_energy_curves`, `Fig_validation_error_maps_angle_disp`,
+`Fig_qq_load_residuals_unseen`, `Fig_forward_map_jacobian`,
+`Fig_inverse_posterior`, `Fig_landscape_ensemble_disagreement`,
+`Fig_lc_classifier_cv_diagnostics`,
 `Fig_inverse_vs_nearest_experimental_curve`,
-`Fig_d_common_sensitivity_EA_vs_disp_endpoint`, `Fig_model_complexity`,
-`Fig_training_curves`.
+`Fig_inverse_target_feasibility`, `Fig_inverse_error_vs_angle`,
+`Fig_d_common_sensitivity_EA_vs_disp_endpoint`, plus the 15 per-target
+GP-BO traces (`Fig_bo_convergence_T*`, `Fig_gpbo_posterior_evaluation_T*`,
+`Fig_inverse_convergence_T*` — keep one representative in the main text and
+`Fig_optimizer_comparison` for the cross-target summary).
 
 ## Methodology / framework (conceptual schematics)
 
@@ -40,14 +45,6 @@ representative + `Fig_optimizer_comparison` in the main text), plus
 |---|---|
 | `Fig_framework_schematic.png` | End-to-end pipeline: data → three surrogates → dual-protocol validation → full-data Hard-PINN + GP-BO + LC classifier → Pareto trade-off (graphical abstract) |
 | `Fig_architecture_schematic.png` | DDNS (two independent heads), Soft-PINN (heads + soft penalty), Hard-PINN (single energy output → autograd F = ∂E/∂d) |
-
-## Methodology-justification figures
-
-| File | Caption summary |
-|---|---|
-| `Fig_penalty_weight_sensitivity.png` | Soft-PINN R² vs physics-penalty weight w_φ, with Hard-PINN as a weight-free reference line (no such knob) |
-| `Fig_classifier_effect.png` | p(LC) at the recovered optimum, with vs without the plausibility penalty, per inverse target |
-| `Fig_lambda_sensitivity.png` | Target-matching error and p(LC) vs the classifier penalty weight λ, with the auto-tuned λ marked |
 
 ## Forward model accuracy
 
@@ -58,27 +55,17 @@ representative + `Fig_optimizer_comparison` in the main text), plus
 | `Fig_residuals_unseen.png` | Residual histograms (load + energy) with μ/σ in each panel title |
 | `Fig_boxplot_comparison.png` | Ensemble R² distributions per approach × protocol |
 | `Fig_cross_protocol.png` | Random vs unseen protocol bar chart (R² for load + energy) |
-| `Fig_training_curves.png` | Per-approach training loss curves (M-member ensemble) |
-| `Fig_model_complexity.png` | Parameter count + training time per approach |
 | `Fig_unseen_load_curves.png` | Load curves at θ\*=60° per LC with conformal ±2σ bands |
 | `Fig_unseen_energy_curves.png` | Energy curves at θ\*=60° per LC with conformal ±2σ bands |
-| `Fig_random_grid_curves.png` | Per-(angle, LC) grid of predicted curves (random 80/20 protocol) |
-| `Fig_validation_error_maps_angle_disp.png` | Hexbin maps of pointwise |load| / |energy| errors vs (angle, displacement) |
+| `Fig_validation_error_maps_angle_disp.png` | Pointwise \|load\| / \|energy\| errors vs displacement at the held-out angle |
 
 ## Physics consistency + uncertainty calibration
 
 | File | Caption summary |
 |---|---|
-| `Fig_physics_verification.png` | |∂E/∂d − F| residual histogram per approach |
+| `Fig_physics_verification.png` | \|∂E/∂d − F\| residual histogram per approach |
 | `Fig_qq_load_residuals_unseen.png` | Normal Q–Q plot of Hard-PINN validation load residuals |
 | `Fig_reliability_diagram.png` | Observed vs nominal coverage (raw and conformal-corrected) |
-
-## Baselines and HP sensitivity (optional)
-
-| File | Caption summary |
-|---|---|
-| `Fig_baseline_comparison_unseen.png` | DDNS/Soft/Hard vs ML baselines (when baseline_results_u is present) |
-| `Fig_hyperparam_sensitivity_unseen.png` | HP sensitivity sweep (when sensitivity_df_u is present) |
 
 ## Inverse problem diagnostics
 
@@ -87,7 +74,6 @@ representative + `Fig_optimizer_comparison` in the main text), plus
 | `Fig_forward_map_jacobian.png` | Forward-map sensitivity ∂{EA, IPF}/∂θ per LC |
 | `Fig_solution_landscape.png` | GP-BO objective landscape J(θ, LC) showing local minima |
 | `Fig_inverse_posterior.png` | GP-BO posterior solutions per target |
-| `Fig_inverse_posterior_likelihood.png` | Posterior-likelihood diagnostic |
 | `Fig_landscape_ensemble_disagreement.png` | Ensemble disagreement σ(EA), σ(IPF) heat-map |
 
 ## LC plausibility classifier
@@ -101,13 +87,14 @@ representative + `Fig_optimizer_comparison` in the main text), plus
 
 | File | Caption summary |
 |---|---|
-| `Fig_bo_convergence_T*.png` | Per-target GP-BO convergence trace (best-objective + sampled θ) |
-| `Fig_gpbo_posterior_evaluation_T*.png` | Per-target GP posterior snapshots (8 iterations) |
-| `Fig_inverse_convergence_T*.png` | Per-target best-so-far objective vs evaluations |
+| `Fig_bo_convergence_T*.png` | Per-target GP-BO convergence trace (best-objective + sampled θ) — T1–T5 |
+| `Fig_gpbo_posterior_evaluation_T*.png` | Per-target GP posterior snapshots — T1–T5 |
+| `Fig_inverse_convergence_T*.png` | Per-target best-so-far objective vs evaluations — T1–T5 |
 | `Fig_optimizer_comparison.png` | GP-BO outcomes across all 5 strategic targets |
 | `Fig_inverse_parity_uncertainty.png` | Recovered vs target (EA, IPF) with ensemble ±2σ |
 | `Fig_inverse_vs_nearest_experimental_curve.png` | Recovered curve vs nearest experimental curve |
 | `Fig_inverse_target_feasibility.png` | Inverse-design target reachability on the empirical EA-IPF space |
+| `Fig_inverse_error_vs_angle.png` | Recovery error vs held-out angle |
 
 ## Design space sweep
 
@@ -128,7 +115,27 @@ representative + `Fig_optimizer_comparison` in the main text), plus
 |---|---|
 | `Fig_d_common_sensitivity_EA_vs_disp_endpoint.png` | EA(d) sensitivity vs displacement endpoint (LC1 / LC2) |
 
+## Optional figures (not included in this snapshot)
+
+The pipeline emits these figures only when the corresponding analysis data
+is produced (baseline sweep, HP sensitivity, penalty-weight / λ sweeps, the
+classifier-effect ablation, random-grid curves, per-member training curves,
+and the posterior-likelihood diagnostic).  They are **gated behind optional
+stages** (`--no_robustness` off, plus the inverse/classifier ablation
+frames) and are **not part of this 43-figure snapshot**.  Their generating
+functions exist in `composite_design.py`:
+
+| File | Caption summary |
+|---|---|
+| `Fig_baseline_comparison_unseen.png` | DDNS/Soft/Hard vs ML baselines (requires `baseline_results_u`) |
+| `Fig_hyperparam_sensitivity_unseen.png` | HP sensitivity sweep (requires `sensitivity_df_u`) |
+| `Fig_penalty_weight_sensitivity.png` | Soft-PINN R² vs physics-penalty weight w_φ, with Hard-PINN as a weight-free reference line |
+| `Fig_classifier_effect.png` | p(LC) at the recovered optimum, with vs without the plausibility penalty, per target |
+| `Fig_lambda_sensitivity.png` | Target-matching error and p(LC) vs the classifier penalty weight λ (auto-tuned λ marked) |
+| `Fig_random_grid_curves.png` | Per-(angle, LC) grid of predicted curves (random 80/20 protocol) |
+| `Fig_model_complexity.png` | Parameter count + training time per approach |
+| `Fig_training_curves.png` | Per-approach training loss curves (M-member ensemble) |
+| `Fig_inverse_posterior_likelihood.png` | Posterior-likelihood diagnostic |
+
 To regenerate from saved model bundles see the
 [project README](../../README.md#reproducing-the-figures-without-retraining).
-</content>
-</invoke>

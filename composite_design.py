@@ -174,7 +174,11 @@ _ORIG_DATAFRAME_TO_CSV = pd.DataFrame.to_csv
 def _atomic_to_csv(self, path_or_buf=None, *args, **kwargs):
     if isinstance(path_or_buf, (str, os.PathLike)):
         target = os.fspath(path_or_buf)
-        tmp = target + ".tmp"
+        # Unique tmp name (pid + monotonic counter): two concurrent jobs
+        # writing the same CSV into a shared output_dir must not race on a
+        # single deterministic "<target>.tmp".
+        _atomic_to_csv._n = getattr(_atomic_to_csv, "_n", 0) + 1
+        tmp = f"{target}.{os.getpid()}.{_atomic_to_csv._n}.tmp"
         result = _ORIG_DATAFRAME_TO_CSV(self, tmp, *args, **kwargs)
         os.replace(tmp, target)
         return result
@@ -471,6 +475,21 @@ class Config:
     """Global configuration with all parameters documented."""
     seed: int = 2026
     split_seed: int = 2026
+    # Bootstrap resampling unit: "row" (published behaviour) or "curve"
+    # (cluster bootstrap over whole (Angle, LC) curves — the exchangeable
+    # unit; see bootstrap_indices()).
+    bootstrap_unit: str = "row"
+    # Minimum surviving ensemble members before a production run aborts
+    # (dry runs only warn).  See train_ensemble().
+    min_ensemble_members: int = 3
+    # SHA-256 (short) of the loaded dataset rows; set by load_data() and
+    # stamped into every saved bundle for provenance cross-checks.
+    data_fingerprint: str = ""
+    # Curvature-penalty window (mm): 0 = penalize everywhere (published
+    # behaviour); >0 = exclude the pre-peak region below this displacement
+    # from the d²E/dd² penalty so IPF sharpness is not smoothed away (see
+    # curvature_regularization_hard()).
+    curvature_window_after_mm: float = 0.0
     test_size: float = 0.20
     n_ensemble: int = 20
     bootstrap: bool = True
@@ -518,12 +537,45 @@ CFG = Config()
 
 
 def protocol_label(protocol: str) -> str:
-    """Human-readable protocol caption (``CFG.theta_star`` for unseen holdout)."""
+    """Human-readable protocol caption (``CFG.theta_star`` for unseen holdout).
+
+    The random split is labelled for what it measures: rows are split WITHIN
+    curves (stratified by Angle×LC), so validation points sit between training
+    points on the same smooth curve.  That is reconstruction / within-curve
+    interpolation fidelity — NOT generalization to new designs, which is what
+    the unseen-angle protocol tests.  Labelling it "Random 80/20 Split" invited
+    readers to mistake ~0.99 R² for design-level generalization.
+    """
     if protocol == "random":
-        return "Random 80/20 Split"
+        return "Within-Curve Interpolation (random 80/20)"
     if protocol == "unseen":
         return rf"Unseen Angle $\theta^*={CFG.theta_star:g}^\circ$"
     return str(protocol)
+
+
+def bootstrap_indices(train_df: pd.DataFrame, rng: np.random.Generator) -> np.ndarray:
+    """Bootstrap row indices honouring ``CFG.bootstrap_unit``.
+
+    - ``"row"`` (default, paper behaviour): iid row resampling.  With densely
+      sampled curves every member sees ~63% of EVERY curve, so members are
+      near-identical and ensemble σ under-represents uncertainty (the root
+      cause of the ~3× conformal factors).
+    - ``"curve"``: cluster bootstrap at the exchangeable unit — whole
+      (Angle, LC) curves are resampled with replacement, so member-to-member
+      spread reflects which DESIGNS were seen, the statistically defensible
+      unit for design-level uncertainty.
+
+    Kept opt-in (default preserves published behaviour); switch via
+    ``CFG.bootstrap_unit = "curve"`` for reruns and report the comparison.
+    """
+    n = len(train_df)
+    if getattr(CFG, "bootstrap_unit", "row") != "curve":
+        return rng.integers(0, n, n)
+    keys = list(zip(train_df["Angle"].astype(float), train_df["LC"].astype(str)))
+    uniq = sorted(set(keys))
+    rows_by_curve = {k: np.flatnonzero([kk == k for kk in keys]) for k in uniq}
+    picked = rng.integers(0, len(uniq), len(uniq))
+    return np.concatenate([rows_by_curve[uniq[i]] for i in picked])
 
 
 def _ensemble_std_along_members(arr: np.ndarray) -> np.ndarray:
@@ -815,17 +867,148 @@ def generate_feasible_targets(df_metrics: pd.DataFrame, logger: logging.Logger,
         pos = int(round(q * denom))
         pos = min(max(pos, 0), n - 1)
         i = int(order[pos])
+        # Record the source design (the experimental row this target came
+        # from) so downstream tables can report the ground-truth recovery
+        # error Δθ = |θ_recovered − θ_source| and LC agreement — the
+        # independent check that the inverse round-trip actually works,
+        # rather than only the surrogate's self-consistency at the optimum.
+        src_row = df_metrics.iloc[i]
         targets.append({
             "id": tid,
             "EA": float(ea_c[i]),
             "IPF": float(ipf[i]),
             "d_eval": D_COMMON,
             "rationale": rat,
+            "source_angle": float(src_row["Angle"]) if "Angle" in src_row else None,
+            "source_lc": str(src_row["LC"]) if "LC" in src_row else None,
         })
     logger.info(f"  Generated paired feasible targets (EA to d={D_COMMON:.0f} mm + matching IPF):")
     for t in targets:
-        logger.info(f"    {t['id']}: EA@{D_COMMON:.0f}mm={t['EA']:.2f}J, IPF={t['IPF']:.3f}kN - {t['rationale']}")
+        logger.info(
+            f"    {t['id']}: EA@{D_COMMON:.0f}mm={t['EA']:.2f}J, IPF={t['IPF']:.3f}kN "
+            f"[source: θ={t['source_angle']}°, {t['source_lc']}] - {t['rationale']}")
     return targets
+
+
+def generate_verification_targets(models: List, approach: str,
+                                  scaler_disp, enc, params,
+                                  df_metrics: pd.DataFrame,
+                                  logger: logging.Logger) -> List[Dict]:
+    """Targets that stress the inverse map beyond trivially-recoverable rows.
+
+    The T1-T5 targets are observed experimental rows, so their recovery only
+    exercises in-distribution lookups.  This adds two harder families:
+
+    - **Off-grid targets (V1, V2):** the surrogate's own (EA, IPF) prediction
+      at non-grid angles (52.5°, 62.5°) between the measured 5°-spaced anchors.
+      The true θ is known BY CONSTRUCTION, so ``Δθ = |θ_recovered − θ_source|``
+      is an exact, non-circular test of the surrogate map's invertibility at
+      angles never present in any data row.
+    - **Infeasible target (V3):** an (EA, IPF) combination outside the
+      attainable set (EA 30% above the observed maximum at an IPF 30% below
+      the observed minimum).  A correct inverse pipeline must *flag* this as
+      non-attainable (large residual objective) rather than silently return a
+      confident but wrong design.
+    """
+    targets: List[Dict] = []
+    lc_cats = [str(x) for x in enc.categories_[0].tolist()]
+    offgrid = [(52.5, lc_cats[0]), (62.5, lc_cats[-1])]
+    for k, (ang, lc) in enumerate(offgrid, start=1):
+        try:
+            m = compute_ea_ipf_ensemble(models, approach, float(ang), lc,
+                                        scaler_disp, enc, params, d_eval=D_COMMON)
+        except Exception as exc:
+            logger.warning(f"  Verification target V{k} skipped (forward eval failed): {exc}")
+            continue
+        targets.append({
+            "id": f"V{k}",
+            "EA": float(m["EA"]),
+            "IPF": float(m["IPF"]),
+            "d_eval": D_COMMON,
+            "source_angle": float(ang),
+            "source_lc": lc,
+            "expect_feasible": True,
+            "rationale": f"Off-grid surrogate round-trip (true θ={ang}°, {lc} by construction)",
+        })
+    # Infeasible probe from the empirical attainable set.
+    if "EA_common" in df_metrics.columns and "IPF" in df_metrics.columns and len(df_metrics):
+        ea_max = float(df_metrics["EA_common"].max())
+        ipf_min = float(df_metrics["IPF"].min())
+        targets.append({
+            "id": "V3",
+            "EA": ea_max * 1.30,
+            "IPF": ipf_min * 0.70,
+            "d_eval": D_COMMON,
+            "source_angle": None,
+            "source_lc": None,
+            "expect_feasible": False,
+            "rationale": "Deliberately infeasible (EA 30% above max at IPF 30% below min) — must be flagged non-attainable",
+        })
+    logger.info(f"  Generated {len(targets)} verification targets (off-grid round-trip + infeasibility probe)")
+    return targets
+
+
+def run_verification_inverse_and_save(models: List, approach: str,
+                                      scaler_disp, enc, params,
+                                      df_metrics: pd.DataFrame,
+                                      bo_cfg, cal_ens, feat_scaler,
+                                      output_dir: str, logger: logging.Logger,
+                                      feas_rel_tol: float = 0.05) -> Optional[pd.DataFrame]:
+    """Run the verification targets and write Table_inverse_verification.csv.
+
+    ``Attainable`` is decided from the residual objective: with the 1/target²
+    weighting, sqrt(J_fit) is the combined relative (EA, IPF) error, so a
+    solution counts as attainable when that error is below ``feas_rel_tol``
+    (default 5%).  The table's headline columns are Δθ for the off-grid
+    round-trips and the Attainable verdict for the infeasibility probe.
+    """
+    v_targets = generate_verification_targets(models, approach, scaler_disp, enc,
+                                              params, df_metrics, logger)
+    if not v_targets:
+        return None
+    rows = []
+    for t in v_targets:
+        logger.info(f"  Verification inverse {t['id']}: EA@{int(D_COMMON)}mm={t['EA']:.2f}J, "
+                    f"IPF={t['IPF']:.3f}kN — {t['rationale']}")
+        res = run_inverse_design(models, approach, t["EA"], t["IPF"],
+                                 scaler_disp, enc, params, bo_cfg, logger,
+                                 cal_ens=cal_ens, feat_scaler=feat_scaler)
+        res["target_info"] = t
+        best = res.get("gpbo_best") or {}
+        rec_theta = best.get("x_best")
+        rec_lc = best.get("lc", best.get("best_lc", ""))
+        # Combined relative error from the fit term (classifier penalty excluded
+        # is not separable here, so this slightly overestimates — conservative).
+        ea_err = float(best.get("ea_error_pct", float("nan")))
+        ipf_err = float(best.get("ipf_error_pct", float("nan")))
+        combined_rel = float(np.hypot(ea_err / 100.0, ipf_err / 100.0)) if np.isfinite(ea_err) else float("nan")
+        attainable = bool(np.isfinite(combined_rel) and combined_rel <= feas_rel_tol)
+        src = t.get("source_angle")
+        rows.append({
+            "Verification_ID": t["id"],
+            "Family": "off-grid round-trip" if t.get("expect_feasible") else "infeasibility probe",
+            "target_EA_J": f"{t['EA']:.3f}",
+            "target_IPF_kN": f"{t['IPF']:.3f}",
+            "true_theta_deg": f"{src:.1f}" if src is not None else "n/a (infeasible)",
+            "true_LC": t.get("source_lc") or "n/a",
+            "recovered_theta_deg": f"{float(rec_theta):.2f}" if rec_theta is not None else "",
+            "recovered_LC": rec_lc,
+            "delta_theta_deg": (f"{abs(float(rec_theta) - float(src)):.2f}"
+                                if (rec_theta is not None and src is not None) else ""),
+            "LC_match": (("Yes" if str(rec_lc) == str(t.get("source_lc")) else "No")
+                         if (rec_lc and t.get("source_lc")) else ""),
+            "EA_error_pct": f"{ea_err:.2f}" if np.isfinite(ea_err) else "",
+            "IPF_error_pct": f"{ipf_err:.2f}" if np.isfinite(ipf_err) else "",
+            "combined_rel_error": f"{combined_rel:.4f}" if np.isfinite(combined_rel) else "",
+            "Attainable": "Yes" if attainable else "No",
+            "Expected_attainable": "Yes" if t.get("expect_feasible") else "No",
+            "Verdict_correct": ("Yes" if attainable == bool(t.get("expect_feasible")) else "No"),
+        })
+    df = pd.DataFrame(rows)
+    path = os.path.join(output_dir, "Table_inverse_verification.csv")
+    df.to_csv(path, index=False)
+    logger.info(f"  Saved: {os.path.basename(path)}")
+    return df
 
 
 def generate_pareto_targets(
@@ -1057,7 +1240,7 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
         
         # Bootstrap resample if enabled
         if CFG.bootstrap:
-            indices = rng.integers(0, len(X_full), len(X_full))
+            indices = bootstrap_indices(df_all, rng)
             X_train = X_tensor[indices]
             Y_train = Y_tensor[indices]
         else:
@@ -1265,27 +1448,80 @@ def load_data(data_dir: str, logger: logging.Logger) -> pd.DataFrame:
             
             req = ["disp_mm", "load_kN", "energy_J", "Angle", "LC"]
             if all(r in df.columns for r in req):
+                n_before = len(df)
                 df = df[req].dropna()
+                if len(df) < n_before:
+                    logger.warning(f"  {os.path.basename(f)}: dropped {n_before - len(df)} "
+                                   f"rows with missing values")
                 df_list.append(df)
                 logger.info(f"  Loaded {len(df)} rows from {os.path.basename(f)}")
+            else:
+                missing = [r for r in req if r not in df.columns]
+                raise ValueError(f"missing required columns after mapping: {missing}")
         except Exception as e:
-            logger.error(f"  Error loading {f}: {e}")
-    
+            # A per-file failure must be FATAL: silently continuing yields a
+            # complete-looking single-LC run whose every downstream number is
+            # wrong-but-plausible.
+            raise RuntimeError(f"Failed to load data file {f}: {e}") from e
+
     if not df_list:
         raise ValueError("No valid data files loaded")
-    
+
     df_all = pd.concat(df_list, ignore_index=True)
     df_all["disp_mm"] = df_all["disp_mm"].astype(float)
     df_all["load_kN"] = df_all["load_kN"].astype(float)
     df_all["energy_J"] = df_all["energy_J"].astype(float)
     df_all["Angle"] = df_all["Angle"].astype(float)
     df_all["LC"] = df_all["LC"].astype(str)
-    
+
+    # ---- Data QA (previously dead code — now enforced) ---------------------
+    # 1. Non-monotone displacement rows are corrupted (e.g. an out-of-order
+    #    logger row): they inject a false (d, F, E) sample and a force
+    #    discontinuity into training.  Auto-drop with a logged count.
+    n_dropped_nonmono = 0
+    cleaned = []
+    for (lc, ang), g in df_all.groupby(["LC", "Angle"], sort=False):
+        g = g.reset_index(drop=True)
+        d = g["disp_mm"].values
+        keep = np.ones(len(g), dtype=bool)
+        run_max = -np.inf
+        for i, dv in enumerate(d):
+            if dv < run_max - 1e-9:
+                keep[i] = False
+            else:
+                run_max = max(run_max, dv)
+        if (~keep).any():
+            n_dropped_nonmono += int((~keep).sum())
+            logger.warning(f"  Data QA: dropped {int((~keep).sum())} non-monotone-displacement "
+                           f"row(s) in ({lc}, θ={ang:g}°) — corrupted logger rows")
+        cleaned.append(g.loc[keep])
+    if n_dropped_nonmono:
+        df_all = pd.concat(cleaned, ignore_index=True)
+
+    # 2. Structural validation (both LCs present, per-curve sanity).
+    ok, issues = validate_input_data(df_all, logger)
+    if not ok:
+        for iss in issues:
+            logger.warning(f"  Data QA issue: {iss}")
+    lcs_present = set(df_all["LC"].unique())
+    if not {"LC1", "LC2"} <= lcs_present:
+        raise ValueError(f"Expected both LC1 and LC2 in the dataset; found {sorted(lcs_present)}. "
+                         f"A single-LC run would silently invalidate every cross-LC analysis.")
+
+    # Dataset fingerprint for bundle provenance (see _bundle_meta()).
+    try:
+        import hashlib as _hl
+        CFG.data_fingerprint = _hl.sha256(
+            pd.util.hash_pandas_object(df_all, index=False).values.tobytes()).hexdigest()[:12]
+        logger.info(f"  Data fingerprint: {CFG.data_fingerprint}")
+    except Exception:
+        pass
+
     logger.info(f"Total: {len(df_all)} rows, Angles: {sorted(df_all['Angle'].unique())}")
     for lc in df_all["LC"].unique():
         lc_data = df_all[df_all["LC"] == lc]
         logger.info(f"  {lc}: disp range = [{lc_data['disp_mm'].min():.1f}, {lc_data['disp_mm'].max():.1f}] mm")
-    
+
     return df_all
 
 
@@ -1683,6 +1919,14 @@ def curvature_regularization_hard(Xin: torch.Tensor, model: nn.Module,
     Smooths the force curve F = dE/dd by penalizing its derivative dF/dd = d²E/dd².
     This helps Hard-PINN avoid oscillatory force predictions in data-sparse regions
     (like the unseen 60° angle), encouraging physically plausible smooth curves.
+
+    Interaction with IPF (documented, opt-in mitigation): the penalty acts on
+    ALL collocation points, including the pre-peak region whose sharp rise
+    defines the initial peak force — one of the two inverse-design objectives.
+    With the tuned weight (~1.3e-3) the bias is small, but it is untested by
+    default.  Set ``CFG.curvature_window_after_mm > 0`` to exclude collocation
+    points with displacement below that value (e.g. 10 mm) from the penalty,
+    and compare the resulting IPF predictions as an ablation.
     """
     Xin_g = Xin.requires_grad_(True) if not Xin.requires_grad else Xin
     E_n = model(Xin_g)
@@ -1690,6 +1934,13 @@ def curvature_regularization_hard(Xin: torch.Tensor, model: nn.Module,
     F_col = dE[:, U_COL:U_COL + 1]
     d2E = torch.autograd.grad(F_col.sum(), Xin_g, create_graph=True)[0]
     d2E_dd = d2E[:, U_COL:U_COL + 1]
+    window_mm = float(getattr(CFG, "curvature_window_after_mm", 0.0))
+    if window_mm > 0.0:
+        # The displacement column of Xin is standardized: d_scaled = (d-μ)/σ.
+        d_scaled_cut = (window_mm - float(params.mu_d)) / max(float(params.sig_d), 1e-12)
+        mask = (Xin_g[:, U_COL:U_COL + 1].detach() > d_scaled_cut).float()
+        denom = mask.sum().clamp(min=1.0)
+        return (mask * d2E_dd ** 2).sum() / denom
     return torch.mean(d2E_dd ** 2)
 
 
@@ -1797,7 +2048,7 @@ def train_ddns(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     sl1 = nn.SmoothL1Loss(beta=cfg["smoothl1_beta"])
 
     rng = np.random.default_rng(seed)
-    idx = rng.integers(0, Xtr.shape[0], Xtr.shape[0]) if CFG.bootstrap else np.arange(Xtr.shape[0])
+    idx = bootstrap_indices(train_df, rng) if CFG.bootstrap else np.arange(Xtr.shape[0])
     loader = DataLoader(
         TensorDataset(Xtr[idx], ytr[idx]), batch_size=cfg["batch_size"], shuffle=True, **_data_loader_kwargs(seed=seed)
     )
@@ -1910,7 +2161,7 @@ def train_soft(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
         X_bc_t = to_tensor(build_features(bc_df, scaler_disp, enc))
 
     rng_b = np.random.default_rng(seed)
-    idx = rng_b.integers(0, Xtr.shape[0], Xtr.shape[0]) if CFG.bootstrap else np.arange(Xtr.shape[0])
+    idx = bootstrap_indices(train_df, rng_b) if CFG.bootstrap else np.arange(Xtr.shape[0])
     loader = DataLoader(
         TensorDataset(Xtr[idx], ytr[idx]), batch_size=cfg["batch_size"], shuffle=True, **_data_loader_kwargs(seed=seed)
     )
@@ -2073,7 +2324,7 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
         colloc_sampler = create_collocation_sampler(train_df, scaler_disp, enc, extrapolate_angles=extrapolate)
 
     rng_b = np.random.default_rng(seed)
-    idx = rng_b.integers(0, Xtr.shape[0], Xtr.shape[0]) if CFG.bootstrap else np.arange(Xtr.shape[0])
+    idx = bootstrap_indices(train_df, rng_b) if CFG.bootstrap else np.arange(Xtr.shape[0])
     loader = DataLoader(
         TensorDataset(Xtr[idx], ytr[idx]), batch_size=cfg["batch_size"], shuffle=True, **_data_loader_kwargs(seed=seed)
     )
@@ -2202,7 +2453,16 @@ def train_ensemble(approach: str, train_df: pd.DataFrame, val_df: pd.DataFrame,
         try:
             # Per-member disk cache (resume-friendly): an interrupted ensemble
             # keeps every finished member; re-running trains only the missing ones.
-            _mkey = f"member_{approach}_{protocol}_m{m}_ep{getattr(CFG, 'max_epochs', 0)}_seed{seed}"
+            # Cache key includes a fingerprint of the training data and the
+            # per-approach hyperparameter dict: editing either must invalidate
+            # cached members, or a rerun silently reuses stale weights.
+            import hashlib as _hl
+            _cfg_now = get_model_config(approach, protocol)
+            _fp_src = (pd.util.hash_pandas_object(train_df, index=False).values.tobytes()
+                       + repr(sorted(_cfg_now.items())).encode())
+            _fp = _hl.sha256(_fp_src).hexdigest()[:10]
+            _mkey = (f"member_{approach}_{protocol}_m{m}_ep{getattr(CFG, 'max_epochs', 0)}"
+                     f"_seed{seed}_fp{_fp}")
             model, hist, r2, meta = _explicit_disk_cache(
                 _mkey,
                 lambda: train_fn(train_df, val_df, scaler_disp, scaler_out, enc,
@@ -2245,7 +2505,12 @@ def train_ensemble(approach: str, train_df: pd.DataFrame, val_df: pd.DataFrame,
     # difficulty and only removes genuine outliers.
     k_iqr = CFG.convergence_filter_iqr
     M_total = len(models)
-    
+    # Snapshot pre-fence member metrics so survivor-only statistics can be
+    # reported ALONGSIDE all-member statistics (avoids silent survivorship
+    # bias in the published ensemble means/CIs).
+    member_metrics_all = list(member_metrics)
+    discarded_indices: List[int] = []
+
     # Compute training-set R² for each member
     train_r2_scores = []
     for model in models:
@@ -2277,6 +2542,7 @@ def train_ensemble(approach: str, train_df: pd.DataFrame, val_df: pd.DataFrame,
         if n_discarded > 0:
             discarded_indices = [i for i, keep in enumerate(keep_mask) if not keep]
             logger.info(f"      M_total={M_total}, M_eff={M_eff}, discarded={n_discarded}")
+            logger.info(f"      (all-member metrics retained for survivorship-bias reporting)")
             for idx in discarded_indices:
                 logger.info(f"      Discarded M{idx+1}: train R²={train_r2_scores[idx]:.4f} < fence {fence:.4f}")
             
@@ -2291,10 +2557,18 @@ def train_ensemble(approach: str, train_df: pd.DataFrame, val_df: pd.DataFrame,
         M_eff = M_total
         fence = float('-inf')
     
-    # Safety: ensure at least 3 members survive
-    if len(models) < 3:
-        logger.warning(f"    WARNING: Only {len(models)} members survived filtering; "
-                       f"consider increasing n_ensemble or decreasing k_iqr.")
+    # Safety: enforce a minimum surviving ensemble size.  Every downstream
+    # uncertainty quantity (EA_std, conformal factors, GP-BO posteriors)
+    # silently degrades to noise with a tiny ensemble, so in production this
+    # FAILS rather than warns.  Dry runs keep the old advisory behaviour.
+    min_members = int(getattr(CFG, "min_ensemble_members", 3))
+    if len(models) < min_members:
+        msg = (f"Only {len(models)} members survived filtering "
+               f"(minimum {min_members}); increase n_ensemble or relax k_iqr.")
+        if CFG.dry_run or CFG.n_ensemble < min_members:
+            logger.warning(f"    WARNING: {msg}")
+        else:
+            raise RuntimeError(msg)
     
     ens_metrics = evaluate_ensemble(models, approach, val_df, scaler_disp, scaler_out, enc, params)
     return {"models": models, "histories": histories, "member_metrics": member_metrics,
@@ -2302,7 +2576,12 @@ def train_ensemble(approach: str, train_df: pd.DataFrame, val_df: pd.DataFrame,
             "n_params": metas[0]["n_params"],
             "M_total": M_total, "M_eff": len(models),
             "train_r2_scores": train_r2_scores,
-            "convergence_fence": fence}
+            "convergence_fence": fence,
+            # Pre-fence metrics + which members were dropped: enables the
+            # with/without-filter comparison in Table 1 and records WHICH
+            # members the fence excluded (previously unrecorded).
+            "member_metrics_all": member_metrics_all,
+            "discarded_member_indices": discarded_indices}
 
 
 # =============================================================================
@@ -2548,12 +2827,20 @@ def predict_curve_best_member(models: List[nn.Module], approach: str, angle: flo
     return F_best, F_std, E_best, E_std
 
 
-def compute_ipf_robust(disps: np.ndarray, loads: np.ndarray, min_disp: float = 0.5, prom_frac: float = 0.05) -> Tuple[float, float]:
+def compute_ipf_robust(disps: np.ndarray, loads: np.ndarray, min_disp: float = 0.5,
+                       prom_frac: float = 0.05, return_info: bool = False):
     """Compute Initial Peak Force robustly.
 
     Fallback: if no prominent peaks found after min_disp, use the maximum
     force in the first 25% of the displacement range (not the global max,
     which for progressive crushing could occur deep in the stroke).
+
+    When ``return_info=True`` a third element is returned:
+    ``{"fallback": bool}`` — True when the value came from the
+    early-window-max fallback rather than a detected prominent peak.  The
+    fallback silently switches the estimand (window max vs. first prominent
+    peak), so consumers that publish IPF values should record and report the
+    fallback rate instead of hiding it.
     """
     # Manuscript Section 2: peak qualifies on prominence AND width.
     # Width >= 2 samples filters out 1-sample noise spikes; loads are densely
@@ -2562,16 +2849,19 @@ def compute_ipf_robust(disps: np.ndarray, loads: np.ndarray, min_disp: float = 0
     if load_range < 1e-9:
         # Flat curve: no meaningful peak; return the constant value at first valid disp.
         valid_idx = int(np.argmax(disps > min_disp)) if np.any(disps > min_disp) else 0
-        return float(loads[valid_idx]), float(disps[valid_idx])
+        out = (float(loads[valid_idx]), float(disps[valid_idx]))
+        return (*out, {"fallback": True}) if return_info else out
     peaks, _ = find_peaks(
         loads,
         prominence=prom_frac * load_range,
         width=2,
     )
     valid_peaks = [p for p in peaks if disps[p] > min_disp]
+    fallback = False
     if valid_peaks:
         idx = valid_peaks[0]
     else:
+        fallback = True
         # Restrict fallback to first 25% of displacement range
         d_max = disps[-1] if len(disps) > 0 else 1.0
         early_mask = disps <= max(d_max * 0.25, min_disp * 2)
@@ -2579,7 +2869,8 @@ def compute_ipf_robust(disps: np.ndarray, loads: np.ndarray, min_disp: float = 0
             idx = int(np.argmax(loads[:np.sum(early_mask)]))
         else:
             idx = np.argmax(loads)
-    return float(loads[idx]), float(disps[idx])
+    out = (float(loads[idx]), float(disps[idx]))
+    return (*out, {"fallback": fallback}) if return_info else out
 
 
 def compute_ea_ipf_ensemble(models: List[nn.Module], approach: str, angle: float, lc: str,
@@ -2646,13 +2937,37 @@ def compute_ea_ipf_ensemble(models: List[nn.Module], approach: str, angle: float
         ])
     else:
         ea_per_member = np.array([float(all_E[i, -1] - all_E[i, 0]) for i in range(len(models))])
-    ipf_per_member = np.array([compute_ipf_robust(disps, all_F[i])[0] for i in range(len(models))])
+    ipf_results = [compute_ipf_robust(disps, all_F[i], return_info=True) for i in range(len(models))]
+    ipf_per_member = np.array([r[0] for r in ipf_results])
+    ipf_fallback_per_member = np.array([bool(r[2]["fallback"]) for r in ipf_results])
 
     ea_mean = float(np.mean(ea_per_member))
     ipf_mean = float(np.mean(ipf_per_member))
     f_mean = ea_mean / d_metric if d_metric > 0 else 0.0
     cfe = f_mean / ipf_mean if ipf_mean > 1e-12 else 0.0
     _dd_m = 1 if len(models) > 1 else 0
+
+    # ---- Physical-plausibility diagnostics (inference-time) ----------------
+    # Physics constraints (F >= 0, monotone E, EA > 0) are only SOFT training
+    # penalties; nothing guarantees them at deployment.  These per-design
+    # violation fractions let every consumer (design-space sweep, inverse
+    # objective, Pareto filter) detect — rather than silently absorb — an
+    # unphysical prediction.  Tolerances: 1 N on force; 0.1% of the energy
+    # range on monotonicity (numerical-noise floor).
+    _f_tol = 1e-3   # kN
+    neg_force_frac = float(np.mean([np.any(all_F[i] < -_f_tol) for i in range(len(models))]))
+    _e_ranges = np.maximum(np.ptp(all_E, axis=1), 1e-12)
+    nonmono_E_frac = float(np.mean([
+        np.any(np.diff(all_E[i]) < -1e-3 * _e_ranges[i]) for i in range(len(models))]))
+    neg_ea_frac = float(np.mean(ea_per_member <= 0.0))
+    plausibility = {
+        "neg_force_frac": neg_force_frac,
+        "nonmono_energy_frac": nonmono_E_frac,
+        "neg_ea_frac": neg_ea_frac,
+        "ipf_fallback_frac": float(np.mean(ipf_fallback_per_member)),
+        "all_plausible": bool(neg_force_frac == 0.0 and nonmono_E_frac == 0.0
+                              and neg_ea_frac == 0.0),
+    }
 
     return {"EA": ea_mean, "IPF": ipf_mean,
             "EA_std": float(np.std(ea_per_member, ddof=_dd_m)),
@@ -2661,7 +2976,8 @@ def compute_ea_ipf_ensemble(models: List[nn.Module], approach: str, angle: float
             "disps": disps, "loads": Fm, "loads_std": Fs,
             "energies": Em_corrected, "energies_std": Es,
             "disp_end": d_end, "d_eval": d_metric,
-            "ea_per_member": ea_per_member, "ipf_per_member": ipf_per_member}
+            "ea_per_member": ea_per_member, "ipf_per_member": ipf_per_member,
+            "plausibility": plausibility}
 
 
 def compute_design_space_metrics(df: pd.DataFrame, logger: Optional[logging.Logger] = None) -> pd.DataFrame:
@@ -2931,6 +3247,11 @@ def train_lc_plausibility_classifier(
         "cv_y": cv_y_store,
         "cv_pred": cv_pred_store,
         "cv_prob_lc2": cv_prob_store,
+        # Record whether Platt calibration was actually applied so downstream
+        # artifacts and the manuscript describe the classifier accurately:
+        # with n < 20 the ensemble is deliberately UNCALIBRATED (raw soft
+        # voting), and calling it a "calibrated classifier" would overstate it.
+        "calibration_mode": _calib_mode_outer,
     }
 
     return cal_ens, feat_scaler, diag
@@ -3653,6 +3974,13 @@ def _make_objective(models, approach, lc, scaler_disp, enc, params, target_ea, t
     def objective(angle: float) -> float:
         m = compute_ea_ipf_ensemble(models, approach, float(angle), lc, scaler_disp, enc, params,
                                      d_eval=d_eval)
+        # Physically invalid candidate (non-positive predicted EA): return a
+        # large finite objective so the optimizer steers away instead of
+        # potentially "matching" a target through an unphysical prediction.
+        # For well-trained production surrogates this never triggers; it
+        # protects the search when a member extrapolates badly.
+        if m["EA"] <= 0.0:
+            return 1e6 + abs(float(m["EA"]))
         fit_error = float(w_ea * (m["EA"] - target_ea)**2 + w_ipf * (m["IPF"] - target_ipf)**2)
 
         if cal_ens is not None and prob_weight > 0:
@@ -3935,12 +4263,23 @@ def gp_bo_minimize_joint_multistart(objective_funcs, bounds, bo_cfg, logger, n_r
     return best
 
 
-def compute_solution_landscape(objective_funcs, bounds, best_objective, logger, n_grid=201):
-    """Evaluate J(theta) on a dense grid for both LCs; count local minima -> multiplicity index."""
+def compute_solution_landscape(objective_funcs, bounds, best_objective, logger, n_grid=201,
+                               rel_tol=0.02):
+    """Evaluate J(theta) on a dense grid for both LCs; count local minima -> multiplicity index.
+
+    Multiplicity threshold is stated in PHYSICAL units: because the fit term of
+    J uses weights w = 1/target^2, an increment ``J - J_best`` equals the added
+    squared combined *relative* (EA, IPF) error beyond the optimum.  A local
+    minimum therefore counts as an alternative solution only when
+    ``J <= J_best + rel_tol**2`` (default ``rel_tol=0.02`` -> within 2% combined
+    relative error of the best solution).  This replaces the earlier ad hoc
+    absolute floor (+0.01, i.e. 10% combined error), which dominated for
+    well-converged optima and over-counted 'solutions'.
+    """
     theta_grid = np.linspace(bounds[0], bounds[1], n_grid)
     result = {"theta_grid": theta_grid}
     total_minima = 0
-    threshold = max(best_objective * 1.5, best_objective + 0.01)
+    threshold = best_objective + float(rel_tol) ** 2
     for lc, obj_fn in objective_funcs.items():
         J_vals = np.array([obj_fn(float(t)) for t in theta_grid])
         result[f"J_{lc}"] = J_vals
@@ -3951,7 +4290,10 @@ def compute_solution_landscape(objective_funcs, bounds, best_objective, logger, 
         result[f"local_minima_{lc}"] = minima
         total_minima += len(minima)
     result["multiplicity_index"] = total_minima
-    logger.info(f"    Solution landscape: {total_minima} local minima below threshold {threshold:.4f}")
+    result["multiplicity_rel_tol"] = float(rel_tol)
+    logger.info(
+        f"    Solution landscape: {total_minima} local minima within {rel_tol*100:.0f}% "
+        f"combined relative error of the optimum (J <= {threshold:.6f})")
     return result
 
 
@@ -4082,7 +4424,7 @@ def fig_forward_map_jacobian(jacobian_results, output_dir, logger):
         for bf in jacobian_results.get(f"ea_bifurcations_{lc}", []):
             axes[0, j].axvline(bf, color=bif_color, linewidth=0.7, linestyle=":", alpha=0.85)
         axes[0, j].set_title(f"dEA/d$\\theta$ - {lc}")
-        axes[0, j].set_ylabel("J/(kN$\\cdot$deg)" if j == 0 else "")
+        axes[0, j].set_ylabel("J/deg" if j == 0 else "")
         axes[1, j].plot(theta, dipf, linewidth=1.0, color=COLORS["ddns"])
         axes[1, j].axhline(0, color="0.4", linewidth=0.6, linestyle="--")
         for bf in jacobian_results.get(f"ipf_bifurcations_{lc}", []):
@@ -4090,6 +4432,19 @@ def fig_forward_map_jacobian(jacobian_results, output_dir, logger):
         axes[1, j].set_title(f"dIPF/d$\\theta$ - {lc}")
         axes[1, j].set_xlabel(r"Angle ($^\circ$)")
         axes[1, j].set_ylabel("kN/deg" if j == 0 else "")
+    # Panel labels (a)-(d) across the 2 x len(lcs) grid.
+    for lab, ax in zip("abcdefgh", axes.flatten()):
+        add_subplot_label(ax, lab)
+    # Explain the reference lines: the dashed zero-slope line (a stationary point
+    # of the forward map) and the detected bifurcations (sign changes that flag
+    # local non-invertibility).  Only advertise bifurcations if any were found.
+    has_bif = any(len(jacobian_results.get(f"{p}_bifurcations_{lc}", [])) > 0
+                  for p in ("ea", "ipf") for lc in lcs)
+    handles = [Line2D([0], [0], color="0.4", lw=0.8, ls="--", label="zero slope")]
+    if has_bif:
+        handles.append(Line2D([0], [0], color=bif_color, lw=0.9, ls=":", label="bifurcation"))
+    fig.legend(handles=handles, loc="upper center", ncol=len(handles),
+               bbox_to_anchor=(0.5, 1.02), frameon=True)
     path = os.path.join(output_dir, "Fig_forward_map_jacobian.png")
     fig.savefig(path, dpi=600, bbox_inches="tight")
     plt.close(fig)
@@ -4533,7 +4888,19 @@ def pick_validation_inverse_stress_targets(
     cand = val_df.copy()
     mask = [tuple((float(r["Angle"]), str(r["LC"]))) not in pairs_train for _, r in cand.iterrows()]
     cand = cand.loc[mask]
+    holdout_genuine = not cand.empty
     if cand.empty:
+        # Under the row-level stratified random split every (Angle, LC) pair
+        # appears in BOTH train and val, so this branch is the NORM, not the
+        # exception: the targets below are NOT unseen configurations.  Warn
+        # loudly so the resulting table cannot be mistaken for a held-out
+        # stress test — it is a seen-configuration consistency check.
+        logger.warning(
+            "  Inverse stress targets: no (Angle, LC) pair is absent from the "
+            "training split (row-level split ⇒ all configurations seen). "
+            "Falling back to SEEN validation configurations — treat "
+            "Table_inverse_stress_protocol.csv as a seen-configuration "
+            "consistency check, not a held-out stress test.")
         cand = val_df.drop_duplicates(subset=["Angle", "LC"])
     dm = df_metrics.copy()
     if "EA_common" not in dm.columns:
@@ -4558,7 +4925,12 @@ def pick_validation_inverse_stress_targets(
             "d_eval": D_COMMON,
             "val_angle_deg": key[0],
             "val_LC": key[1],
-            "rationale": "Random-protocol validation (Angle, LC) stress inverse",
+            # Same ground-truth-recovery convention as the T targets.
+            "source_angle": key[0],
+            "source_lc": key[1],
+            "holdout_genuine": bool(holdout_genuine),
+            "rationale": ("Held-out (Angle, LC) stress inverse" if holdout_genuine
+                          else "SEEN-configuration consistency check (row-level split: no unseen pairs)"),
         })
         if len(targets) >= max_n:
             break
@@ -4590,14 +4962,23 @@ def run_validation_inverse_stress_and_save(
             cal_ens=cal_ens, feat_scaler=clf_feat_scaler,
         )
         best = res.get("gpbo_best") or {}
+        rec_theta = best.get("x_best", "")
+        src_theta = t.get("val_angle_deg", "")
+        rec_lc = best.get("lc", best.get("best_lc", ""))
         rows.append({
             "Stress_ID": t["id"],
-            "source_val_angle_deg": t.get("val_angle_deg", ""),
+            "source_val_angle_deg": src_theta,
             "source_val_LC": t.get("val_LC", ""),
+            # Honesty flag: under the row-level random split every (Angle, LC)
+            # appears in training, so these are usually SEEN configurations.
+            "config_unseen_in_train": "Yes" if t.get("holdout_genuine") else "No",
             "target_EA_J": t["EA"],
             "target_IPF_kN": t["IPF"],
-            "recovered_theta_deg": best.get("x_best", ""),
-            "recovered_LC": best.get("lc", best.get("best_lc", "")),
+            "recovered_theta_deg": rec_theta,
+            "recovered_LC": rec_lc,
+            "delta_theta_deg": (f"{abs(float(rec_theta) - float(src_theta)):.2f}"
+                                if rec_theta != "" and src_theta != "" else ""),
+            "LC_match": ("Yes" if str(rec_lc) == str(t.get("val_LC", "")) else "No") if rec_lc else "",
             "EA_error_pct": best.get("ea_error_pct", ""),
             "IPF_error_pct": best.get("ipf_error_pct", ""),
             "objective_J": best.get("y_best", ""),
@@ -4823,15 +5204,51 @@ def run_multiobjective_sweep(models: List[nn.Module], approach: str, scaler_disp
                                 "EA_full": ea_full,
                                 "ea_norm": ea_norm, "ipf_norm": ipf_norm,
                                 "EA_std": m.get("EA_std", 0), "IPF_std": m.get("IPF_std", 0)}
+            plaus = m.get("plausibility", {})
             landscape.append({
                 "angle": ang, "lc": lc,
                 "EA": m["EA"], "IPF": m["IPF"],
                 "EA_full": ea_full,
                 "EA_norm": ea_norm, "IPF_norm": ipf_norm,
-                "EA_std": m.get("EA_std", 0), "IPF_std": m.get("IPF_std", 0)
+                "EA_std": m.get("EA_std", 0), "IPF_std": m.get("IPF_std", 0),
+                # Inference-time plausibility diagnostics per sweep point.
+                "neg_force_frac": plaus.get("neg_force_frac", 0.0),
+                "nonmono_energy_frac": plaus.get("nonmono_energy_frac", 0.0),
+                "neg_ea_frac": plaus.get("neg_ea_frac", 0.0),
+                "ipf_fallback_frac": plaus.get("ipf_fallback_frac", 0.0),
             })
-    
+
     landscape_df = pd.DataFrame(landscape)
+
+    # Publish the deployment-time physics-constraint audit: what fraction of
+    # sweep points (and ensemble members) violate F>=0 / monotone E / EA>0,
+    # and how often IPF came from the peak-detection fallback.  Reviewers can
+    # then see the soft physics constraints HOLD at deployment, not just that
+    # they were penalized during training.
+    if output_dir is not None and len(landscape_df):
+        try:
+            plaus_cols = ["neg_force_frac", "nonmono_energy_frac", "neg_ea_frac", "ipf_fallback_frac"]
+            summ_rows = []
+            for lc in lc_categories:
+                sub = landscape_df[landscape_df["lc"] == lc]
+                row = {"LC": lc, "n_sweep_points": len(sub)}
+                for c in plaus_cols:
+                    row[f"mean_{c}"] = f"{float(sub[c].mean()):.4f}"
+                    row[f"pts_any_{c}"] = int((sub[c] > 0).sum())
+                summ_rows.append(row)
+            pd.DataFrame(summ_rows).to_csv(
+                os.path.join(output_dir, "Table_physical_plausibility_audit.csv"), index=False)
+            logger.info("  Saved: Table_physical_plausibility_audit.csv")
+            n_bad = int((landscape_df[["neg_force_frac", "nonmono_energy_frac", "neg_ea_frac"]].sum(axis=1) > 0).sum())
+            if n_bad:
+                logger.warning(f"  Plausibility audit: {n_bad}/{len(landscape_df)} sweep points have "
+                               f"at least one member violating a physics constraint — inspect "
+                               f"Table_physical_plausibility_audit.csv")
+            else:
+                logger.info(f"  Plausibility audit: all {len(landscape_df)} sweep points physically "
+                            f"plausible across every ensemble member")
+        except Exception as exc:
+            logger.warning(f"  plausibility audit table skipped: {exc}")
     
     # Pareto sweep (uses cache, no redundant ensemble calls)
     pareto_results = []
@@ -5185,17 +5602,24 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
     scaled by the conformal factor from the random protocol Hard-PINN
     (best available proxy for the full-data inverse model).
     """
-    fig = plt.figure(figsize=(16, 12))
-    gs = fig.add_gridspec(2, 3, hspace=0.52, wspace=0.42, left=0.07, right=0.98, top=0.90, bottom=0.06)
+    fig = plt.figure(figsize=(16, 9), constrained_layout=True)
+    gs = fig.add_gridspec(2, 3)
     
-    # Retrieve conformal factors for Hard-PINN.  The **2σ-coverage** factor
-    # (95.4-percentile of |residual|/sigma) is used so the band drawn here
-    # as ``mean ± cf * sigma`` achieves the nominal 95% coverage.  Using
-    # cf_2sigma directly avoids the under-coverage that arises from
-    # linearly scaling a 1σ factor by 2 under heavy-tailed residuals.
+    # Retrieve calibration for the ±2σ bands.  PRIORITY: the design-level
+    # EA/IPF *scalar* factors (calibrated on |EA_pred−EA_exp|/σ_EA over the
+    # measured designs) — the statistically matched estimand for these bands.
+    # The earlier fallback (pointwise-energy conformal factor applied to the
+    # EA scalar) mixes estimands: it is retained only as a legacy fallback
+    # and is logged as heuristic when used.
     cf_ea = 1.0
     cf_ipf = 1.0
-    if calibration is not None:
+    scal = (calibration or {}).get("ea_ipf_scalar") if isinstance(calibration, dict) else None
+    if scal:
+        cf_ea = float(scal.get("ea_cf_2sigma", 1.0))
+        cf_ipf = float(scal.get("ipf_cf_2sigma", 1.0))
+        logger.info(f"  Design-space ±2σ bands using design-level scalar calibration: "
+                    f"EA cf={cf_ea:.3f}, IPF cf={cf_ipf:.3f}")
+    elif calibration is not None:
         for proto in ["random", "unseen"]:
             if proto in calibration and "hard" in calibration[proto]:
                 cal_h = calibration[proto]["hard"]
@@ -5208,8 +5632,10 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
                     "conformal_factor_2sigma",
                     cal_h.get("conformal_factor", 1.0),
                 )
-                logger.info(f"  Design-space ±2σ bands using {proto} Hard-PINN cf_2sigma: "
-                            f"EA cf={cf_ea:.3f}, IPF cf={cf_ipf:.3f}")
+                logger.warning(f"  Design-space ±2σ bands: no design-level scalar calibration "
+                               f"available; falling back to {proto} POINTWISE factors "
+                               f"(EA cf={cf_ea:.3f}, IPF cf={cf_ipf:.3f}) — heuristic, "
+                               f"estimand-mismatched")
                 break
     
     # Prepare data for heatmaps
@@ -5230,11 +5656,11 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
         if "EA_std" in lc_data.columns and lc_data["EA_std"].max() > 0:
             # cf_ea is the 2σ-coverage conformal factor; band is ±cf_ea·σ.
             ax1.fill_between(lc_data["angle"],
-                            lc_data["EA"] - cf_ea*lc_data["EA_std"],
+                            np.maximum(0.0, lc_data["EA"] - cf_ea*lc_data["EA_std"]),
                             lc_data["EA"] + cf_ea*lc_data["EA_std"],
                             color=color, alpha=0.15)
     ax1.set_xlabel("Interior Angle θ (°)")
-    ax1.set_ylabel("Energy Absorption EA (J)")
+    ax1.set_ylabel(f"Energy Absorption EA (J) @ $d$={D_COMMON:.0f} mm")
     ax1.set_title("(a) Energy Absorption Landscape")
     ax1.legend(loc='best')
     ax1.grid(True, alpha=0.3, linestyle='--')
@@ -5254,7 +5680,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
         if "IPF_std" in lc_data.columns and lc_data["IPF_std"].max() > 0:
             # cf_ipf is the 2σ-coverage conformal factor; band is ±cf_ipf·σ.
             ax2.fill_between(lc_data["angle"],
-                            lc_data["IPF"] - cf_ipf*lc_data["IPF_std"],
+                            np.maximum(0.0, lc_data["IPF"] - cf_ipf*lc_data["IPF_std"]),
                             lc_data["IPF"] + cf_ipf*lc_data["IPF_std"],
                             color=color, alpha=0.15)
     ax2.set_xlabel("Interior Angle θ (°)")
@@ -5340,7 +5766,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
                     ha='center',
                     arrowprops=dict(arrowstyle='->', color='gray', lw=0.6))
     
-    ax5.set_xlabel("Energy Absorption EA (J)")
+    ax5.set_xlabel(f"Energy Absorption EA (J) @ $d$={D_COMMON:.0f} mm")
     ax5.set_ylabel("Initial Peak Force IPF (kN)")
     ax5.set_title("(e) Pareto Front: EA vs IPF Trade-off")
     ax5.legend(loc='best')
@@ -5387,7 +5813,7 @@ def fig_multiobjective_heatmaps(pareto_df: pd.DataFrame, landscape_df: pd.DataFr
 # =============================================================================
 # PLOTTING FUNCTIONS
 # =============================================================================
-def add_subplot_label(ax, label, dx=-6.0, dy=6.0):
+def add_subplot_label(ax, label, dx=-7.0, dy=9.0):
     """Add a bold panel label "(a)" just outside the axes' top-left corner.
 
     Anchored to the corner (0, 1) in axes-fraction coordinates with a *points*
@@ -5494,7 +5920,9 @@ def fig_parity_plots(dual_results: Dict, output_dir: str, logger: logging.Logger
                 lims = [min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())]
                 margin = (lims[1] - lims[0]) * 0.05
                 lims = [lims[0] - margin, lims[1] + margin]
-                ax.plot(lims, lims, 'k--', lw=1.5, label='Perfect fit')
+                # Contrasting colour + high zorder so the 1:1 line stays visible
+                # against the Hard-PINN markers (which are near-black).
+                ax.plot(lims, lims, color='#d62728', linestyle='--', lw=1.5, zorder=5, label='Perfect fit')
                 ax.set_xlim(lims)
                 ax.set_ylim(lims)
                 ax.set_xlabel(f"Actual {ylabel} ({unit})")
@@ -5546,12 +5974,17 @@ def fig_cross_protocol_comparison(dual_results: Dict, output_dir: str, logger: l
         ax.yaxis.set_minor_locator(AutoMinorLocator())
     legend_elements = [mpatches.Patch(facecolor=COLORS["ddns"], edgecolor='black', label='DDNS'),
                        mpatches.Patch(facecolor=COLORS["soft"], edgecolor='black', label='Soft-PINN'),
-                       mpatches.Patch(facecolor=COLORS["hard"], edgecolor='black', label='Hard-PINN'),
-                       mpatches.Patch(facecolor='white', edgecolor='black', hatch='', label='Random Split'),
-                       mpatches.Patch(facecolor='white', edgecolor='black', hatch='//', label='Unseen Angle')]
-    fig.suptitle("Cross-Protocol Performance Comparison")
-    fig.legend(handles=legend_elements, loc='upper center', ncol=5,
-               bbox_to_anchor=(0.5, 1.005), frameon=True, columnspacing=0.8, handletextpad=0.35)
+                       mpatches.Patch(facecolor=COLORS["hard"], edgecolor='black', label='Hard-PINN')]
+    # Only advertise protocols that were actually plotted; otherwise a legend
+    # entry (e.g. "Random Split") appears with no matching bars in the chart.
+    if "random" in dual_results:
+        legend_elements.append(mpatches.Patch(facecolor='white', edgecolor='black', hatch='', label='Random Split'))
+    if "unseen" in dual_results:
+        legend_elements.append(mpatches.Patch(facecolor='white', edgecolor='black', hatch='//', label='Unseen Angle'))
+    # No suptitle: the previous one was drawn behind the top-anchored legend and
+    # bled through it as a grey ghost.  The figure caption carries the title.
+    fig.legend(handles=legend_elements, loc='upper center', ncol=len(legend_elements),
+               bbox_to_anchor=(0.5, 1.02), frameon=True, columnspacing=0.8, handletextpad=0.35)
     fig.savefig(os.path.join(output_dir, "Fig_cross_protocol.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_cross_protocol.png")
@@ -5614,7 +6047,7 @@ def fig_unseen_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir: str,
                         marker=MARKERS[approach], markevery=35, markersize=5, linewidth=1.5,
                         label=f"{MODEL_LABELS[approach]} (R\u00b2={ens_r2:.3f})")
                 # cf is the 2σ-coverage conformal factor; band is ±cf·σ (NOT ±2·cf·σ).
-                ax.fill_between(disps, Fm - cf*Fs, Fm + cf*Fs,
+                ax.fill_between(disps, np.maximum(0.0, Fm - cf*Fs), Fm + cf*Fs,
                                 color=COLORS[approach], alpha=0.15, linewidth=0)
         ax.set_xlabel("Displacement (mm)")
         ax.set_ylabel("Load (kN)")
@@ -5650,7 +6083,7 @@ def fig_unseen_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir: str,
                         marker=MARKERS[approach], markevery=35, markersize=5, linewidth=1.5,
                         label=f"{MODEL_LABELS[approach]} (R\u00b2={ens_r2:.3f})")
                 # cf is the 2σ-coverage conformal factor; band is ±cf·σ.
-                ax.fill_between(disps, Em - cf*Es, Em + cf*Es,
+                ax.fill_between(disps, np.maximum(0.0, Em - cf*Es), Em + cf*Es,
                                 color=COLORS[approach], alpha=0.15, linewidth=0)
         ax.set_xlabel("Displacement (mm)")
         ax.set_ylabel("Energy (J)")
@@ -5705,9 +6138,11 @@ def fig_random_grid_curves(dual_results: Dict, df_all: pd.DataFrame, output_dir:
     legend_elements = [Line2D([0], [0], color='k', linewidth=1.2, label='Experiment')]
     legend_elements += [Line2D([0], [0], color=COLORS[a], linestyle=LINESTYLES[a], linewidth=1.0, label=MODEL_LABELS[a]) for a in ["ddns", "soft", "hard"]]
     
-    # Place legend below the title, above the plots
+    # Shared legend hung below the panels — a top legend overlapped the top-row
+    # subplot titles.  bbox_inches='tight' expands the canvas to include it.
+    fig.tight_layout()
     fig.legend(handles=legend_elements, loc='upper center', ncol=4,
-               bbox_to_anchor=(0.5, 0.995), frameon=True, framealpha=0.95)
+               bbox_to_anchor=(0.5, -0.005), frameon=True, framealpha=0.95)
     
     fig.savefig(os.path.join(output_dir, "Fig_random_grid_curves.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
@@ -5916,10 +6351,11 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
             snapshot_indices = [i * step for i in range(8)]
             snapshot_indices[-1] = n_iters - 1
         else:
+            # Fewer than 8 snapshots: show each once.  (Padding by repeating the
+            # last index rendered the final iteration two or three times as
+            # visually identical panels.)
             snapshot_indices = list(range(n_iters))
-            while len(snapshot_indices) < 8:
-                snapshot_indices.append(snapshot_indices[-1])
-        
+
         # Clamp indices to valid range
         snapshot_indices = [min(idx, n_iters - 1) for idx in snapshot_indices]
         
@@ -5982,10 +6418,17 @@ def fig_bo_posterior_evaluation(opt_results: Dict, output_dir: str, logger: logg
             ax.xaxis.set_minor_locator(AutoMinorLocator())
             ax.yaxis.set_minor_locator(AutoMinorLocator())
         
-        # Create shared legend at the bottom
+        # Hide any unused panels (when fewer than 8 snapshots are available) so
+        # the grid does not show blank or repeated axes.
+        for extra_ax in axes[len(snapshot_indices):]:
+            extra_ax.set_visible(False)
+
+        # Shared legend hung just below the grid: loc='upper center' with a y
+        # slightly under 0 keeps it clear of the bottom row's x-axis tick labels,
+        # and bbox_inches='tight' expands the canvas to include it.
         handles, labels = axes[0].get_legend_handles_labels()
-        fig.legend(handles, labels, loc='lower center', ncol=3,
-                   bbox_to_anchor=(0.5, 0.02), frameon=True, framealpha=0.95, columnspacing=0.6)
+        fig.legend(handles, labels, loc='upper center', ncol=3,
+                   bbox_to_anchor=(0.5, -0.01), frameon=True, framealpha=0.95, columnspacing=0.6)
         
         title_suffix = f" ({tag})" if tag else ""
         fig.suptitle(f"GP-BO Posterior Evaluation{title_suffix}")
@@ -6165,6 +6608,7 @@ def fig_optimizer_comparison(all_inverse_results: List[Dict], output_dir: str, l
     cmap = plt.get_cmap("viridis", max(2, len(all_inverse_results)))
 
     tids, finals, fcolors = [], [], []
+    conv_lines = 0
     for i, result in enumerate(all_inverse_results):
         tid = result.get("target_info", {}).get("id", f"T{i + 1}")
         best = result.get("gpbo_best", {})
@@ -6172,6 +6616,7 @@ def fig_optimizer_comparison(all_inverse_results: List[Dict], output_dir: str, l
         hist = best.get("best_y_history", [])
         if len(hist):
             ax_conv.plot(range(1, len(hist) + 1), hist, color=color, linewidth=1.8, label=tid)
+            conv_lines += 1
         if "y_best" in best:
             tids.append(tid)
             finals.append(float(best["y_best"]))
@@ -6183,8 +6628,14 @@ def fig_optimizer_comparison(all_inverse_results: List[Dict], output_dir: str, l
     ax_conv.set_title("GP-BO convergence (all targets)")
     ax_conv.xaxis.set_minor_locator(AutoMinorLocator())
     ax_conv.yaxis.set_minor_locator(AutoMinorLocator())
-    if 0 < len(all_inverse_results) <= 8:
+    # Only draw the target legend when convergence traces were actually plotted
+    # (a best-so-far history may be absent), so no empty legend box appears.
+    if 0 < conv_lines <= 8:
         ax_conv.legend(title="Target", fontsize=8, loc="upper right", framealpha=0.92)
+    elif conv_lines == 0:
+        ax_conv.text(0.5, 0.5, "convergence history unavailable",
+                     ha="center", va="center", transform=ax_conv.transAxes,
+                     fontsize=9, color="0.5")
     add_subplot_label(ax_conv, "a")
 
     # (b) converged objective per target
@@ -6228,7 +6679,11 @@ def fig_inverse_optimizer_convergence(opt_results: Dict, output_dir: str, logger
         if yb.size == 0:
             continue
         x = np.arange(1, len(yb) + 1)
-        ax.plot(x, yb, color=color, linestyle=ls, linewidth=1.8, label=label)
+        # Best-so-far is a monotone staircase; draw it as a step (not a diagonal
+        # interpolation) and mark each evaluation, so a trace that converges early
+        # reads as "optimum found at eval k" rather than a featureless flat line.
+        ax.step(x, yb, where="post", color=color, linestyle=ls, linewidth=1.8, label=label)
+        ax.scatter(x, yb, color=color, s=22, zorder=3, edgecolor="black", linewidth=0.4)
         plotted = True
 
     if not plotted:
@@ -6273,7 +6728,7 @@ def fig_target_feasibility(df_metrics: pd.DataFrame, targets: List[Dict], output
     if ea_col == "EA_common":
         ax.set_xlabel(f"Energy absorbed to {D_COMMON:.0f} mm (J)")
     else:
-        ax.set_xlabel("Energy Absorption, EA (J)")
+        ax.set_xlabel(f"Energy Absorption, EA (J) @ $d$={D_COMMON:.0f} mm")
     ax.set_ylabel("Initial Peak Force, IPF (kN)")
     ax.legend(loc='best', framealpha=0.95)
     ax.xaxis.set_minor_locator(AutoMinorLocator())
@@ -6287,8 +6742,15 @@ def fig_target_feasibility(df_metrics: pd.DataFrame, targets: List[Dict], output
     logger.info("  Saved: Fig_inverse_target_feasibility.png")
 
 
-def fig_design_space(models: List[nn.Module], approach: str, scaler_disp: StandardScaler, enc: OneHotEncoder, params: ScalingParams, output_dir: str, logger: logging.Logger):
-    """Generate design space prediction figure (EA at ``D_COMMON`` for LC-fair comparison; IPF unchanged)."""
+def fig_design_space(models: List[nn.Module], approach: str, scaler_disp: StandardScaler, enc: OneHotEncoder, params: ScalingParams, output_dir: str, logger: logging.Logger,
+                     df_metrics: Optional[pd.DataFrame] = None):
+    """Generate design space prediction figure (EA at ``D_COMMON`` for LC-fair comparison; IPF unchanged).
+
+    When ``df_metrics`` is provided, the experimental (EA@D_COMMON, IPF) points
+    are overlaid on the surrogate sweep — the single most direct visual
+    validation of the forward-design claim: the model's design-space curves
+    must pass through (or near) the measured designs.
+    """
     angles = np.linspace(CFG.angle_opt_min, CFG.angle_opt_max, 26)
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
     for lc, marker, ls, color in [("LC1", "o", "-", COLORS["soft"]), ("LC2", "s", "--", COLORS["ddns"])]:
@@ -6307,18 +6769,198 @@ def fig_design_space(models: List[nn.Module], approach: str, scaler_disp: Standa
         axes[0].fill_between(angles, EA_vals - EA_std, EA_vals + EA_std, color=color, alpha=0.16, linewidth=0)
         axes[1].plot(angles, IPF_vals, linestyle=ls, marker=marker, markersize=5, linewidth=1.5, label=lc, color=color, markerfacecolor='white', markeredgecolor=color)
         axes[1].fill_between(angles, IPF_vals - IPF_std, IPF_vals + IPF_std, color=color, alpha=0.16, linewidth=0)
+        # Experimental design points for this LC (EA@D_COMMON + IPF).
+        if df_metrics is not None and len(df_metrics):
+            sub = df_metrics[df_metrics["LC"].astype(str) == lc]
+            ea_col = "EA_common" if "EA_common" in sub.columns else None
+            if len(sub):
+                if ea_col is not None:
+                    axes[0].scatter(sub["Angle"].astype(float), sub[ea_col].astype(float),
+                                    s=70, marker="*", color=color, edgecolor="black",
+                                    linewidth=0.7, zorder=5,
+                                    label=f"{lc} experiment")
+                if "IPF" in sub.columns:
+                    axes[1].scatter(sub["Angle"].astype(float), sub["IPF"].astype(float),
+                                    s=70, marker="*", color=color, edgecolor="black",
+                                    linewidth=0.7, zorder=5,
+                                    label=f"{lc} experiment")
     axes[0].set_xlabel("Angle $\\theta$ (°)")
-    axes[0].set_ylabel(f"Energy absorption (J) @ $d$={D_COMMON:.0f} mm")
-    axes[0].legend(loc='best')
+    axes[0].set_ylabel(f"Energy absorption EA (J) @ $d$={D_COMMON:.0f} mm")
+    axes[0].legend(loc='best', fontsize=9)
     add_subplot_label(axes[0], 'a')
     axes[1].set_xlabel("Angle $\\theta$ (°)")
     axes[1].set_ylabel("Initial Peak Force (kN)")
-    axes[1].legend(loc='best')
+    axes[1].legend(loc='best', fontsize=9)
     add_subplot_label(axes[1], 'b')
     fig.suptitle("Design Space Predictions (Hard-PINN; shaded ±1σ ensemble)")
     fig.savefig(os.path.join(output_dir, "Fig_design_space.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_design_space.png")
+
+
+def table_forward_design_errors(models: List[nn.Module], approach: str,
+                                scaler_disp: StandardScaler, enc: OneHotEncoder,
+                                params: ScalingParams, df_metrics: pd.DataFrame,
+                                output_dir: str, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Design-level forward validation: predicted vs experimental EA/IPF per design.
+
+    This is the quantitative companion to the Fig_design_space overlay — for
+    each measured (θ, LC) design it reports the surrogate's EA@D_COMMON and
+    IPF against the experimental values with percent errors, plus per-LC and
+    overall MAPE.  Pointwise load/energy R² (Table 1) says the curves fit;
+    THIS table says the *design-level engineering quantities* that forward and
+    inverse design actually operate on are predicted correctly.
+    """
+    if df_metrics is None or not len(df_metrics):
+        return None
+    dm = df_metrics.copy()
+    if "EA_common" not in dm.columns:
+        logger.warning("  forward design-error table skipped: df_metrics lacks EA_common")
+        return None
+    rows = []
+    for _, r in dm.iterrows():
+        ang, lc = float(r["Angle"]), str(r["LC"])
+        m = compute_ea_ipf_ensemble(models, approach, ang, lc, scaler_disp, enc, params,
+                                    d_eval=D_COMMON)
+        ea_exp, ipf_exp = float(r["EA_common"]), float(r["IPF"])
+        ea_pred, ipf_pred = float(m["EA"]), float(m["IPF"])
+        rows.append({
+            "Angle_deg": f"{ang:.0f}",
+            "LC": lc,
+            f"EA@{EA_COMMON_MM_TAG}_exp_J": f"{ea_exp:.2f}",
+            f"EA@{EA_COMMON_MM_TAG}_pred_J": f"{ea_pred:.2f}",
+            "EA_pred_std_J": f"{float(m.get('EA_std', 0.0)):.2f}",
+            "EA_error_pct": f"{abs(ea_pred - ea_exp) / max(abs(ea_exp), 1e-12) * 100:.2f}",
+            "IPF_exp_kN": f"{ipf_exp:.3f}",
+            "IPF_pred_kN": f"{ipf_pred:.3f}",
+            "IPF_pred_std_kN": f"{float(m.get('IPF_std', 0.0)):.3f}",
+            "IPF_error_pct": f"{abs(ipf_pred - ipf_exp) / max(abs(ipf_exp), 1e-12) * 100:.2f}",
+        })
+    df = pd.DataFrame(rows)
+    # Per-LC + overall MAPE summary rows.
+    for scope, sub in [("LC1", df[df["LC"] == "LC1"]), ("LC2", df[df["LC"] == "LC2"]), ("ALL", df)]:
+        if len(sub):
+            rows.append({
+                "Angle_deg": f"MAPE_{scope}",
+                "LC": scope,
+                "EA_error_pct": f"{sub['EA_error_pct'].astype(float).mean():.2f}",
+                "IPF_error_pct": f"{sub['IPF_error_pct'].astype(float).mean():.2f}",
+            })
+    out = pd.DataFrame(rows)
+    path = os.path.join(output_dir, "Table_forward_design_errors.csv")
+    out.to_csv(path, index=False)
+    logger.info(f"  Saved: {os.path.basename(path)} (design-level EA/IPF validation, "
+                f"{len(dm)} designs)")
+    return out
+
+
+def compute_ea_ipf_scalar_calibration(models: List[nn.Module], approach: str,
+                                      scaler_disp: StandardScaler, enc: OneHotEncoder,
+                                      params: ScalingParams, df_metrics: pd.DataFrame,
+                                      output_dir: Optional[str], logger: logging.Logger) -> Optional[Dict]:
+    """Calibrate DESIGN-LEVEL (EA, IPF) uncertainty against the measured designs.
+
+    The pointwise-energy conformal factor is calibrated on per-displacement
+    energy residuals and is statistically unrelated to the error distribution
+    of the EA *scalar* (an integral) or the IPF *scalar* (a peak) — applying
+    it to EA_std/IPF_std, as the heatmaps previously did, mixes estimands.
+    This computes the factor at the right level: z_i = |pred_i − exp_i| / σ_i
+    over the measured designs, and returns the 95th-percentile z as the
+    multiplier that makes ±cf·σ a nominal-95% design-level band.
+
+    Caveat (stated for reviewers): with only ~12 designs the factor is coarse,
+    and the same designs are in the full-data surrogate's training set, so
+    this calibrates *in-sample* design-level spread — bands at unmeasured θ
+    remain heuristic.  That is still strictly better than reusing a
+    pointwise-energy factor for a scalar quantity.
+    """
+    if df_metrics is None or not len(df_metrics) or "EA_common" not in df_metrics.columns:
+        return None
+    z_ea, z_ipf, rows = [], [], []
+    for _, r in df_metrics.iterrows():
+        ang, lc = float(r["Angle"]), str(r["LC"])
+        m = compute_ea_ipf_ensemble(models, approach, ang, lc, scaler_disp, enc, params,
+                                    d_eval=D_COMMON)
+        ea_exp, ipf_exp = float(r["EA_common"]), float(r["IPF"])
+        ea_sig = max(float(m.get("EA_std", 0.0)), 1e-9)
+        ipf_sig = max(float(m.get("IPF_std", 0.0)), 1e-9)
+        ze = abs(float(m["EA"]) - ea_exp) / ea_sig
+        zi = abs(float(m["IPF"]) - ipf_exp) / ipf_sig
+        z_ea.append(ze); z_ipf.append(zi)
+        rows.append({"Angle_deg": f"{ang:.0f}", "LC": lc,
+                     "z_EA": f"{ze:.3f}", "z_IPF": f"{zi:.3f}"})
+    cal = {
+        "ea_cf_2sigma": float(np.percentile(z_ea, 95.4)),
+        "ipf_cf_2sigma": float(np.percentile(z_ipf, 95.4)),
+        "ea_cf_1sigma": float(np.percentile(z_ea, 68.3)),
+        "ipf_cf_1sigma": float(np.percentile(z_ipf, 68.3)),
+        "n_designs": len(rows),
+    }
+    logger.info(f"  EA/IPF scalar calibration over {len(rows)} designs: "
+                f"cf_2σ(EA)={cal['ea_cf_2sigma']:.2f}, cf_2σ(IPF)={cal['ipf_cf_2sigma']:.2f}")
+    if output_dir is not None:
+        df = pd.DataFrame(rows)
+        for k, v in cal.items():
+            df.attrs[k] = v
+        summary = pd.DataFrame([{"Angle_deg": "cf_2sigma", "LC": "",
+                                 "z_EA": f"{cal['ea_cf_2sigma']:.3f}",
+                                 "z_IPF": f"{cal['ipf_cf_2sigma']:.3f}"}])
+        pd.concat([df, summary], ignore_index=True).to_csv(
+            os.path.join(output_dir, "Table_ea_ipf_scalar_calibration.csv"), index=False)
+        logger.info("  Saved: Table_ea_ipf_scalar_calibration.csv")
+    return cal
+
+
+def table_null_baseline_design_level(df_all: pd.DataFrame, theta_star: float,
+                                     output_dir: str, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Design-level null model: 1-D interpolation of experimental EA(θ) / IPF(θ).
+
+    The natural competitor for design-level forward prediction with a single
+    geometric variable is simply interpolating the measured EA and IPF over θ
+    (per LC) — no learning at all.  This table holds out θ* (the unseen-angle
+    protocol's angle), linearly interpolates EA@D_COMMON(θ) and IPF(θ) through
+    the remaining angles, and reports the null model's error at θ*.  The
+    surrogate's design-level errors (Table_forward_design_errors.csv and the
+    unseen-protocol results) must be judged against THIS baseline — pointwise
+    R² against tree/GP baselines does not answer the design-level question.
+    """
+    try:
+        dm = compute_design_space_metrics(df_all, logger)
+        enrich_df_metrics_ea_common(dm, df_all, logger=logger)
+    except Exception as exc:
+        logger.warning(f"  null-baseline table skipped: {exc}")
+        return None
+    if "EA_common" not in dm.columns or not len(dm):
+        return None
+    rows = []
+    for lc in sorted(dm["LC"].astype(str).unique()):
+        sub = dm[dm["LC"].astype(str) == lc].sort_values("Angle")
+        angs = sub["Angle"].astype(float).values
+        if theta_star not in angs or len(angs) < 3:
+            continue
+        train_mask = angs != theta_star
+        for col, unit in [("EA_common", "J"), ("IPF", "kN")]:
+            y = sub[col].astype(float).values
+            y_true = float(y[~train_mask][0])
+            y_pred = float(np.interp(theta_star, angs[train_mask], y[train_mask]))
+            rows.append({
+                "LC": lc,
+                "Quantity": f"EA@{EA_COMMON_MM_TAG} ({unit})" if col == "EA_common" else f"{col} ({unit})",
+                "theta_star_deg": f"{theta_star:.0f}",
+                "Experimental": f"{y_true:.3f}",
+                "Null_interp_pred": f"{y_pred:.3f}",
+                "Null_error_pct": f"{abs(y_pred - y_true) / max(abs(y_true), 1e-12) * 100:.2f}",
+                "Note": "linear interpolation of experimental values over θ (no model)",
+            })
+    if not rows:
+        logger.warning("  null-baseline table skipped: θ* not in measured angle grid")
+        return None
+    df = pd.DataFrame(rows)
+    path = os.path.join(output_dir, "Table_null_baseline_design_level.csv")
+    df.to_csv(path, index=False)
+    logger.info(f"  Saved: {os.path.basename(path)} — the design-level accuracy floor the "
+                f"surrogates must beat at θ*={theta_star:.0f}°")
+    return df
 
 
 def fig_pareto_tradeoff(df_pareto: pd.DataFrame, output_dir: str, logger: logging.Logger):
@@ -6506,17 +7148,23 @@ def fig_model_complexity(dual_results: Dict, output_dir: str, logger: logging.Lo
     ax.set_xticks(x)
     ax.set_xticklabels([MODEL_LABELS[a] for a in approaches])
     ax.set_ylabel("Number of Parameters")
+    ax.margins(y=0.12)
     add_subplot_label(ax, 'a')
+    # Offset-points annotation (scale-independent): an absolute data-unit offset
+    # placed the label far outside the axes on the small-valued time panel.
     for bar, val in zip(bars, n_params):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 100, f'{val:,}', ha='center', va='bottom')
+        ax.annotate(f'{val:,}', (bar.get_x() + bar.get_width()/2, bar.get_height()),
+                    ha='center', va='bottom', xytext=(0, 3), textcoords='offset points')
     ax = axes[1]
     bars = ax.bar(x, train_times, color=colors_bar, edgecolor='black', linewidth=1.2, alpha=0.8)
     ax.set_xticks(x)
     ax.set_xticklabels([MODEL_LABELS[a] for a in approaches])
     ax.set_ylabel("Training Time (s)")
+    ax.margins(y=0.12)
     add_subplot_label(ax, 'b')
     for bar, val in zip(bars, train_times):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1, f'{val:.1f}', ha='center', va='bottom')
+        ax.annotate(f'{val:.1f}', (bar.get_x() + bar.get_width()/2, bar.get_height()),
+                    ha='center', va='bottom', xytext=(0, 3), textcoords='offset points')
     fig.suptitle("Model Complexity Comparison")
     fig.savefig(os.path.join(output_dir, "Fig_model_complexity.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
@@ -6878,7 +7526,7 @@ def train_baseline_models(train_df: pd.DataFrame, val_df: pd.DataFrame,
             # Subsample for GP (O(N³) complexity)
             max_gp_samples = 2000
             if len(X_train) > max_gp_samples:
-                idx = np.random.choice(len(X_train), max_gp_samples, replace=False)
+                idx = np.random.default_rng(CFG.seed).choice(len(X_train), max_gp_samples, replace=False)
                 X_train_gp = X_train[idx]
                 y_train_load_gp = y_train_load[idx]
                 y_train_energy_gp = y_train_energy[idx]
@@ -7360,45 +8008,69 @@ def compute_uncertainty_calibration(dual_results: Dict, logger: logging.Logger) 
             m = dual_results[protocol][approach]["metrics"]
             preds = m["predictions"]
             true_vals = m["true_values"]
-            
+
             if "load_std" not in preds:
                 continue
-            
+
             residuals = np.abs(true_vals["load"] - preds["load"])
             sigma = preds["load_std"]
-            
+
             # Avoid division by zero for zero-variance predictions
             sigma_safe = np.maximum(sigma, 1e-12)
-            
+
             # Compute observed coverage at each level
             observed_coverage = np.array([
                 float(np.mean(residuals < s * sigma_safe)) for s in sigma_levels
             ])
-            
-            # Post-hoc conformal calibration.
-            #
-            # We compute TWO multipliers:
-            #   c1 = quantile of |residual|/sigma at 0.683 (1-sigma coverage)
-            #   c2 = quantile of |residual|/sigma at 0.954 (2-sigma coverage)
-            # A single scalar correction (just c1) is exact only when the residual
-            # distribution is Gaussian; with heavier tails the scaling factor for
-            # 2-sigma coverage differs from c1. Reporting both lets the figure
-            # routines plot truly-calibrated 1- and 2-sigma bands as
-            #   ±c1*sigma   (68% coverage)
-            #   ±c2*sigma   (95% coverage)
-            # rather than the linear extrapolation ±c1*2*sigma which under-covers
-            # whenever errors are heavy-tailed.
-            normalized_residuals = residuals / sigma_safe
-            conformal_factor = float(np.percentile(normalized_residuals, 68.3))   # c1
-            conformal_factor_2sigma = float(np.percentile(normalized_residuals, 95.4))  # c2
 
-            # Coverage achieved by the new bands (sanity check; should be ~exact).
-            corrected_coverage = np.array([
-                float(np.mean(residuals < s * conformal_factor * sigma_safe)) for s in sigma_levels
-            ])
-            corrected_coverage_2sigma = np.array([
-                float(np.mean(residuals < s * conformal_factor_2sigma * sigma_safe)) for s in sigma_levels
-            ])
+            # ---- SPLIT-CONFORMAL calibration (curve-level split) -----------
+            # The factors c1/c2 (68.3 / 95.4 percentiles of |residual|/sigma)
+            # must be FIT on residuals disjoint from those used to REPORT
+            # coverage, otherwise "corrected coverage" is true by construction.
+            # The exchangeable unit here is the curve (residuals within one
+            # load-displacement curve are strongly dependent), so validation
+            # curves are split into a calibration half and a report half.
+            # For the unseen protocol (2 curves: LC1/LC2 at θ*) this means
+            # calibrate-on-one-curve / report-on-the-other.  When curve
+            # identity is unavailable, fall back to in-sample calibration and
+            # say so loudly.
+            val_df_p = dual_results[protocol].get("val_df")
+            calib_mask = None
+            if val_df_p is not None and len(val_df_p) == len(residuals):
+                curve_keys = list(zip(val_df_p["Angle"].astype(float),
+                                      val_df_p["LC"].astype(str)))
+                uniq = sorted(set(curve_keys))
+                if len(uniq) >= 2:
+                    calib_curves = set(uniq[0::2])   # deterministic alternation
+                    calib_mask = np.array([k in calib_curves for k in curve_keys])
+            def _fit_and_report(res, sig):
+                """Fit factors on the calib half, report coverage on the rest."""
+                if calib_mask is not None and 0 < calib_mask.sum() < len(res):
+                    fit_res, fit_sig = res[calib_mask], sig[calib_mask]
+                    rep_res, rep_sig = res[~calib_mask], sig[~calib_mask]
+                    split_ok = True
+                else:
+                    fit_res, fit_sig = res, sig
+                    rep_res, rep_sig = res, sig
+                    split_ok = False
+                nr = fit_res / fit_sig
+                c1 = float(np.percentile(nr, 68.3))
+                c2 = float(np.percentile(nr, 95.4))
+                cov1 = np.array([float(np.mean(rep_res < s * c1 * rep_sig)) for s in sigma_levels])
+                cov2 = np.array([float(np.mean(rep_res < s * c2 * rep_sig)) for s in sigma_levels])
+                # In-sample (legacy) factors for reference/back-compat analyses.
+                nr_all = res / sig
+                c1_ins = float(np.percentile(nr_all, 68.3))
+                c2_ins = float(np.percentile(nr_all, 95.4))
+                return c1, c2, cov1, cov2, c1_ins, c2_ins, split_ok
+            (conformal_factor, conformal_factor_2sigma,
+             corrected_coverage, corrected_coverage_2sigma,
+             cf1_insample, cf2_insample, split_ok) = _fit_and_report(residuals, sigma_safe)
+            if not split_ok:
+                logger.warning(
+                    f"  {protocol} {approach}: curve-level split unavailable — conformal "
+                    f"factors are IN-SAMPLE (legacy mode); corrected coverage is "
+                    f"tautological and must not be reported as evidence")
 
             # Also compute energy calibration if available.
             energy_cal = {}
@@ -7406,15 +8078,15 @@ def compute_uncertainty_calibration(dual_results: Dict, logger: logging.Logger) 
                 e_residuals = np.abs(true_vals["energy"] - preds["energy"])
                 e_sigma = np.maximum(preds["energy_std"], 1e-12)
                 e_observed = np.array([float(np.mean(e_residuals < s * e_sigma)) for s in sigma_levels])
-                e_norm_res = e_residuals / e_sigma
-                e_conformal = float(np.percentile(e_norm_res, 68.3))
-                e_conformal_2 = float(np.percentile(e_norm_res, 95.4))
-                e_corrected = np.array([float(np.mean(e_residuals < s * e_conformal * e_sigma)) for s in sigma_levels])
+                (e_conformal, e_conformal_2, e_corrected, _e_cov2,
+                 e_cf1_ins, e_cf2_ins, _e_split) = _fit_and_report(e_residuals, e_sigma)
                 energy_cal = {
                     "energy_observed_coverage": e_observed,
                     "energy_conformal_factor": e_conformal,
                     "energy_conformal_factor_2sigma": e_conformal_2,
                     "energy_corrected_coverage": e_corrected,
+                    "energy_conformal_factor_insample": e_cf1_ins,
+                    "energy_conformal_factor_2sigma_insample": e_cf2_ins,
                 }
 
             calibration[protocol][approach] = {
@@ -7425,6 +8097,12 @@ def compute_uncertainty_calibration(dual_results: Dict, logger: logging.Logger) 
                 "conformal_factor_2sigma": conformal_factor_2sigma,
                 "corrected_coverage": corrected_coverage,
                 "corrected_coverage_2sigma": corrected_coverage_2sigma,
+                # Provenance: True => factors fit on a curve-level calibration
+                # half and coverage reported on held-out curves (honest
+                # split-conformal); False => legacy in-sample (tautological).
+                "split_conformal": bool(split_ok),
+                "conformal_factor_insample": cf1_insample,
+                "conformal_factor_2sigma_insample": cf2_insample,
                 # Legacy keys for backward compatibility
                 "load_within_1sigma": float(observed_coverage[1]),  # index 1 = 1.0 sigma
                 "load_within_2sigma": float(observed_coverage[3]),  # index 3 = 2.0 sigma
@@ -7432,14 +8110,14 @@ def compute_uncertainty_calibration(dual_results: Dict, logger: logging.Logger) 
                 "expected_2sigma": 0.954,
                 **energy_cal,
             }
-            
+
             logger.info(f"  {protocol} {approach}: {observed_coverage[1]:.1%} within +/-1sigma "
                        f"(expected: 68.3%), {observed_coverage[3]:.1%} within +/-2sigma (expected: 95.4%)")
-            logger.info(f"    Conformal factor: {conformal_factor:.3f} "
-                       f"(1.0=perfectly calibrated, >{1.0}=overconfident)")
-            logger.info(f"    After conformal correction: {corrected_coverage[1]:.1%} within +/-1sigma, "
+            logger.info(f"    Conformal factor ({'split, curve-level' if split_ok else 'IN-SAMPLE'}): "
+                       f"{conformal_factor:.3f} (1.0=perfectly calibrated, >1=overconfident)")
+            logger.info(f"    Held-out corrected coverage: {corrected_coverage[1]:.1%} within +/-1sigma, "
                        f"{corrected_coverage[3]:.1%} within +/-2sigma")
-    
+
     return calibration
 
 
@@ -7933,13 +8611,29 @@ def generate_summary_tables(dual_results: Dict, df_metrics: pd.DataFrame, all_in
                 continue
             m = dual_results[protocol][approach]["metrics"]
             mm = dual_results[protocol][approach]["member_metrics"]
-            ci_load = compute_confidence_intervals([x["load_r2"] for x in mm])
-            ci_energy = compute_confidence_intervals([x["energy_r2"] for x in mm])
+            member_load = [x["load_r2"] for x in mm]
+            member_energy = [x["energy_r2"] for x in mm]
+            ci_load = compute_confidence_intervals(member_load)
+            ci_energy = compute_confidence_intervals(member_energy)
+            # All-members (pre-convergence-fence) mean, when recorded: lets
+            # readers verify the fence is direction-conservative rather than
+            # quietly inflating the survivor-only statistics.
+            mm_all = dual_results[protocol][approach].get("member_metrics_all") or mm
+            # Load_R2 / Energy_R2 are the ENSEMBLE-aggregated metrics (the headline).
+            # The 95% CI is a bootstrap over the per-member R² distribution, so it
+            # brackets the mean-member R² (reported alongside), not the ensemble
+            # aggregate — which normally exceeds the member mean.  Reporting both
+            # keeps the CI consistent with the statistic it actually describes.
             row = {"Protocol": protocol_label(protocol), "Model": MODEL_LABELS[approach],
                         "M_total": dual_results[protocol][approach].get("M_total", len(mm)),
                         "M_eff": dual_results[protocol][approach].get("M_eff", len(mm)),
-                        "Load_R2": f"{m['load_r2']:.4f}", "Load_R2_CI": f"[{ci_load['ci_lower']:.4f}, {ci_load['ci_upper']:.4f}]",
-                        "Energy_R2": f"{m['energy_r2']:.4f}", "Energy_R2_CI": f"[{ci_energy['ci_lower']:.4f}, {ci_energy['ci_upper']:.4f}]",
+                        "Load_R2": f"{m['load_r2']:.4f}",
+                        "Mean_Member_Load_R2": f"{np.mean(member_load):.4f}",
+                        "Mean_Member_Load_R2_all": f"{np.mean([x['load_r2'] for x in mm_all]):.4f}",
+                        "Member_Load_R2_95CI": f"[{ci_load['ci_lower']:.4f}, {ci_load['ci_upper']:.4f}]",
+                        "Energy_R2": f"{m['energy_r2']:.4f}",
+                        "Mean_Member_Energy_R2": f"{np.mean(member_energy):.4f}",
+                        "Member_Energy_R2_95CI": f"[{ci_energy['ci_lower']:.4f}, {ci_energy['ci_upper']:.4f}]",
                         "Load_RMSE": f"{m['load_rmse']:.4f}", "Energy_RMSE": f"{m['energy_rmse']:.4f}",
                         "Load_MAE": f"{m.get('load_mae', 0):.4f}", "Energy_MAE": f"{m.get('energy_mae', 0):.4f}",
                         "Avg_Time_s": f"{dual_results[protocol][approach]['avg_training_time']:.1f}"}
@@ -8000,15 +8694,38 @@ def generate_summary_tables(dual_results: Dict, df_metrics: pd.DataFrame, all_in
     if all_inverse:
         rows = []
         for res in all_inverse:
-            row = {f"Target_EA@{EA_COMMON_MM_TAG}_J": f"{res.get('target_ea', 0):.3f}",
+            tinfo = res.get("target_info") or {}
+            row = {"Target": tinfo.get("id", ""),
+                   f"Target_EA@{EA_COMMON_MM_TAG}_J": f"{res.get('target_ea', 0):.3f}",
                    "Target_IPF_kN": f"{res['target_ipf']:.3f}"}
+            # Ground-truth provenance: targets are drawn from observed
+            # experimental rows, so the source design is known.  Reporting
+            # θ_true / LC_true and the recovery error Δθ turns the table
+            # from optimizer self-consistency into a verifiable round-trip.
+            src_angle = tinfo.get("source_angle")
+            src_lc = tinfo.get("source_lc")
+            row["True_theta_deg"] = f"{src_angle:.1f}" if src_angle is not None else ""
+            row["True_LC"] = src_lc or ""
             for method in ["gpbo"]:
                 key = f"{method}_best"
                 if key in res:
                     best = res[key]
                     prefix = method.upper()
-                    row[f"{prefix}_Angle"] = f"{best['x_best']:.1f}"
-                    row[f"{prefix}_LC"] = best.get("lc", "")
+                    rec_angle = float(best["x_best"])
+                    rec_lc = best.get("lc", "")
+                    row[f"{prefix}_Angle"] = f"{rec_angle:.1f}"
+                    row[f"{prefix}_LC"] = rec_lc
+                    if src_angle is not None:
+                        row["Delta_theta_deg"] = f"{abs(rec_angle - float(src_angle)):.2f}"
+                    if src_lc:
+                        row["LC_match"] = "Yes" if str(rec_lc) == str(src_lc) else "No"
+                    # Bound-active flag: the recovered angle sits on the search
+                    # boundary, so the unconstrained optimum may lie outside
+                    # the tested angle range — reviewers need to see this.
+                    tol = 1e-6 + 0.05 * (CFG.angle_opt_max - CFG.angle_opt_min) / 100.0
+                    at_bound = (abs(rec_angle - CFG.angle_opt_min) <= tol
+                                or abs(rec_angle - CFG.angle_opt_max) <= tol)
+                    row["Bound_active"] = "Yes" if at_bound else "No"
                     row[f"{prefix}_EA_err%"] = f"{best.get('ea_error_pct', float('nan')):.1f}"
                     row[f"{prefix}_IPF_err%"] = f"{best['ipf_error_pct']:.1f}"
                     # Delivered crashworthiness metrics (the engineering outcome)
@@ -8227,7 +8944,14 @@ def replot_figures_from_state(state: Dict, output_dir: str, logger: logging.Logg
         fig_inverse_posterior_likelihood(all_inverse_results, output_dir, logger)
 
     if inv_models is not None:
-        fig_design_space(inv_models, "hard", inv_scaler_disp, inv_enc, inv_params, output_dir, logger)
+        fig_design_space(inv_models, "hard", inv_scaler_disp, inv_enc, inv_params, output_dir, logger,
+                         df_metrics=df_metrics)
+        if df_metrics is not None:
+            try:
+                table_forward_design_errors(inv_models, "hard", inv_scaler_disp, inv_enc,
+                                            inv_params, df_metrics, output_dir, logger)
+            except Exception as e:
+                logger.warning(f"  forward design-error table skipped: {e}")
 
     if jacobian_results is not None:
         fig_forward_map_jacobian(jacobian_results, output_dir, logger)
@@ -8250,9 +8974,17 @@ def replot_figures_from_state(state: Dict, output_dir: str, logger: logging.Logg
 
 
 def generate_optimizer_comparison_table(all_inverse_results: List[Dict], output_dir: str, logger: logging.Logger):
-    """Summarize GP-BO inverse runs per target (single optimizer; dual *criteria*).
-    
-    Reports two labels per target when applicable:
+    """Summarize GP-BO inverse runs per target, anchored to a dense-grid baseline.
+
+    Each row reports the GP-BO recovery alongside the exhaustive dense-grid
+    reference (from the already-computed solution landscape: 201 θ × both LCs),
+    the BO-vs-grid angle discrepancy, the total multi-start evaluation cost,
+    and a Bound_active flag when the recovered angle sits on the search-box
+    boundary.  The grid columns give reviewers the honest context for GP-BO in
+    this low-dimensional design space: BO reaches the grid optimum with far
+    fewer objective evaluations.
+
+    Winner labels (populated only when >1 optimizer competes):
       [acc] lowest final objective (accuracy proxy on the BO loss)
       [eff] fewest evaluations among runs with max(EA%, IPF%) error < 3%
 
@@ -8281,6 +9013,31 @@ def generate_optimizer_comparison_table(all_inverse_results: List[Dict], output_
         eff_winner = select_most_efficient_optimizer(result, error_threshold_pct=3.0)
         acc_name = acc_winner.get("name", "") if acc_winner else ""
         eff_name = eff_winner.get("name", "") if eff_winner else ""
+        # Dense-grid reference baseline from the already-computed solution
+        # landscape (201 θ points × both LCs = 402 objective evaluations).
+        # This anchors the GP-BO result against an exhaustive equal-fidelity
+        # search: BO should reach the grid optimum with far fewer evaluations,
+        # which is the honest argument for using BO in this low-dimensional
+        # design space.
+        grid_theta, grid_lc, grid_J, grid_n = "", "", "", ""
+        landscape = result.get("solution_landscape") or {}
+        tg = landscape.get("theta_grid")
+        if tg is not None:
+            g_best_J, g_best_theta, g_best_lc, g_count = float("inf"), None, None, 0
+            for k, v in landscape.items():
+                if k.startswith("J_"):
+                    J_vals = np.asarray(v, dtype=float)
+                    g_count += len(J_vals)
+                    j = int(np.nanargmin(J_vals))
+                    if J_vals[j] < g_best_J:
+                        g_best_J = float(J_vals[j])
+                        g_best_theta = float(np.asarray(tg)[j])
+                        g_best_lc = k[2:]
+            if g_best_theta is not None:
+                grid_theta = f"{g_best_theta:.2f}"
+                grid_lc = g_best_lc
+                grid_J = f"{g_best_J:.6f}"
+                grid_n = g_count
         for method in ["gpbo"]:
             key = f"{method}_best"
             if key in result:
@@ -8296,10 +9053,19 @@ def generate_optimizer_comparison_table(all_inverse_results: List[Dict], output_
                 # Compute iterations to 99% convergence
                 byh = best.get("best_y_history", np.array([]))
                 conv_iter = iters_to_convergence(byh) if len(byh) > 0 else ""
-                rows.append({"Target": target_id,
+                rec_angle = float(best["x_best"])
+                # Total surrogate calls across the multi-start (the honest
+                # search cost, not just the winning restart's budget).
+                rs = (result.get("gpbo_joint") or {}).get("restart_summary", {})
+                total_calls = rs.get("total_surrogate_calls", best.get("n_evals", ""))
+                tol = 1e-6 + 0.05 * (CFG.angle_opt_max - CFG.angle_opt_min) / 100.0
+                at_bound = (abs(rec_angle - CFG.angle_opt_min) <= tol
+                            or abs(rec_angle - CFG.angle_opt_max) <= tol)
+                row = {"Target": target_id,
                             "Optimizer": display,
-                            "Best_Angle": f"{best['x_best']:.2f}",
+                            "Best_Angle": f"{rec_angle:.2f}",
                             "Selected_LC": best.get("lc", ""),
+                            "Bound_active": "Yes" if at_bound else "No",
                             "EA_Error_%": f"{best.get('ea_error_pct', float('nan')):.2f}",
                             "IPF_Error_%": f"{best['ipf_error_pct']:.2f}",
                             f"Delivered_EA@{EA_COMMON_MM_TAG}_J": f"{best.get('pred_ea', 0):.2f}",
@@ -8307,11 +9073,24 @@ def generate_optimizer_comparison_table(all_inverse_results: List[Dict], output_
                             "Delivered_IPF_kN": f"{best.get('pred_ipf', 0):.3f}",
                             "Objective": f"{best['y_best']:.6f}",
                             "N_Evals": best.get("n_evals", ""),
+                            "Total_Multistart_Evals": total_calls,
                             "Iters_to_99pct": conv_iter,
                             "Wall_Time_s": f"{best.get('wall_time', 0):.2f}",
-                            "Winner": badge})
+                            "Grid_Best_Angle": grid_theta,
+                            "Grid_Best_LC": grid_lc,
+                            "Grid_Best_Objective": grid_J,
+                            "Grid_N_Evals": grid_n,
+                            "Winner": badge}
+                if grid_theta:
+                    row["BO_vs_Grid_dTheta_deg"] = f"{abs(rec_angle - float(grid_theta)):.2f}"
+                rows.append(row)
     if rows:
         df_comp = pd.DataFrame(rows)
+        # The Winner badge only carries information when more than one optimizer
+        # competes.  With the single-optimizer GP-BO configuration it is always
+        # empty and misreads as missing data, so drop it in that case.
+        if "Winner" in df_comp.columns and df_comp["Winner"].astype(str).str.strip().eq("").all():
+            df_comp = df_comp.drop(columns=["Winner"])
         df_comp.to_csv(os.path.join(output_dir, "Table_optimizer_comparison.csv"), index=False)
         logger.info("  Saved: Table_optimizer_comparison.csv")
 
@@ -8369,6 +9148,10 @@ def log_runtime_environment(output_dir: str, logger: logging.Logger,
         "cuda_device_name": cuda_dev_name,
         "sklearn": _pkg_ver("scikit-learn"),
         "scipy": scipy_ver,
+        "scikit_optimize": _pkg_ver("scikit-optimize"),
+        "openpyxl": _pkg_ver("openpyxl"),
+        "git_sha": _git_sha_short(),
+        "data_fingerprint": getattr(CFG, "data_fingerprint", ""),
         "HAS_SCIPY": bool(HAS_SCIPY),
         "HAS_SKOPT": bool(HAS_SKOPT),
         "HAS_SKLEARN_GP": bool(HAS_SKLEARN_GP),
@@ -8516,6 +9299,17 @@ def generate_compute_budget_summary(
             "avg_train_time_s_per_member": _fmt_float_for_csv(best.get("wall_time")),
             "n_gpbo_calls": best.get("n_evals", ""),
         })
+    # Hardware row: wall-time claims are uninterpretable without the device.
+    try:
+        hw = (torch.cuda.get_device_name(0) if torch.cuda.is_available()
+              else f"CPU ({__import__('platform').processor() or 'unknown'})")
+    except Exception:
+        hw = "unknown"
+    rows.append({
+        "stage": f"hardware: {hw} | torch {torch.__version__} | git {_git_sha_short() or 'n/a'}",
+        "ensemble_M_total": "", "ensemble_M_effective": "", "n_parameters": "",
+        "avg_train_time_s_per_member": "",
+    })
     out = os.path.join(output_dir, "Table_compute_reproducibility_budget.csv")
     pd.DataFrame(rows).to_csv(out, index=False)
     logger.info("  Saved: Table_compute_reproducibility_budget.csv")
@@ -8626,18 +9420,32 @@ def fig_validation_error_maps(
         disp = dr["val_df"]["disp_mm"].values.astype(float)
         abs_le = np.abs(ens["load_errors"])
         abs_ee = np.abs(ens["energy_errors"])
+        # When every validation row shares one angle (the held-out θ* of the
+        # unseen protocol), a 2-D angle×displacement hexbin collapses to a
+        # single vertical stripe in a mostly empty panel.  Show the error
+        # profile vs displacement at that angle instead.
+        single_angle = float(np.ptp(ang)) < 2.0
         for i, (errs, title) in enumerate([(abs_le, "|load error| (kN)"), (abs_ee, "|energy error| (J)")]):
             ax = axes[i, j]
-            hb = ax.hexbin(
-                ang, disp, C=errs, reduce_C_function=np.mean,
-                gridsize=(28, 24), mincnt=1, cmap="magma", linewidths=0,
-            )
-            plt.colorbar(hb, ax=ax, fraction=0.046, pad=0.02, label=title)
-            ax.set_xlabel(r"Angle $\theta$ (°)")
-            ax.set_ylabel("Displacement (mm)")
-            # Keep titles short (model name goes in the suptitle) so they do not
-            # run into the panel label in these colorbar-narrowed panels.
-            ax.set_title(protocol_label(protocol))
+            if single_angle:
+                order = np.argsort(disp)
+                sc = ax.scatter(disp[order], errs[order], c=errs[order], cmap="magma",
+                                s=46, edgecolors="black", linewidths=0.3)
+                plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.02, label=title)
+                ax.set_xlabel("Displacement (mm)")
+                ax.set_ylabel(title)
+                ax.set_title(protocol_label(protocol))
+            else:
+                hb = ax.hexbin(
+                    ang, disp, C=errs, reduce_C_function=np.mean,
+                    gridsize=(28, 24), mincnt=1, cmap="magma", linewidths=0,
+                )
+                plt.colorbar(hb, ax=ax, fraction=0.046, pad=0.02, label=title)
+                ax.set_xlabel(r"Angle $\theta$ (°)")
+                ax.set_ylabel("Displacement (mm)")
+                # Keep titles short (model name goes in the suptitle) so they do
+                # not run into the panel label in these colorbar-narrowed panels.
+                ax.set_title(protocol_label(protocol))
             ax.grid(True, alpha=0.22, linestyle="--")
             add_subplot_label(ax, chr(ord("a") + i * len(protocols) + j))
     fig.suptitle(f"Validation error maps: {MODEL_LABELS.get(approach, approach)}")
@@ -8716,6 +9524,9 @@ def fig_qq_load_residuals(
         f"Q–Q (load residuals): unseen θ*={CFG.theta_star}°, "
         f"{MODEL_LABELS.get(approach, approach)}"
     )
+    # probplot sets generic axis labels; make them specific and unit-bearing.
+    ax.set_xlabel("Theoretical quantiles")
+    ax.set_ylabel("Ordered load residuals (kN)")
     ax.grid(True, alpha=0.28, linestyle="--")
     # Single-panel figure: no "(a)" panel label needed.
     fig.savefig(
@@ -8865,7 +9676,7 @@ def fig_d_common_sensitivity_ea(
             ax.plot(d_grid, ea_list, color=line_colors[k], lw=1.6, label=f"θ={ang:.1f}°")
         ax.axvline(D_COMMON, color="gray", ls=":", lw=1.2, alpha=0.85)
         ax.set_xlabel(r"Displacement endpoint $d$ (mm) for EA")
-        ax.set_ylabel(r"EA (J) to $d$")
+        ax.set_ylabel(r"EA up to $d$ (J)")
         ax.set_title(f"{lc} (d_end={d_end:.0f} mm)")
         ax.legend(loc="best")
         ax.grid(True, alpha=0.26, linestyle="--")
@@ -8952,8 +9763,41 @@ def fig_inverse_vs_nearest_experimental_curve(
     logger.info("  Saved: Fig_inverse_vs_nearest_experimental_curve.png")
 
 
-def generate_output_manifest(output_dir: str, logger: logging.Logger) -> None:
-    """List generated figures, tables, and key sidecar files (no extra experiments)."""
+# Core artifacts a full production run (--mode all, robustness on) MUST emit.
+# The manifest compares against this list and ends the run with a prominent
+# failure summary when any is missing — previously a swallowed exception could
+# silently drop a required paper artifact and the run still "succeeded".
+REQUIRED_PAPER_ARTIFACTS = [
+    "Table1_forward_results.csv",
+    "Table2_statistical_tests.csv",
+    "Table3_inverse_design.csv",
+    "Table4_model_complexity.csv",
+    "Table5_per_LC_breakdown.csv",
+    "Table_optimizer_comparison.csv",
+    "Table_forward_design_errors.csv",
+    "Table_null_baseline_design_level.csv",
+    "Table_physical_plausibility_audit.csv",
+    "Fig_dataset_overview.png",
+    "Fig_parity_unseen.png",
+    "Fig_residuals_unseen.png",
+    "Fig_physics_verification.png",
+    "Fig_reliability_diagram.png",
+    "Fig_design_space.png",
+    "Fig_pareto_tradeoff.png",
+    "Fig_multiobjective_heatmaps.png",
+    "Fig_optimizer_comparison.png",
+    "Fig_inverse_parity_uncertainty.png",
+]
+
+
+def generate_output_manifest(output_dir: str, logger: logging.Logger,
+                             check_required: bool = False) -> None:
+    """List generated figures, tables, and key sidecar files (no extra experiments).
+
+    With ``check_required=True`` (full-pipeline runs) the manifest is compared
+    against :data:`REQUIRED_PAPER_ARTIFACTS` and missing entries produce a
+    prominent failure summary in the log.
+    """
     exts = (".png", ".csv", ".json", ".txt", ".pdf")
     rows = []
     for name in sorted(os.listdir(output_dir)):
@@ -8981,6 +9825,18 @@ def generate_output_manifest(output_dir: str, logger: logging.Logger) -> None:
         mf = os.path.join(output_dir, "MANIFEST_outputs.csv")
         pd.DataFrame(rows).to_csv(mf, index=False)
         logger.info(f"  Saved: {os.path.basename(mf)} ({len(rows)} entries)")
+    if check_required:
+        present = {r["filename"] for r in rows}
+        missing = [a for a in REQUIRED_PAPER_ARTIFACTS if a not in present]
+        if missing:
+            logger.warning("=" * 80)
+            logger.warning(f"MISSING REQUIRED PAPER ARTIFACTS ({len(missing)}):")
+            for a in missing:
+                logger.warning(f"  MISSING: {a}")
+            logger.warning("Search the log above for 'skipped'/'WARNING' to find the cause.")
+            logger.warning("=" * 80)
+        else:
+            logger.info(f"  Required-artifact check: all {len(REQUIRED_PAPER_ARTIFACTS)} present")
 
 
 # =============================================================================
@@ -8999,14 +9855,53 @@ _INVERSE_BUNDLE  = "inverse_models.pt"
 _ANALYSIS_BUNDLE = "analysis_results.pt"
 
 
+def _git_sha_short() -> str:
+    """Current git commit (short), or '' when unavailable (e.g. tarball run)."""
+    try:
+        import subprocess
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=10,
+                             cwd=os.path.dirname(os.path.abspath(__file__)))
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _bundle_meta() -> Dict:
+    """Provenance stamp: ties a bundle to the data, config, and code that made it."""
+    try:
+        cfg_sha = __import__("hashlib").sha256(
+            repr(sorted(vars(CFG).items())).encode()).hexdigest()[:12]
+    except Exception:
+        cfg_sha = ""
+    return {
+        "git_sha": _git_sha_short(),
+        "data_fingerprint": getattr(CFG, "data_fingerprint", ""),
+        "cfg_sha": cfg_sha,
+        "seed": int(getattr(CFG, "seed_base", 0)),
+    }
+
+
 def _save_bundle(state: Dict, output_dir: str, filename: str, logger: logging.Logger) -> str:
-    """Atomic ``torch.save`` (tmp + os.replace) — SLURM-preempt safe."""
+    """Atomic ``torch.save`` (tmp + os.replace) — SLURM-preempt safe.
+
+    Every bundle carries a ``_meta`` provenance stamp (git commit, data
+    fingerprint, CFG hash, seed) so forward/inverse/analysis bundles produced
+    by different jobs can be checked for consistency before being combined —
+    previously nothing prevented silently mixing bundles from different data
+    or configs.
+    """
+    state = dict(state)
+    state.setdefault("_meta", _bundle_meta())
     path = os.path.join(output_dir, filename)
     tmp = path + ".tmp"
     torch.save(state, tmp, pickle_protocol=pickle.HIGHEST_PROTOCOL)
     os.replace(tmp, path)
     size_mb = os.path.getsize(path) / (1024.0 * 1024.0)
-    logger.info(f"  Saved {filename} ({size_mb:.1f} MB)")
+    m = state["_meta"]
+    logger.info(f"  Saved {filename} ({size_mb:.1f} MB) "
+                f"[git={m.get('git_sha') or 'n/a'} data={m.get('data_fingerprint') or 'n/a'} "
+                f"cfg={m.get('cfg_sha') or 'n/a'}]")
     return path
 
 
@@ -9356,12 +10251,16 @@ def fig_dataset_overview(df_all: pd.DataFrame, output_dir: str,
                 if data.size == 0:
                     continue
                 pos = i + (j - (n_lc - 1) / 2.0) * bw
-                bp = ax.boxplot([data], positions=[pos], widths=bw * 0.85,
-                                patch_artist=True,
-                                medianprops=dict(color="red", lw=1.4))
-                for patch in bp["boxes"]:
-                    patch.set_facecolor(_LC_BOX_COLORS.get(lc, "#cccccc"))
-                    patch.set_edgecolor("black")
+                # Few replicates per (angle, LC): a boxplot collapses to a bare
+                # median line (reads as a stray red dash and hides the LC fill
+                # colour), so plot the points themselves in the LC colour so they
+                # match the LC1/LC2 legend swatches.
+                fc = _LC_BOX_COLORS.get(lc, "#cccccc")
+                ax.scatter(np.full(data.shape, pos), data, s=34, color=fc,
+                           edgecolor="black", linewidth=0.6, zorder=3)
+                if data.size > 1:
+                    ax.plot([pos, pos], [float(np.min(data)), float(np.max(data))],
+                            color=fc, lw=1.3, zorder=2)
                 any_data = True
         if not any_data:
             ax.text(0.5, 0.5, "no data", ha="center", va="center",
@@ -9545,6 +10444,16 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
                                                df_metrics, logger)
     BO_CFG.prob_weight = lambda_opt
 
+    # Design-level (EA, IPF) scalar uncertainty calibration for the deployed
+    # surrogate — feeds the heatmap/design-space ±2σ bands with a factor whose
+    # estimand actually matches the plotted quantity.
+    ea_ipf_scalar_cal = None
+    try:
+        ea_ipf_scalar_cal = compute_ea_ipf_scalar_calibration(
+            inv_models, "hard", inv_sd, inv_en, inv_p, df_metrics, output_dir, logger)
+    except Exception as e:
+        logger.warning(f"  EA/IPF scalar calibration skipped: {e}")
+
     inverse_state = {
         "inv_models": inv_models,
         "inv_scaler_disp": inv_sd, "inv_scaler_out": inv_so,
@@ -9552,6 +10461,7 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
         "cal_ens": cal_ens, "clf_feat_scaler": clf_feat_scaler,
         "clf_diag": clf_diag, "lambda_diag": lambda_diag,
         "df_metrics": df_metrics,
+        "ea_ipf_scalar_cal": ea_ipf_scalar_cal,
     }
     save_inverse_bundle(inverse_state, output_dir, logger)
 
@@ -9601,11 +10511,14 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
                     if isinstance(xh, (list, tuple)) and len(xh) >= 2:
                         theta_h = float(xh[0])
                         lc_idx_h = int(xh[1])
-                        # Reconstruct LC label from idx for readability.
-                        # Approach: the gpbo_joint result stores per-LC keys
-                        # in its ``results_by_lc`` substructure; fall back to
-                        # the integer index if mapping is missing.
-                        lc_h = str(lc_idx_h)
+                        # Translate the encoder index to the actual LC label
+                        # ('LC1'/'LC2') so the published convergence-trace CSVs
+                        # are self-describing rather than encoder-order-dependent.
+                        try:
+                            lc_cats = [str(c) for c in inv_en.categories_[0].tolist()]
+                            lc_h = lc_cats[lc_idx_h] if 0 <= lc_idx_h < len(lc_cats) else str(lc_idx_h)
+                        except Exception:
+                            lc_h = str(lc_idx_h)
                     else:
                         theta_h = float(xh)
                         lc_h = ""
@@ -9615,7 +10528,7 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
                         "target_id":  tid,
                         "eval_num":   eval_num,
                         "theta":      theta_h,
-                        "lc_idx":     lc_h,
+                        "lc":         lc_h,
                         "y":          yh_f,
                         "best_so_far": running_best,
                     })
@@ -9636,13 +10549,36 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
     robust_inverse_results = None
     if CFG.run_robustness_analyses:
         robust_inverse_results = []
-        for t in inverse_targets[:3]:
+        # Sweep ALL targets (previously only the first 3): T4/T5 include the
+        # bound-active and LC2 recoveries, which are exactly the cases whose
+        # seed-robustness a reviewer will question.
+        for t in inverse_targets:
             r = run_inverse_design_robust(inv_models, "hard", t["EA"], t["IPF"],
                                           inv_sd, inv_en, inv_p, BO_CFG, logger,
                                           n_seeds=5, cal_ens=cal_ens,
                                           feat_scaler=clf_feat_scaler)
             r["target_info"] = t
             robust_inverse_results.append(r)
+
+    # Verification targets: off-grid round-trips (true θ known by construction)
+    # + a deliberately infeasible probe.  These make the inverse demonstration
+    # non-circular: T1-T5 recover observed rows, V1-V2 recover angles that
+    # exist in no data row, and V3 shows non-attainability is flagged.
+    if CFG.run_robustness_analyses and not CFG.dry_run:
+        try:
+            run_verification_inverse_and_save(
+                inv_models, "hard", inv_sd, inv_en, inv_p, df_metrics,
+                BO_CFG, cal_ens, clf_feat_scaler, output_dir, logger)
+        except Exception as e:
+            logger.warning(f"  inverse verification targets skipped: {e}")
+
+    # Design-level forward validation of the deployed (full-data) surrogate:
+    # predicted vs experimental EA@D_COMMON / IPF at the 12 measured designs.
+    try:
+        table_forward_design_errors(inv_models, "hard", inv_sd, inv_en, inv_p,
+                                    df_metrics, output_dir, logger)
+    except Exception as e:
+        logger.warning(f"  forward design-error table skipped: {e}")
 
     logger.info("\n[inverse 3/4] Forward Jacobian + multi-objective Pareto sweep")
     jacobian_results = None
@@ -9707,9 +10643,23 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
                                              m["EA"], m["IPF"], lc,
                                              prob_weight=0.0, angle_deg=float(ang))
                 return p_lc
+            # Record the DECISION effect, not just p_LC: whether the penalty
+            # changed the recovered angle or flipped the selected LC.  A row of
+            # near-identical p_LC values with zero decision changes shows the
+            # penalty was inactive for feasible targets (expected — it exists
+            # to guard implausible regions, cf. the V3 infeasibility probe).
+            w_ang = wb.get("x_best"); n_ang = nb.get("x_best")
+            w_lc = wb.get("lc", wb.get("best_lc", "")); n_lc = nb.get("lc", nb.get("best_lc", ""))
             rows.append({"Target": tid,
                          "With_Penalty_p_LC": f"{_plc(wb):.4f}",
-                         "No_Penalty_p_LC":   f"{_plc(nb):.4f}"})
+                         "No_Penalty_p_LC":   f"{_plc(nb):.4f}",
+                         "With_Penalty_theta": f"{float(w_ang):.2f}" if w_ang is not None else "",
+                         "No_Penalty_theta":   f"{float(n_ang):.2f}" if n_ang is not None else "",
+                         "Delta_theta_deg": (f"{abs(float(w_ang) - float(n_ang)):.2f}"
+                                             if (w_ang is not None and n_ang is not None) else ""),
+                         "With_Penalty_LC": w_lc,
+                         "No_Penalty_LC":   n_lc,
+                         "LC_flipped": ("Yes" if (w_lc and n_lc and str(w_lc) != str(n_lc)) else "No")})
         classifier_ablation_diag = pd.DataFrame(rows)
         classifier_ablation_diag.to_csv(
             os.path.join(output_dir, "Table_classifier_ablation.csv"), index=False)
@@ -9812,15 +10762,21 @@ def _render_all_tables(forward_state: Dict, inverse_state: Dict,
             logger.warning(f"  generate_summary_tables: {e}")
     if all_inv:
         try: generate_optimizer_comparison_table(all_inv, output_dir, logger)
-        except Exception as e: logger.debug(f"  optimizer_comparison: {e}")
+        except Exception as e: logger.warning(f"  optimizer_comparison: {e}")
     if robust_inv:
         try: generate_inverse_robustness_table(robust_inv, output_dir, logger)
-        except Exception as e: logger.debug(f"  inverse_robustness: {e}")
+        except Exception as e: logger.warning(f"  inverse_robustness: {e}")
     try: write_statistical_testing_policy(output_dir, logger)
-    except Exception as e: logger.debug(f"  stat_policy: {e}")
+    except Exception as e: logger.warning(f"  stat_policy: {e}")
     if dual_results is not None and all_inv:
         try: generate_compute_budget_summary(dual_results, all_inv, output_dir, logger)
-        except Exception as e: logger.debug(f"  compute_budget: {e}")
+        except Exception as e: logger.warning(f"  compute_budget: {e}")
+    # Design-level null baseline (experimental EA/IPF interpolation over θ):
+    # the accuracy floor the surrogates must beat at θ*.
+    df_all_f = F.get("df_all")
+    if df_all_f is not None:
+        try: table_null_baseline_design_level(df_all_f, CFG.theta_star, output_dir, logger)
+        except Exception as e: logger.warning(f"  null_baseline: {e}")
 
 
 # =============================================================================
@@ -9873,8 +10829,10 @@ def run_pipeline(data_dir: str, output_dir: str,
 
     # Inventory every figure/table/sidecar written above into
     # MANIFEST_outputs.csv.  Must run after all writes so the listing is
-    # complete.
-    generate_output_manifest(output_dir, logger)
+    # complete.  Full-pipeline runs also verify the required-artifact list
+    # (dry runs skip inverse stages, so the check would false-positive).
+    generate_output_manifest(output_dir, logger,
+                             check_required=not CFG.dry_run)
 
     logger.info("\n" + "=" * 80)
     logger.info("PIPELINE COMPLETE")
@@ -9911,6 +10869,11 @@ def _render_all_figures(forward_state: Dict, inverse_state: Dict,
     df_all       = F.get("df_all")
     dual_results = F.get("dual_results")
     calibration  = F.get("calibration", {}) or {}
+    # Merge the design-level EA/IPF scalar calibration (inverse bundle) into
+    # the calibration dict so the heatmap bands use the matched-estimand
+    # factor instead of the pointwise-energy fallback.
+    if I.get("ea_ipf_scalar_cal"):
+        calibration = {**calibration, "ea_ipf_scalar": I["ea_ipf_scalar_cal"]}
     val_df_u     = F.get("val_df_u")
     scaler_disp_u= F.get("scaler_disp_u")
     enc_u        = F.get("enc_u")
@@ -10068,7 +11031,12 @@ def _render_all_figures(forward_state: Dict, inverse_state: Dict,
     if (inv_models is not None and inv_sd is not None
             and inv_en is not None and inv_p is not None):
         _try("Fig_design_space", fig_design_space,
-             inv_models, "hard", inv_sd, inv_en, inv_p, output_dir, logger)
+             inv_models, "hard", inv_sd, inv_en, inv_p, output_dir, logger,
+             df_metrics=df_metrics_i)
+        if df_metrics_i is not None:
+            _try("Table_forward_design_errors", table_forward_design_errors,
+                 inv_models, "hard", inv_sd, inv_en, inv_p, df_metrics_i,
+                 output_dir, logger)
 
     # ---- Multi-objective Pareto ----
     if pareto_df is not None and not pareto_df.empty:
@@ -10107,6 +11075,17 @@ def replot_from_bundles(source_dir: str, output_dir: str, logger: logging.Logger
     if not (F or I or A):
         logger.warning(f"  No bundles found in: {source_dir}")
         return
+    # Provenance cross-check: refuse to silently combine bundles produced from
+    # different data or configs (they may individually look fine but the
+    # combined figures/tables would be inconsistent).
+    metas = {name: b.get("_meta") for name, b in (("forward", F), ("inverse", I), ("analysis", A))
+             if b and b.get("_meta")}
+    for key in ("data_fingerprint", "cfg_sha", "git_sha"):
+        vals = {name: m.get(key) for name, m in metas.items() if m.get(key)}
+        if len(set(vals.values())) > 1:
+            logger.warning(f"  BUNDLE PROVENANCE MISMATCH on '{key}': {vals} — "
+                           f"the loaded bundles were produced by different runs; "
+                           f"combined outputs may be inconsistent")
     _render_all_tables(F, I, A, output_dir, logger)
     _render_all_figures(F, I, A, output_dir, logger)
     # Refresh the output manifest so MANIFEST_outputs.csv reflects the

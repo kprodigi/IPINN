@@ -22,6 +22,8 @@ random protocol was not trained in this workflow).
 from __future__ import annotations
 
 import argparse
+import glob
+import json
 import logging
 import os
 import sys
@@ -81,11 +83,31 @@ def _reconstruct_models(
     return models
 
 
+def _load_forward_meta(bundle_dir: str, approach: str) -> Dict:
+    """Load M_total / M_eff / avg training time from the sibling results JSON.
+
+    ``hpo/forward_merge.py`` writes ``forward_<approach>[_<tag>]_results.json``
+    next to the ``.pt`` bundle; unlike the bundle it records ``M_total`` (which
+    counts fence-dropped members) and ``avg_training_time_s``.  The bundle only
+    carries the surviving members, so without this JSON the reproducibility
+    tables under-report M_total and lose the training-time column.
+    """
+    matches = sorted(glob.glob(os.path.join(bundle_dir, f"forward_{approach}*results.json")))
+    if not matches:
+        return {}
+    try:
+        with open(matches[0], "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
 def _build_protocol_dict(
     approach: str, bundle: Dict, params: cd.ScalingParams, device: torch.device,
-    logger: logging.Logger,
+    logger: logging.Logger, meta: Optional[Dict] = None,
 ) -> Dict:
     """Mirror what ``train_ensemble`` would return for the unseen protocol."""
+    meta = meta or {}
     models = _reconstruct_models(approach, bundle, params, device)
     val_df = bundle["val_df"]
     scaler_disp = bundle["scaler_disp"]
@@ -107,12 +129,18 @@ def _build_protocol_dict(
         "histories":          [],  # not preserved per-member; replot fig functions tolerate empty
         "member_metrics":     member_metrics,
         "metrics":            ens_metrics,
-        "avg_training_time":  0.0,  # not needed for figures
+        # Backfill from the sibling results JSON so the reproducibility tables
+        # (Table 1 / Table 4 / compute-budget) carry the real training time and
+        # the full M_total (which includes fence-dropped members) rather than 0.0
+        # and the surviving-member count.
+        "avg_training_time":  float(meta.get("avg_training_time_s", 0.0)),
         "n_params":           n_params,
-        "M_total":            len(models),
-        "M_eff":              len(models),
+        "M_total":            int(meta.get("M_total", len(models))),
+        "M_eff":              int(meta.get("M_eff", len(models))),
         "train_r2_scores":    [],
-        "convergence_fence":  float("-inf"),
+        "convergence_fence":  (float(meta["convergence_fence"])
+                               if meta.get("convergence_fence") is not None
+                               else float("-inf")),
     }
 
 
@@ -153,8 +181,13 @@ def main():
     logger.info("\nReconstructing dual_results['unseen']:")
     unseen_dict: Dict = {}
     for approach in ("ddns", "soft", "hard"):
+        meta = _load_forward_meta(args.bundle_dir, approach)
+        if not meta:
+            logger.warning(
+                f"  {approach}: no forward_{approach}*results.json in "
+                f"{args.bundle_dir}; M_total and training time fall back to bundle values.")
         unseen_dict[approach] = _build_protocol_dict(
-            approach, bundles[approach], params, device, logger,
+            approach, bundles[approach], params, device, logger, meta,
         )
     unseen_dict.update({
         "train_df":     train_df_u,

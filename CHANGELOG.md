@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to semantic versioning.
 
+## [Unreleased]
+
+### Limitations audit + systematic improvement program (2026-07-01)
+
+A ~60-finding audit of the forward/inverse-design demonstration, methodology,
+data, protocols, code robustness, and reproducibility — with every
+code-addressable limitation fixed.  Full register in
+[IMPROVEMENTS.md](IMPROVEMENTS.md).  Highlights:
+
+- **Inverse design is now a verifiable round-trip:** Table 3 reports
+  ground-truth recovery (`True_theta_deg`, `Delta_theta_deg`, `LC_match`,
+  `Bound_active`); new off-grid + infeasibility verification targets
+  (`Table_inverse_verification.csv`); dense-grid baseline columns anchor GP-BO.
+- **Forward design is validated at the design level:** experimental (EA, IPF)
+  overlaid on `Fig_design_space`; `Table_forward_design_errors.csv` (predicted
+  vs experimental per design); interpolation null baseline; deployment-time
+  physics plausibility audit; EA≤0 candidates rejected in the BO objective.
+- **Methodology honesty:** true curve-level split-conformal calibration
+  (held-out corrected coverage); random split relabeled "Within-Curve
+  Interpolation"; energy-derivation disclosure; HPO objective decontaminated
+  (default inner holdout θ=55°); survivor-bias reporting (all-member metrics).
+- **Data QA active:** corrupted logger rows auto-dropped (verified on the
+  LC2 θ=70° defect); fatal per-file load errors; `data/README.md` rewritten
+  with verified provenance.
+- **Engineering:** bundle provenance stamps + replot cross-checks; required-
+  artifact manifest check; enforced minimum ensemble size; data/cfg-aware
+  resume cache; SLURM path can now train BOTH protocols (`--protocol`).
+- **Tests/CI:** 13 new inverse-design/data-QA tests (144 total, all passing);
+  CI now asserts inverse artifacts and table content.
+- Figure suite: all layout/overlap/text fixes visually verified (see
+  `paper/figures/REVISION_NOTES.md`); committed PNGs/tables refresh on the
+  next production rerun.
+
 ## [1.0-paper-final] — 2026-05-27
 
 The release accompanying the manuscript submission.
@@ -19,8 +52,8 @@ The release accompanying the manuscript submission.
 
 ### Added
 
-- `paper/figures/` — all 10 main paper figures and the bonus validation
-  error-map figure (PNG, 600 DPI).
+- `paper/figures/` — the full figure suite (main text + supplementary,
+  PNG at 600 DPI); see `paper/figures/README.md` for the main-vs-SI split.
 - `paper/tables/` — all paper tables (CSV) plus supplementary numerical
   outputs (Pareto dominance, λ-sensitivity, classifier ablation, etc.).
 - `scripts/build_forward_models_bundle.py` — combines the

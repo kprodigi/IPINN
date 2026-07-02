@@ -75,7 +75,11 @@ class TestGetNStepsCurve:
 
 class TestProtocolLabel:
     def test_random(self, m):
-        assert "Random" in m.protocol_label("random")
+        # The random split is labelled for what it measures: within-curve
+        # interpolation (rows split inside curves), not design generalization.
+        label = m.protocol_label("random")
+        assert "random 80/20" in label
+        assert "Interpolation" in label
 
     def test_unseen(self, m):
         label = m.protocol_label("unseen")

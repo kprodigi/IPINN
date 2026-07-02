@@ -105,6 +105,13 @@ def main():
                         "--theta_star 45 or 70.  Members are then written "
                         "to ``parts_<approach>_t<theta>/`` so multiple folds "
                         "do not collide in one ``--output_dir``.")
+    p.add_argument("--protocol", choices=["unseen", "random"], default="unseen",
+                   help="Validation protocol for this member: 'unseen' "
+                        "(hold out theta_star; default) or 'random' (the "
+                        "within-curve random 80/20 split).  'random' writes "
+                        "members to ``parts_<approach>_random/`` so both "
+                        "protocols' production ensembles can be trained by "
+                        "the same SLURM array workflow.")
     args = p.parse_args()
 
     members = [args.member_idx] if args.member_idx is not None else _parse_members(args.members)
@@ -120,7 +127,9 @@ def main():
     # BEFORE selecting parts_dir so the partials directory carries the
     # held-out angle (preventing collisions between LOAO folds in a
     # shared output_dir).
-    if args.theta_star is not None:
+    if args.protocol == "random":
+        parts_dir = os.path.join(args.output_dir, f"parts_{args.approach}_random")
+    elif args.theta_star is not None:
         cd.CFG.theta_star = float(args.theta_star)
         parts_dir = os.path.join(
             args.output_dir,
@@ -142,7 +151,7 @@ def main():
     cd.refresh_device()
     cd.set_publication_style()
 
-    cfg = cd.get_model_config(args.approach, "unseen")
+    cfg = cd.get_model_config(args.approach, args.protocol)
 
     # Bootstrap logger for the setup phase (per-member logger reset inside loop).
     setup_log_path = os.path.join(
@@ -163,7 +172,10 @@ def main():
     # ensemble.  Bit-for-bit reproducibility: load_data, split_unseen_angle,
     # and create_preprocessors are all deterministic in CFG.seed/split_seed.
     df_all = cd.load_data(args.data_dir, setup_logger)
-    train_df, val_df = cd.split_unseen_angle(df_all, cd.CFG.theta_star, setup_logger)
+    if args.protocol == "random":
+        train_df, val_df = cd.split_random_80_20(df_all, cd.CFG.split_seed, setup_logger)
+    else:
+        train_df, val_df = cd.split_unseen_angle(df_all, cd.CFG.theta_star, setup_logger)
     scaler_disp, scaler_out, enc, params = cd.create_preprocessors(train_df, setup_logger)
 
     train_fn = {
