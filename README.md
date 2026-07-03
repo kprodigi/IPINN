@@ -140,6 +140,33 @@ warm-start configuration and the resume-from-preemption protocol.
   (`Table_physical_plausibility_audit.csv`), and inverse-design ground-truth
   recovery (Δθ / LC-match columns in Table 3, off-grid + infeasibility
   verification targets in `Table_inverse_verification.csv`).
+
+---
+
+## Explainability & interpretability
+
+All artifacts below are **faithful model readouts** (exact decompositions of
+the trained surrogate), not post-hoc approximations:
+
+- **Physics-structural transparency:** the Hard-PINN's force is *defined* as
+  F = ∂E/∂d, so the model's internal mechanical quantities are directly
+  readable and verifiable (`Fig_physics_verification`).
+- **Global attribution — which design factor controls what:**
+  `Table_design_variance_decomposition.csv` gives the exact Sobol/ANOVA
+  variance split of EA and IPF into θ main effect, LC main effect, and their
+  interaction, computed on the balanced dense sweep grid (no sampling error).
+- **Local sensitivity:** `Fig_forward_map_jacobian` (∂EA/∂θ, ∂IPF/∂θ per LC,
+  with bifurcation detection).
+- **Self-explanatory architecture (opt-in):** the separable Hard-PINN variant
+  E(d, θ, LC) = Σₖ φₖ(θ, LC)·Bₖ(d) restricts the θ-dependence to a printed,
+  first-order-Fourier coefficient map; `Fig_separable_interpretability`
+  plots the learned crush-mode basis Bₖ(d) and design coefficients φₖ(θ) —
+  the figure *is* the model.
+- **Inverse decision audit:** `Table_inverse_design_explanation.csv`
+  decomposes each recovered design's objective at the optimum (EA-fit vs
+  IPF-fit vs LC-plausibility penalty, with p_LC and the dominant term) — why
+  the optimizer selected each design; plus the solution landscape,
+  multiplicity index, and approximate posterior for well-posedness.
 - **Multi-start GP-BO inverse design:** 5 restarts × 20 calls/restart,
   joint kernel over continuous θ and the categorical loading case, with
   a calibrated VotingClassifier penalty enforcing LC plausibility.

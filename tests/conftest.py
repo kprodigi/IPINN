@@ -5,6 +5,12 @@ import importlib.util
 import os
 import sys
 
+import matplotlib
+# Headless backend for the whole session: figure smoke tests must never
+# depend on a GUI toolkit (TkAgg leaks window state across tests on Windows
+# and fails outright on display-less CI runners).
+matplotlib.use("Agg", force=True)
+
 import numpy as np
 import pandas as pd
 import pytest

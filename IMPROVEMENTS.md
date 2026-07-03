@@ -74,6 +74,65 @@ dry-run pipeline completes end-to-end, and the figure suite renders cleanly.
 | CI asserted only file existence and never touched inverse artifacts | CI now checks Table 3 (with truth columns), design-error/null-baseline/plausibility tables, and finite content in Tables 1/3; CI deps constrained to the declared ranges |
 | Runtime environment omitted skopt version + git SHA | Both recorded, plus data fingerprint; hardware row added to the compute-budget table |
 
+## θ-generalization program: Hard-PINN architecture variants (Tier 1+2)
+
+Follow-up to the audit's core scientific finding: **F = ∂E/∂d constrains only
+the displacement direction** — it is satisfied by any smooth E(d, θ) and adds
+no structure across the design variable θ, where generalization actually
+fails.  The measured design trend itself is jagged (model-free leave-one-angle
+interpolation of the *experimental* EA/IPF misses held-out angles by 8–41%),
+so the variants below attack inductive bias, and the harness measures each
+against that floor.
+
+| Variant (`CFG.hard_architecture` / `cfg["architecture"]`) | Guarantee |
+|---|---|
+| `mlp` (default) | published production architecture, unchanged |
+| `monotone` | **F ≥ 0, E(0) = 0, E ≥ 0 by construction** at every input incl. unseen θ (positive-weight d-path + non-decreasing activations + intrinsic value-subtraction BC) |
+| `separable` | E = Σ_k φ_k(θ, LC)·B_k(d) with θ-capacity limited to ONE linear map over [sinθ, cosθ, LC] (~4 dof/basis) — matched to 5 training angles |
+| `monotone_separable` | both (φ_k ≥ 0, monotone B_k) |
+
+Implementation: `PositiveLinear`, `MonotoneHardEnergyNet`,
+`SeparableHardEnergyNet`, `make_hard_energy_net` in `composite_design.py`;
+wired into `train_hard` and the full-data inverse trainer; property-tested in
+`tests/test_hard_architectures.py` (F ≥ 0 at θ up to 180° and d to 200 mm,
+exact E(0)=0, double-backward training compatibility, capacity checks).
+
+**Ablation harness:** `scripts/ablation_theta_generalization.py` trains a
+small ensemble per (variant × held-out angle) and reports design-level
+EA@80mm/IPF error at the held-out angle vs the interpolation floor, plus
+pointwise R² and plausibility-violation fractions.  Full run (HPC):
+
+```bash
+python scripts/ablation_theta_generalization.py --data_dir ./data \
+    --output_dir ./results_ablation --members 4
+```
+
+Note the full run at tuned budgets is Hard-PINN-expensive (4 variants × 6
+angles × 4 members × ~4 h/member ≈ 380 GPU-h; parallelize or reduce
+`--members`/`--angles`).  A CPU smoke mode (`--epochs 60 --batch_size 32`)
+validates the machinery in minutes.
+
+## Explainability & interpretability layer (verified gap → implemented)
+
+Verification finding: the pipeline claimed a physics-informed forward/inverse
+framework but produced **no dedicated explainability artifacts** beyond the
+Jacobian sensitivity figure (no attribution, no faithful decomposition, no
+per-decision explanation).  Implemented — all *exact model readouts*, not
+post-hoc approximations:
+
+| Artifact | What it explains |
+|---|---|
+| `Table_design_variance_decomposition.csv` (`compute_design_variance_decomposition`) | Exact Sobol/ANOVA split of EA and IPF variance into θ, LC, and interaction on the balanced dense sweep grid — *which design factor controls which objective* (unit-tested: synthetic θ-only/LC-only surfaces recover 100/0 exactly; interaction detected) |
+| `Table_inverse_design_explanation.csv` (`table_inverse_design_explanation`) | Per-target objective decomposition at the recovered optimum: EA-fit vs IPF-fit vs classifier penalty, p_LC, dominant term — *why the optimizer selected each design* (terms verified to recompose J; √term = relative error by the 1/target² weighting) |
+| `Fig_separable_interpretability` | Faithful decomposition of the separable variant: learned crush-mode basis Bₖ(d) and design coefficients φₖ(θ, LC) — *the figure is the model* (the θ-dependence is architecturally a printed first-order Fourier map) |
+
+The inverse-uses-forward-surrogate chain was also verified in code (not
+assumed): `train_full_data_hard_pinn` → `run_inverse_design(inv_models, …)` →
+objective → `compute_ea_ipf_ensemble(models, …)` — GP-BO inverts the frozen
+trained forward PINN; the diagnostics (landscape, posterior, Jacobian,
+multiplicity) sit on top.  Both tables are wired into the inverse stage, the
+replot path, and `REQUIRED_PAPER_ARTIFACTS`.
+
 ## Requires the production HPC rerun (code is ready)
 
 1. **Retrain forward ensembles** (both protocols now supported by the SLURM path)

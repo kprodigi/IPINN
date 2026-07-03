@@ -485,6 +485,11 @@ class Config:
     # SHA-256 (short) of the loaded dataset rows; set by load_data() and
     # stamped into every saved bundle for provenance cross-checks.
     data_fingerprint: str = ""
+    # Hard-PINN architecture override: "" (use cfg / default "mlp"),
+    # "monotone" (F>=0 + E(0)=0 by construction), "separable" (low-order
+    # theta-dependence), or "monotone_separable" (both).  Used by the
+    # theta-generalization ablation harness; production default unchanged.
+    hard_architecture: str = ""
     # Curvature-penalty window (mm): 0 = penalize everywhere (published
     # behaviour); >0 = exclude the pre-peak region below this displacement
     # from the d²E/dd² penalty so IPF sharpness is not smoothed away (see
@@ -1247,11 +1252,9 @@ def train_full_data_hard_pinn(df_all: pd.DataFrame, logger: logging.Logger) -> T
             X_train = X_tensor
             Y_train = Y_tensor
         
-        # Create and train model
-        model = HardEnergyNet(X_full.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
-        # Optional architectural BC kept disabled in production; the soft
-        # auxiliary regularisers handle BC enforcement.
-        model.configure_zero_bc(params, enabled=False)
+        # Create and train model (architecture via CFG.hard_architecture /
+        # cfg["architecture"]; default "mlp" = published production model).
+        model = make_hard_energy_net(X_full.shape[1], cfg, params).to(DEVICE)
 
         if cfg["optimizer"] == "adamw":
             optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
@@ -1732,6 +1735,219 @@ class HardEnergyNet(nn.Module):
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+# =============================================================================
+# HARD-PINN ARCHITECTURE VARIANTS (Tier 1: monotone-in-d; Tier 2: separable-θ)
+# =============================================================================
+# Motivation (design-generalization study): F = ∂E/∂d constrains the
+# DISPLACEMENT direction only — it is satisfied by any smooth E(d, θ) and adds
+# no structure across θ, which is where generalization fails with only six
+# measured angles.  These variants attack that directly:
+#
+#   Tier 1 (``MonotoneHardEnergyNet``): E is non-decreasing in d BY
+#   CONSTRUCTION (positive-weight d-path + non-decreasing activations), so
+#   F = ∂E/∂d ≥ 0 exactly at every input, including angles never seen in
+#   training; combined with the intrinsic E(0)=0 shift this also gives
+#   E ≥ 0 and EA ≥ 0 everywhere.  Physics plausibility becomes a theorem,
+#   not a soft penalty.
+#
+#   Tier 2 (``SeparableHardEnergyNet``): E(d, θ, LC) = Σ_k φ_k(z)·B_k(d)
+#   with the θ-dependence φ_k restricted to a SINGLE linear map over
+#   z = [sinθ, cosθ, LC one-hot] (first-order Fourier in θ + LC intercepts,
+#   ~4 dof per basis function).  A free MLP over θ is unidentifiable from
+#   5 training angles; this matches model capacity in θ to the data.
+#   ``monotone=True`` additionally constrains φ_k ≥ 0 and B_k monotone,
+#   giving the combined Tier 1+2 model.
+#
+# All variants are drop-in replacements for ``HardEnergyNet`` (same
+# constructor signature prefix, ``forward(x)→[N,1]`` normalized energy, force
+# recovered by autograd downstream).  Selected via ``cfg["architecture"]`` or
+# the ``CFG.hard_architecture`` override; default remains the published MLP.
+
+class PositiveLinear(nn.Module):
+    """Linear layer with weights constrained positive via softplus reparameterization.
+
+    Used on every d-influenced path of the monotone variants: positive weights
+    composed with non-decreasing activations give a non-decreasing map, which
+    autograd differentiates to F ≥ 0 exactly.
+    """
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = True):
+        super().__init__()
+        w = torch.empty(out_features, in_features)
+        nn.init.kaiming_normal_(w, nonlinearity="relu")
+        # Inverse-softplus of |kaiming| so effective weights start at a
+        # sensible positive scale: softplus(raw) == |w| at init.
+        w_abs = w.abs().clamp_min(1e-4)
+        self.weight_raw = nn.Parameter(torch.log(torch.expm1(w_abs)))
+        self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
+
+    @property
+    def effective_weight(self) -> torch.Tensor:
+        return nn.functional.softplus(self.weight_raw)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return nn.functional.linear(x, self.effective_weight, self.bias)
+
+
+class MonotoneHardEnergyNet(nn.Module):
+    """Hard-PINN energy net with F = ∂E/∂d ≥ 0 and E(0) = 0 by construction.
+
+    Partial-monotone architecture: a *monotone* channel group (m) carries the
+    displacement through positive-weight layers; a *free* channel group (f)
+    processes only z = (θ features, LC) and modulates the monotone path
+    additively.  Since f never sees d, ∂E/∂d flows exclusively through
+    positive-weight compositions of non-decreasing softplus activations —
+    hence F ≥ 0 everywhere, for every (θ, LC), trained or not.
+
+    The E(0)=0 boundary condition is intrinsic: the forward pass returns
+    ``N(x) − N(x|d=0) + c0_E`` (value-subtraction in scaled space), so raw
+    E(d=0) = 0 exactly and — with monotonicity — raw E(d) ≥ 0 for all d ≥ 0.
+    ``configure_zero_bc(params)`` must be called once after construction to
+    stamp the scaler-dependent buffers; its ``enabled`` argument is ignored
+    (the BC is part of the architecture, not an option).
+    """
+
+    def __init__(self, in_d: int, hidden_layers: List[int], dropout: float,
+                 softplus_beta: float):
+        super().__init__()
+        if in_d < 2:
+            raise ValueError("MonotoneHardEnergyNet expects displacement + feature columns")
+        self.z_dim = in_d - 1
+        act = lambda: nn.Softplus(beta=softplus_beta)
+        m_widths = [max(1, (h + 1) // 2) for h in hidden_layers]
+        f_widths = [max(1, h - mw) for h, mw in zip(hidden_layers, m_widths)]
+        self.m_d_in = PositiveLinear(1, m_widths[0])
+        self.m_z_in = nn.Linear(self.z_dim, m_widths[0])
+        self.f_in = nn.Linear(self.z_dim, f_widths[0])
+        self.m_layers = nn.ModuleList()
+        self.mf_layers = nn.ModuleList()
+        self.f_layers = nn.ModuleList()
+        for i in range(1, len(hidden_layers)):
+            self.m_layers.append(PositiveLinear(m_widths[i - 1], m_widths[i]))
+            self.mf_layers.append(nn.Linear(f_widths[i - 1], m_widths[i]))
+            self.f_layers.append(nn.Linear(f_widths[i - 1], f_widths[i]))
+        self.m_out = PositiveLinear(m_widths[-1], 1)
+        self.f_out = nn.Linear(f_widths[-1], 1)
+        self.act = act()
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.register_buffer("_d_scaled_at_zero", torch.zeros(1))
+        self.register_buffer("_c0_E", torch.zeros(1))
+
+    def configure_zero_bc(self, params: "ScalingParams", enabled: bool = True) -> None:
+        """Stamp scaler-dependent buffers.  ``enabled`` is ignored: E(0)=0 is intrinsic."""
+        del enabled
+        self._d_scaled_at_zero.fill_(-params.mu_d / max(1e-12, params.sig_d))
+        self._c0_E.fill_(-params.mu_E / max(1e-12, params.sig_E))
+
+    def _raw(self, d: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        m = self.drop(self.act(self.m_d_in(d) + self.m_z_in(z)))
+        f = self.drop(self.act(self.f_in(z)))
+        for m_lin, mf_lin, f_lin in zip(self.m_layers, self.mf_layers, self.f_layers):
+            m_next = self.drop(self.act(m_lin(m) + mf_lin(f)))
+            f = self.drop(self.act(f_lin(f)))
+            m = m_next
+        return self.m_out(m) + self.f_out(f)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        d = x[:, U_COL:U_COL + 1]
+        z = x[:, U_COL + 1:]
+        d0 = self._d_scaled_at_zero.view(1, 1).expand(x.size(0), 1)
+        return self._raw(d, z) - self._raw(d0, z) + self._c0_E
+
+    def count_parameters(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class SeparableHardEnergyNet(nn.Module):
+    """Hard-PINN energy net with low-order θ-dependence: E = Σ_k φ_k(z)·B_k(d).
+
+    ``B_k(d)``: K learned displacement basis functions (small MLP over d).
+    ``φ_k(z)``: a SINGLE linear map over z = [sinθ, cosθ, LC one-hot] —
+    first-order Fourier in θ plus per-LC intercepts, ~4 dof per basis
+    function.  This is the Tier-2 inductive bias: with only five training
+    angles, restricting θ-capacity is the difference between an identifiable
+    design trend and an unconstrained interpolant.
+
+    ``monotone=True`` (Tier 1+2): φ_k = softplus(linear(z)) ≥ 0 and the basis
+    MLP uses positive weights, so ∂E/∂d = Σ φ_k·B'_k ≥ 0 exactly.
+
+    E(0)=0 is intrinsic via basis-value subtraction:
+    ``E = Σ φ_k(z)·(B_k(d) − B_k(d0)) + c0_E``.
+    """
+
+    def __init__(self, in_d: int, hidden_layers: List[int], dropout: float,
+                 softplus_beta: float, n_basis: int = 4, monotone: bool = True):
+        super().__init__()
+        if in_d < 2:
+            raise ValueError("SeparableHardEnergyNet expects displacement + feature columns")
+        self.z_dim = in_d - 1
+        self.n_basis = int(n_basis)
+        self.monotone = bool(monotone)
+        Lin = PositiveLinear if self.monotone else nn.Linear
+        layers: List[nn.Module] = []
+        d_in = 1
+        for h in hidden_layers:
+            layers.append(Lin(d_in, h))
+            layers.append(nn.Softplus(beta=softplus_beta))
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            d_in = h
+        layers.append(Lin(d_in, self.n_basis))
+        self.basis = nn.Sequential(*layers)
+        self.phi = nn.Linear(self.z_dim, self.n_basis)
+        self.register_buffer("_d_scaled_at_zero", torch.zeros(1))
+        self.register_buffer("_c0_E", torch.zeros(1))
+
+    def configure_zero_bc(self, params: "ScalingParams", enabled: bool = True) -> None:
+        """Stamp scaler-dependent buffers.  ``enabled`` is ignored: E(0)=0 is intrinsic."""
+        del enabled
+        self._d_scaled_at_zero.fill_(-params.mu_d / max(1e-12, params.sig_d))
+        self._c0_E.fill_(-params.mu_E / max(1e-12, params.sig_E))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        d = x[:, U_COL:U_COL + 1]
+        z = x[:, U_COL + 1:]
+        d0 = self._d_scaled_at_zero.view(1, 1).expand(x.size(0), 1)
+        phi = self.phi(z)
+        if self.monotone:
+            phi = nn.functional.softplus(phi)
+        basis_delta = self.basis(d) - self.basis(d0)
+        return (phi * basis_delta).sum(dim=1, keepdim=True) + self._c0_E
+
+    def count_parameters(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+HARD_ARCHITECTURES = ("mlp", "monotone", "separable", "monotone_separable")
+
+
+def make_hard_energy_net(in_d: int, cfg: Dict, params: Optional["ScalingParams"] = None) -> nn.Module:
+    """Construct the Hard-PINN energy network for the requested architecture.
+
+    Selection precedence: ``CFG.hard_architecture`` (global override, used by
+    the θ-generalization ablation harness) > ``cfg["architecture"]`` >
+    ``"mlp"`` (the published production architecture — behaviour unchanged).
+    When ``params`` is given, boundary-condition buffers are stamped: for the
+    baseline MLP this keeps the production ``configure_zero_bc(enabled=False)``
+    convention; for the variants E(0)=0 is intrinsic.
+    """
+    arch = str(getattr(CFG, "hard_architecture", "") or cfg.get("architecture", "") or "mlp").lower()
+    if arch not in HARD_ARCHITECTURES:
+        raise ValueError(f"Unknown hard architecture {arch!r}; expected one of {HARD_ARCHITECTURES}")
+    if arch == "monotone":
+        model: nn.Module = MonotoneHardEnergyNet(
+            in_d, cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"])
+    elif arch in ("separable", "monotone_separable"):
+        model = SeparableHardEnergyNet(
+            in_d, cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"],
+            n_basis=int(cfg.get("n_basis", 4)), monotone=(arch == "monotone_separable"))
+    else:
+        model = HardEnergyNet(in_d, cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"])
+    if params is not None:
+        model.configure_zero_bc(params, enabled=False)
+    return model
 
 
 # =============================================================================
@@ -2288,11 +2504,12 @@ def train_hard(train_df: pd.DataFrame, val_df: pd.DataFrame, scaler_disp: Standa
     Xv = to_tensor(build_features(val_df, scaler_disp, enc))
     y_val = val_df[["load_kN", "energy_J"]].values
     
-    model = HardEnergyNet(Xtr.shape[1], cfg["hidden_layers"], cfg["dropout"], cfg["softplus_beta"]).to(DEVICE)
-    # Optional architectural BC kept disabled in production; the soft
-    # auxiliary regularisers handle BC enforcement.  The slope-subtraction
-    # form remains available via configure_zero_bc(enabled=True) for ablations.
-    model.configure_zero_bc(params, enabled=False)
+    # Architecture selected via CFG.hard_architecture / cfg["architecture"];
+    # default "mlp" reproduces the published production model exactly.  For
+    # the baseline the optional slope-subtraction BC stays disabled (soft
+    # regularisers handle BCs); the monotone/separable variants enforce
+    # E(0)=0 and F>=0 architecturally (see make_hard_energy_net).
+    model = make_hard_energy_net(Xtr.shape[1], cfg, params).to(DEVICE)
     opt = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"]) if cfg.get("optimizer", "adamw").lower() == "adam" else optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     
     # Scheduler selection: stabilized (unseen) vs reactive (random)
@@ -5146,6 +5363,68 @@ def compute_hypervolume_2d(
     return hv
 
 
+def compute_design_variance_decomposition(landscape_df: pd.DataFrame,
+                                          logger: logging.Logger,
+                                          output_dir: Optional[str] = None) -> Optional[pd.DataFrame]:
+    """Global interpretability: exact variance (Sobol/ANOVA) attribution of the
+    surrogate's design-level outputs to the design factors.
+
+    The dense landscape grid is a balanced full factorial (every θ × every LC),
+    so the two-way ANOVA decomposition is EXACT on the grid — no sampling, no
+    surrogate-of-the-surrogate:
+
+        Var(Y) = V_θ + V_LC + V_int
+        S_θ  = V_θ  / Var(Y)   (main effect of the interior angle)
+        S_LC = V_LC / Var(Y)   (main effect of the loading case)
+        S_int = interaction (the design factors are not additive)
+
+    Interpretation convention: θ ~ uniform over the swept range, LC ~ uniform
+    over {LC1, LC2}.  This answers, quantitatively and faithfully to the
+    trained model, the first question an engineer asks of the forward
+    surrogate: *which design factor controls EA, and which controls IPF?*
+    """
+    if landscape_df is None or not len(landscape_df):
+        return None
+    rows = []
+    for col in ("EA", "IPF", "EA_full"):
+        if col not in landscape_df.columns:
+            continue
+        pivot = landscape_df.pivot_table(index="angle", columns="lc", values=col)
+        if pivot.isna().any().any() or pivot.shape[1] < 2:
+            continue  # unbalanced grid — decomposition would not be exact
+        Y = pivot.values.astype(float)
+        mu = Y.mean()
+        a = Y.mean(axis=1) - mu                       # θ main effect
+        b = Y.mean(axis=0) - mu                       # LC main effect
+        resid = Y - mu - a[:, None] - b[None, :]      # interaction
+        v_theta = float(np.mean(a ** 2))
+        v_lc = float(np.mean(b ** 2))
+        v_int = float(np.mean(resid ** 2))
+        v_tot = v_theta + v_lc + v_int
+        if v_tot <= 1e-18:
+            continue
+        rows.append({
+            "Quantity": (f"EA@{EA_COMMON_MM_TAG}" if col == "EA" else col),
+            "S_theta": round(v_theta / v_tot, 4),
+            "S_LC": round(v_lc / v_tot, 4),
+            "S_interaction": round(v_int / v_tot, 4),
+            "total_variance": f"{v_tot:.4g}",
+            "grid": f"{Y.shape[0]} angles x {Y.shape[1]} LCs",
+        })
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    for _, r in df.iterrows():
+        logger.info(f"  Variance attribution [{r['Quantity']}]: "
+                    f"θ={r['S_theta']:.1%}, LC={r['S_LC']:.1%}, "
+                    f"interaction={r['S_interaction']:.1%}")
+    if output_dir is not None:
+        path = os.path.join(output_dir, "Table_design_variance_decomposition.csv")
+        df.to_csv(path, index=False)
+        logger.info(f"  Saved: {os.path.basename(path)}")
+    return df
+
+
 def run_multiobjective_sweep(models: List[nn.Module], approach: str, scaler_disp: StandardScaler,
                               enc: OneHotEncoder, params: ScalingParams,
                               df_metrics: pd.DataFrame, logger: logging.Logger,
@@ -5249,6 +5528,12 @@ def run_multiobjective_sweep(models: List[nn.Module], approach: str, scaler_disp
                             f"plausible across every ensemble member")
         except Exception as exc:
             logger.warning(f"  plausibility audit table skipped: {exc}")
+        # Global interpretability: which design factor drives EA / IPF (exact
+        # ANOVA on the balanced sweep grid).
+        try:
+            compute_design_variance_decomposition(landscape_df, logger, output_dir)
+        except Exception as exc:
+            logger.warning(f"  variance decomposition skipped: {exc}")
     
     # Pareto sweep (uses cache, no redundant ensemble calls)
     pareto_results = []
@@ -6909,6 +7194,87 @@ def compute_ea_ipf_scalar_calibration(models: List[nn.Module], approach: str,
             os.path.join(output_dir, "Table_ea_ipf_scalar_calibration.csv"), index=False)
         logger.info("  Saved: Table_ea_ipf_scalar_calibration.csv")
     return cal
+
+
+def fig_separable_interpretability(models: List[nn.Module],
+                                   enc: OneHotEncoder, params: ScalingParams,
+                                   output_dir: str, logger: logging.Logger,
+                                   tag: str = "") -> Optional[str]:
+    """Faithful-by-construction interpretability readout of the separable Hard-PINN.
+
+    The separable variant IS its own explanation: E(d, θ, LC) =
+    Σ_k φ_k(θ, LC)·(B_k(d) − B_k(0)).  This figure plots exactly those learned
+    components — no post-hoc approximation:
+
+      (a) displacement basis functions B_k(d) − B_k(0): the k crush "modes"
+          the model composes (units: normalized energy × σ_E gives J);
+      (b) design coefficients φ_k(θ) per LC: how each mode's contribution
+          varies across the design space — by construction first-order
+          Fourier in θ, so the printed trend is the model's entire
+          θ-dependence, not a slice of a black box.
+
+    Plots the first separable member solid with remaining members faint
+    (basis indices are not aligned across members — each member's
+    decomposition is individually faithful).
+    """
+    sep_models = [m for m in models if isinstance(m, SeparableHardEnergyNet)]
+    if not sep_models:
+        return None
+    set_publication_style()
+    device = next(sep_models[0].parameters()).device
+    K = sep_models[0].n_basis
+    colors = plt.get_cmap("tab10")(np.linspace(0, 0.9, K))
+
+    d_raw = np.linspace(0.0, max(disp_end_mm("LC1"), disp_end_mm("LC2")), 200)
+    d_s = torch.tensor(((d_raw - params.mu_d) / max(1e-12, params.sig_d)).reshape(-1, 1),
+                       dtype=torch.float32, device=device)
+    d0_s = torch.full((1, 1), -params.mu_d / max(1e-12, params.sig_d),
+                      dtype=torch.float32, device=device)
+    thetas = np.linspace(CFG.angle_opt_min, CFG.angle_opt_max, 101)
+    lc_cats = [str(c) for c in enc.categories_[0].tolist()]
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.4))
+    for mi, net in enumerate(sep_models):
+        net.eval()
+        alpha = 1.0 if mi == 0 else 0.25
+        with torch.no_grad():
+            B = (net.basis(d_s) - net.basis(d0_s)).cpu().numpy()      # (200, K)
+            for k in range(K):
+                axes[0].plot(d_raw, B[:, k] * params.sig_E, color=colors[k],
+                             lw=1.8 if mi == 0 else 1.0, alpha=alpha,
+                             label=f"$B_{{{k + 1}}}$" if mi == 0 else None)
+            for lc_i, (lc, ls) in enumerate(zip(lc_cats, ("-", "--"))):
+                onehot = np.zeros((len(thetas), len(lc_cats)), dtype=np.float32)
+                onehot[:, lc_i] = 1.0
+                z = torch.tensor(np.column_stack([
+                    np.sin(np.deg2rad(thetas)), np.cos(np.deg2rad(thetas)), onehot,
+                ]).astype(np.float32), device=device)
+                phi = net.phi(z)
+                if net.monotone:
+                    phi = nn.functional.softplus(phi)
+                phi = phi.cpu().numpy()
+                for k in range(K):
+                    axes[1].plot(thetas, phi[:, k], ls, color=colors[k],
+                                 lw=1.8 if mi == 0 else 1.0, alpha=alpha,
+                                 label=(f"$\\varphi_{{{k + 1}}}$ ({lc})"
+                                        if (mi == 0 and k < 2) else None))
+    axes[0].set_xlabel("Displacement $d$ (mm)")
+    axes[0].set_ylabel("Basis energy $B_k(d)-B_k(0)$ ($\\times\\sigma_E$, J)")
+    axes[0].set_title("(a) Learned crush-mode basis functions")
+    axes[0].legend(fontsize=9, ncol=2)
+    axes[0].grid(True, alpha=0.3, linestyle="--")
+    axes[1].set_xlabel("Interior angle $\\theta$ (°)")
+    axes[1].set_ylabel("Design coefficient $\\varphi_k(\\theta,\\mathrm{LC})$")
+    axes[1].set_title("(b) Mode activation across the design space")
+    axes[1].legend(fontsize=8, ncol=2, title="solid=LC1, dashed=LC2")
+    axes[1].grid(True, alpha=0.3, linestyle="--")
+    fig.suptitle("Separable Hard-PINN decomposition: $E=\\sum_k \\varphi_k(\\theta,\\mathrm{LC})\\,[B_k(d)-B_k(0)]$")
+    suffix = f"_{tag}" if tag else ""
+    out = os.path.join(output_dir, f"Fig_separable_interpretability{suffix}.png")
+    fig.savefig(out, dpi=600, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    logger.info(f"  Saved: {os.path.basename(out)}")
+    return out
 
 
 def table_null_baseline_design_level(df_all: pd.DataFrame, theta_star: float,
@@ -8973,6 +9339,74 @@ def replot_figures_from_state(state: Dict, output_dir: str, logger: logging.Logg
     logger.info("\n[REPLOT] Figure regeneration complete.")
 
 
+def table_inverse_design_explanation(all_inverse: List[Dict], cal_ens, feat_scaler,
+                                     output_dir: str, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Inverse interpretability: decompose each recovered design's objective.
+
+    For every target the selected design (θ*, LC*) minimized
+
+        J = w_EA·(EA − EA_t)² + w_IPF·(IPF − IPF_t)² + λ·(−log p_LC)
+
+    This table reports the three terms AT the recovered optimum, the LC
+    plausibility p_LC, each fit term re-expressed as a relative error
+    (with the 1/target² weighting, sqrt(term) IS the relative error), and
+    which term dominated — i.e. *why the optimizer stopped where it did*:
+    was the design EA-limited, IPF-limited, or steered by the plausibility
+    penalty?  This turns the black-box optimizer outcome into an auditable
+    decision record per target.
+    """
+    if not all_inverse:
+        return None
+    rows = []
+    for res in all_inverse:
+        best = res.get("gpbo_best") or {}
+        if not best or "x_best" not in best:
+            continue
+        tinfo = res.get("target_info") or {}
+        t_ea = float(res.get("target_ea", 0.0))
+        t_ipf = float(res.get("target_ipf", 0.0))
+        w_ea = 1.0 / (t_ea ** 2 + 1e-12)
+        w_ipf = 1.0 / (t_ipf ** 2 + 1e-12)
+        pred_ea = float(best.get("pred_ea", float("nan")))
+        pred_ipf = float(best.get("pred_ipf", float("nan")))
+        fit_ea = w_ea * (pred_ea - t_ea) ** 2
+        fit_ipf = w_ipf * (pred_ipf - t_ipf) ** 2
+        prob_weight = float(res.get("prob_weight", 0.0) or 0.0)
+        rec_theta = float(best["x_best"])
+        rec_lc = str(best.get("lc", best.get("best_lc", "")))
+        penalty, p_lc = 0.0, float("nan")
+        if cal_ens is not None and feat_scaler is not None and rec_lc:
+            try:
+                penalty, p_lc = compute_lc_penalty(
+                    cal_ens, feat_scaler, pred_ea, pred_ipf, rec_lc,
+                    prob_weight=prob_weight, angle_deg=rec_theta)
+            except Exception:
+                pass
+        terms = {"EA_fit": fit_ea, "IPF_fit": fit_ipf, "classifier_penalty": float(penalty)}
+        dominant = max(terms, key=terms.get)
+        rows.append({
+            "Target": tinfo.get("id", ""),
+            "recovered_theta_deg": f"{rec_theta:.2f}",
+            "recovered_LC": rec_lc,
+            "J_at_optimum": f"{float(best.get('y_best', float('nan'))):.6f}",
+            "EA_fit_term": f"{fit_ea:.6f}",
+            "IPF_fit_term": f"{fit_ipf:.6f}",
+            "classifier_penalty_term": f"{float(penalty):.6f}",
+            "EA_rel_error_pct": f"{np.sqrt(fit_ea) * 100:.2f}",
+            "IPF_rel_error_pct": f"{np.sqrt(fit_ipf) * 100:.2f}",
+            "p_LC_at_optimum": (f"{p_lc:.4f}" if np.isfinite(p_lc) else ""),
+            "lambda_prob_weight": f"{prob_weight:.4g}",
+            "dominant_term": dominant,
+        })
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    path = os.path.join(output_dir, "Table_inverse_design_explanation.csv")
+    df.to_csv(path, index=False)
+    logger.info(f"  Saved: {os.path.basename(path)} (per-target objective decomposition)")
+    return df
+
+
 def generate_optimizer_comparison_table(all_inverse_results: List[Dict], output_dir: str, logger: logging.Logger):
     """Summarize GP-BO inverse runs per target, anchored to a dense-grid baseline.
 
@@ -9777,6 +10211,8 @@ REQUIRED_PAPER_ARTIFACTS = [
     "Table_forward_design_errors.csv",
     "Table_null_baseline_design_level.csv",
     "Table_physical_plausibility_audit.csv",
+    "Table_design_variance_decomposition.csv",
+    "Table_inverse_design_explanation.csv",
     "Fig_dataset_overview.png",
     "Fig_parity_unseen.png",
     "Fig_residuals_unseen.png",
@@ -10580,6 +11016,14 @@ def _train_inverse_and_analyze(data_dir: str, output_dir: str,
     except Exception as e:
         logger.warning(f"  forward design-error table skipped: {e}")
 
+    # Inverse interpretability: per-target objective decomposition at the
+    # recovered optimum (EA-fit vs IPF-fit vs plausibility penalty).
+    try:
+        table_inverse_design_explanation(all_inverse_results, cal_ens,
+                                         clf_feat_scaler, output_dir, logger)
+    except Exception as e:
+        logger.warning(f"  inverse explanation table skipped: {e}")
+
     logger.info("\n[inverse 3/4] Forward Jacobian + multi-objective Pareto sweep")
     jacobian_results = None
     try:
@@ -10777,6 +11221,16 @@ def _render_all_tables(forward_state: Dict, inverse_state: Dict,
     if df_all_f is not None:
         try: table_null_baseline_design_level(df_all_f, CFG.theta_star, output_dir, logger)
         except Exception as e: logger.warning(f"  null_baseline: {e}")
+    # Interpretability tables (global variance attribution + per-target
+    # inverse objective decomposition).
+    landscape_df_a = A.get("landscape_df")
+    if landscape_df_a is not None and len(landscape_df_a):
+        try: compute_design_variance_decomposition(landscape_df_a, logger, output_dir)
+        except Exception as e: logger.warning(f"  variance_decomposition: {e}")
+    if all_inv:
+        try: table_inverse_design_explanation(all_inv, I.get("cal_ens"),
+                                              I.get("clf_feat_scaler"), output_dir, logger)
+        except Exception as e: logger.warning(f"  inverse_explanation: {e}")
 
 
 # =============================================================================
