@@ -133,6 +133,59 @@ trained forward PINN; the diagnostics (landscape, posterior, Jacobian,
 multiplicity) sit on top.  Both tables are wired into the inverse stage, the
 replot path, and `REQUIRED_PAPER_ARTIFACTS`.
 
+## Phase 1+2: reviewer-proof held-out-design validation + mechanics injection
+
+Built in response to the "you have not shown LOAO results" risk.  Measured
+context that shapes the strategy: the *experimental* design trend itself is
+jagged (model-free leave-one-angle interpolation errs 8–41%), and LC2 θ=70°
+sits past a deformation-regime transition (plateau force 0.37→0.79 kN,
+EA +71%) that is unlearnable from the other five single-specimen angles.
+
+**Phase 1 — protocol, metrics, and calibration (`scripts/ablation_theta_generalization.py`):**
+- Two pre-declared protocols: **LOAO** (hold out both LCs of an angle;
+  boundary folds 45°/70° stratified as extrapolation stress tests) and
+  **LOCO** (hold out one (θ, LC) curve; cross-loading transfer, 12 folds).
+- Curve metric suite with **level/shape decomposition** (`curve_error_metrics`):
+  raw R² is reported but retired as the headline — a pure level offset (the
+  single-specimen scatter mode) drives it negative with perfect shape
+  (unit-tested); `R2_shape`, `NRMSE_range`, bias, Pearson r carry the claim.
+- **Skill scores vs two floors** per fold (`skill_score`): the linear
+  interpolation of the experiments and a 2-parameter mechanics trend —
+  S > 0 = beats the floor, the correct notion of success under irreducible
+  jaggedness.
+- **Jackknife+ prediction intervals with empirical coverage**
+  (`jackknife_plus_intervals`): each fold's interval never uses its own
+  residual (unit-tested with an outlier fold), so boundary-fold ignorance is
+  calibrated, not hidden (`Table_ablation_jackknife_coverage.csv`).
+- Outputs: per-fold detail + stratified summary (interior/boundary) +
+  skill figure (`Fig_ablation_skill.png`) + error-vs-floors figure.
+
+**Phase 2 — mechanics analysis (`scripts/mechanics_analysis.py`, data-only, runs in seconds):**
+- **Crush-mode signature table** per specimen (IPF, plateau force,
+  densification onset, CFE, oscillation, initial stiffness) →
+  `Table_crush_mode_signatures.csv` + `Fig_mode_signatures.png` — the
+  regime-transition evidence that reframes boundary-fold failure as detected
+  mode change.
+- **Densification kinematics** (`fit_densification_kinematics`): candidate
+  H(θ) forms regressed per quantity.  Measured on the real data: LC2 plateau
+  force follows sinθ·cosθ with **R²=0.947** (all six angles, including the
+  70° rise); LC1 initial stiffness R²=0.77; detected onsets decrease with θ
+  (78→70→61 mm) — the kinematic-stroke mechanism behind the LC2-70° EA jump.
+  → `Table_densification_kinematics.csv` + `Fig_densification_kinematics.png`.
+- **Master-curve collapse test** (`fig_master_curve_collapse`): mechanics
+  scalings collapse LC2's chaotic curves 1.9× (pairwise NRMSE 0.85→0.43);
+  LC1 already shares a common shape.  → figure + table.
+- **Mechanics-trend baseline** (`mechanics_trend_baseline`): candidate form
+  selected on training folds only; reported per fold next to the
+  interpolation floor.
+- **Mechanics θ-features** (`CFG.theta_feature_map="mechanics"` /
+  `--theta_features mechanics`): the networks receive kinematic coordinates
+  [sinθ, (1+cosθ)/2] instead of raw Fourier — same dimensionality, opt-in.
+
+All functions unit-tested (10 new tests; 171 total).  The candidate H(θ)
+forms are stated as candidates because the mandrel parameterization is not
+recorded in-repo; affine-redundant candidates are excluded by construction.
+
 ## Requires the production HPC rerun (code is ready)
 
 1. **Retrain forward ensembles** (both protocols now supported by the SLURM path)

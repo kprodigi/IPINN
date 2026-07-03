@@ -490,6 +490,9 @@ class Config:
     # theta-dependence), or "monotone_separable" (both).  Used by the
     # theta-generalization ablation harness; production default unchanged.
     hard_architecture: str = ""
+    # θ feature embedding: "" (default sinθ/cosθ) or "mechanics" (candidate
+    # kinematic coordinates; see build_features()).  Opt-in for ablations.
+    theta_feature_map: str = ""
     # Curvature-penalty window (mm): 0 = penalize everywhere (published
     # behaviour); >0 = exclude the pre-peak region below this displacement
     # from the d²E/dd² penalty so IPF sharpness is not smoothed away (see
@@ -1109,13 +1112,26 @@ U_COL = 0
 
 
 def build_features(df: pd.DataFrame, scaler_disp: StandardScaler, enc: OneHotEncoder) -> np.ndarray:
-    """Build input feature matrix."""
+    """Build input feature matrix.
+
+    θ is embedded as two coordinates.  Default: (sinθ, cosθ).  With
+    ``CFG.theta_feature_map = "mechanics"`` the network instead receives the
+    candidate kinematic coordinates the frame mechanics says the response
+    depends on — the inclined-wall projection sinθ and the normalized
+    loading-direction height family (1+cosθ)/2 — so the model's θ-trend is
+    expressed in physical coordinates rather than raw angle harmonics.  Same
+    dimensionality (drop-in for every architecture); opt-in for ablations.
+    """
     disp_scaled = scaler_disp.transform(df[["disp_mm"]].values.astype(float)).astype(np.float32)
     theta_rad = np.deg2rad(df[["Angle"]].values.astype(float)).astype(np.float32)
-    sin_t = np.sin(theta_rad).astype(np.float32)
-    cos_t = np.cos(theta_rad).astype(np.float32)
+    if str(getattr(CFG, "theta_feature_map", "")).lower() == "mechanics":
+        f1 = np.sin(theta_rad).astype(np.float32)                    # lever-arm projection
+        f2 = ((1.0 + np.cos(theta_rad)) / 2.0).astype(np.float32)    # height family H(θ)/H_max
+    else:
+        f1 = np.sin(theta_rad).astype(np.float32)
+        f2 = np.cos(theta_rad).astype(np.float32)
     lc_oh = enc.transform(df[["LC"]]).astype(np.float32)
-    return np.hstack([disp_scaled, sin_t, cos_t, lc_oh]).astype(np.float32)
+    return np.hstack([disp_scaled, f1, f2, lc_oh]).astype(np.float32)
 
 
 def build_targets(df: pd.DataFrame, scaler_out: StandardScaler) -> np.ndarray:
@@ -3229,6 +3245,382 @@ def compute_design_space_metrics(df: pd.DataFrame, logger: Optional[logging.Logg
 
 # =============================================================================
 # ENSEMBLE CLASSIFIER FOR LOADING-CONDITION PLAUSIBILITY
+# =============================================================================
+# HELD-OUT-DESIGN VALIDATION SUITE (Phase 1) + MECHANICS ANALYSIS (Phase 2)
+# =============================================================================
+# Phase 1 — reviewer-proof reporting for held-out-angle (LOAO) and held-out-
+# curve (LOCO) protocols: a curve-error metric suite that separates LEVEL from
+# SHAPE error (raw R² against a single held-out curve's own mean is driven
+# arbitrarily negative by a pure level offset — exactly what single-specimen
+# scatter produces), a skill score against the model-free interpolation floor
+# (nothing can beat the data's own jaggedness), and jackknife+ prediction
+# intervals with empirical coverage (calibrated ignorance at hard folds).
+#
+# Phase 2 — mechanics-based structure: crush-mode signatures per curve,
+# densification-onset kinematics regression against candidate hexagon-height
+# forms H(θ), a master-curve collapse test, and a 2-parameter mechanics-trend
+# baseline.  The exact mandrel parameterization (what is held fixed as θ
+# varies) is not recorded in this repository, so the H(θ) forms are stated as
+# CANDIDATE kinematic coordinates selected empirically on training folds only.
+
+def curve_error_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    """Curve-level error suite separating level from shape error.
+
+    Returns:
+      R2_raw     — classic R² against the curve's own mean (kept for
+                   comparability; pathological under level offsets),
+      NRMSE_range — RMSE normalized by the true curve's range,
+      bias       — mean(y_pred − y_true): the LEVEL error,
+      std_ratio  — amplitude ratio std(pred)/std(true),
+      pearson_r  — shape correlation,
+      R2_shape   — R² after removing the best scalar level offset: what
+                   remains once the (specimen-scatter-confounded) level shift
+                   is taken out.  Report R2_raw and R2_shape side by side.
+    """
+    yt = np.asarray(y_true, dtype=np.float64).reshape(-1)
+    yp = np.asarray(y_pred, dtype=np.float64).reshape(-1)
+    rng = float(np.ptp(yt))
+    bias = float(np.mean(yp - yt))
+    rmse = float(np.sqrt(np.mean((yp - yt) ** 2)))
+    sd_t = float(np.std(yt))
+    sd_p = float(np.std(yp))
+    if sd_t > 1e-12 and sd_p > 1e-12:
+        r = float(np.corrcoef(yt, yp)[0, 1])
+    else:
+        r = float("nan")
+    return {
+        "R2_raw": float(r2_safe(yt, yp)),
+        "NRMSE_range": rmse / max(rng, 1e-12),
+        "bias": bias,
+        "std_ratio": sd_p / max(sd_t, 1e-12),
+        "pearson_r": r,
+        "R2_shape": float(r2_safe(yt, yp - bias)),
+    }
+
+
+def skill_score(model_err: float, floor_err: float) -> float:
+    """Skill vs the model-free floor: S = 1 − err_model/err_floor.
+
+    S > 0: beats interpolating the experiments themselves; S = 0: matches it;
+    S < 0: worse.  This is the correct notion of success at held-out designs
+    because the floor already misses by 8–41% — irreducible single-specimen
+    jaggedness that no surrogate can predict (Murphy-style forecast skill).
+    """
+    if not np.isfinite(model_err) or not np.isfinite(floor_err) or floor_err <= 1e-12:
+        return float("nan")
+    return 1.0 - float(model_err) / float(floor_err)
+
+
+def jackknife_plus_intervals(preds: np.ndarray, truths: np.ndarray,
+                             alpha: float = 0.1) -> Tuple[pd.DataFrame, float]:
+    """Jackknife+-style cross-fold prediction intervals with empirical coverage.
+
+    For fold i the half-width is the ceil((1−α)(n))-th order statistic of the
+    OTHER folds' absolute residuals — each fold's interval never uses its own
+    residual, so the reported coverage is an honest measurement.  With n=6
+    folds the quantile is coarse (intervals conservative); that is the correct
+    price of single-specimen data and is stated rather than hidden.
+    """
+    preds = np.asarray(preds, dtype=np.float64)
+    truths = np.asarray(truths, dtype=np.float64)
+    res = np.abs(truths - preds)
+    n = len(res)
+    rows, covered = [], 0
+    for i in range(n):
+        others = np.delete(res, i)
+        k = min(len(others) - 1, int(np.ceil((1.0 - alpha) * (len(others) + 1))) - 1)
+        q = float(np.sort(others)[max(k, 0)])
+        inside = bool(res[i] <= q)
+        covered += int(inside)
+        rows.append({"fold": i, "pred": preds[i], "truth": truths[i],
+                     "abs_residual": res[i], "half_width": q, "covered": inside})
+    return pd.DataFrame(rows), covered / max(n, 1)
+
+
+# ---------------------------------------------------------------------------
+# Crush-mode signatures (per-curve mechanics descriptors)
+# ---------------------------------------------------------------------------
+def extract_crush_signatures(d: np.ndarray, F: np.ndarray, E: np.ndarray) -> Dict[str, float]:
+    """Mechanics descriptors of one crush curve.
+
+    - IPF and its location (robust peak detection),
+    - F_plateau: median load over the mid-stroke window [10 mm, 0.5·d_max],
+    - d_dens: densification onset — first displacement past the plateau window
+      where load exceeds 2× F_plateau (NaN when the curve never densifies
+      within the recorded stroke),
+    - CFE = mean load / IPF,
+    - oscillation: normalized load fluctuation in the plateau window
+      (progressive-fracture event signature),
+    - k0: initial stiffness, least-squares slope over d ≤ 5 mm.
+    """
+    d = np.asarray(d, dtype=np.float64)
+    F = np.asarray(F, dtype=np.float64)
+    E = np.asarray(E, dtype=np.float64)
+    d_max = float(d.max())
+    ipf, ipf_loc = compute_ipf_robust(d, F)
+    # Plateau window ends at 40% of stroke: for densifying curves the load
+    # rise begins in the back half, and a window reaching 50% contaminates
+    # the plateau estimate with the rise itself (masking the onset).
+    win = (d >= 10.0) & (d <= 0.4 * d_max)
+    F_plat = float(np.median(F[win])) if win.any() else float("nan")
+    d_dens = float("nan")
+    if np.isfinite(F_plat) and F_plat > 1e-9:
+        after = d > 0.4 * d_max
+        exceed = after & (F >= 1.5 * F_plat)
+        if exceed.any():
+            d_dens = float(d[np.argmax(exceed)])
+    f_mean = float(E[-1] - E[0]) / max(d_max, 1e-12)
+    osc = float("nan")
+    if win.sum() >= 8 and np.isfinite(F_plat) and F_plat > 1e-9:
+        fw = F[win]
+        k = max(5, win.sum() // 20)
+        kernel = np.ones(k) / k
+        trend = np.convolve(fw, kernel, mode="same")
+        osc = float(np.std(fw - trend) / F_plat)
+    k0 = float("nan")
+    early = d <= 5.0
+    if early.sum() >= 3:
+        A = np.vstack([d[early], np.ones(early.sum())]).T
+        k0 = float(np.linalg.lstsq(A, F[early], rcond=None)[0][0])
+    return {"IPF_kN": float(ipf), "IPF_loc_mm": float(ipf_loc),
+            "F_plateau_kN": F_plat, "d_dens_mm": d_dens,
+            "CFE": f_mean / max(float(ipf), 1e-12),
+            "oscillation_norm": osc, "k0_kN_per_mm": k0,
+            "d_max_mm": d_max}
+
+
+def compute_mode_signature_table(df_all: pd.DataFrame, logger: logging.Logger,
+                                 output_dir: Optional[str] = None) -> pd.DataFrame:
+    """Crush-mode signature table for every measured curve (12 rows).
+
+    The reviewer-facing purpose: show quantitatively WHICH configurations sit
+    in a distinct deformation regime (e.g. LC2 θ=70°), so held-out-angle
+    failures there are presented as detected mode transitions rather than
+    unexplained model errors.
+    """
+    rows = []
+    for (lc, ang), g in df_all.groupby(["LC", "Angle"]):
+        g = g.sort_values("disp_mm")
+        sig = extract_crush_signatures(g["disp_mm"].values, g["load_kN"].values,
+                                       g["energy_J"].values)
+        rows.append({"LC": str(lc), "Angle_deg": float(ang), **sig})
+    df = pd.DataFrame(rows).sort_values(["LC", "Angle_deg"]).reset_index(drop=True)
+    if output_dir is not None:
+        path = os.path.join(output_dir, "Table_crush_mode_signatures.csv")
+        df.round(4).to_csv(path, index=False)
+        logger.info(f"  Saved: {os.path.basename(path)}")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Densification kinematics + mechanics-trend baseline (Phase 2)
+# ---------------------------------------------------------------------------
+# Candidate kinematic coordinates f(θ).  The true available-stroke law is
+# H(θ) − k·t (loading-direction height minus stacked wall thickness); H(θ)'s
+# exact form depends on the mandrel parameterization, which is not recorded
+# in-repo — so several trigonometric candidates are regressed and the winner
+# is selected on TRAINING data only (and reported).
+# Note: candidates affine-equivalent under the fitted intercept (e.g. 1+cosθ
+# vs cosθ) are deliberately excluded — they would produce identical R² and an
+# arbitrary winner.
+THETA_KINEMATIC_CANDIDATES: Dict[str, Callable[[np.ndarray], np.ndarray]] = {
+    "linear_theta": lambda th: np.deg2rad(th),
+    "sin_theta": lambda th: np.sin(np.deg2rad(th)),
+    "cos_theta": lambda th: np.cos(np.deg2rad(th)),
+    "sin_half": lambda th: np.sin(np.deg2rad(th) / 2.0),
+    "sin_cos": lambda th: np.sin(np.deg2rad(th)) * np.cos(np.deg2rad(th)),
+}
+
+
+def _fit_linear_candidate(theta: np.ndarray, y: np.ndarray,
+                          fname: str) -> Tuple[float, float, float]:
+    """Least-squares y ≈ a + b·f(θ); returns (a, b, R²)."""
+    f = THETA_KINEMATIC_CANDIDATES[fname](np.asarray(theta, dtype=np.float64))
+    y = np.asarray(y, dtype=np.float64)
+    A = np.vstack([np.ones_like(f), f]).T
+    coef, *_ = np.linalg.lstsq(A, y, rcond=None)
+    y_hat = A @ coef
+    ss_res = float(np.sum((y - y_hat) ** 2))
+    ss_tot = float(np.sum((y - y.mean()) ** 2))
+    r2 = 1.0 - ss_res / max(ss_tot, 1e-12)
+    return float(coef[0]), float(coef[1]), r2
+
+
+def fit_densification_kinematics(sig_df: pd.DataFrame, logger: logging.Logger,
+                                 output_dir: Optional[str] = None) -> pd.DataFrame:
+    """Regress per-curve mechanics quantities on the candidate θ-coordinates.
+
+    For each LC and each quantity (densification onset d_dens, plateau force,
+    initial stiffness k0, IPF) fit y = a + b·f(θ) for every candidate f and
+    report each fit's R².  A high-R² onset fit validates the kinematic
+    densification hypothesis (available stroke set by ring geometry) — the
+    mechanism that would make the LC2 boundary fold a geometry PREDICTION
+    instead of an extrapolation.
+    """
+    rows = []
+    for lc in sorted(sig_df["LC"].unique()):
+        sub = sig_df[sig_df["LC"] == lc]
+        for qty in ("d_dens_mm", "F_plateau_kN", "k0_kN_per_mm", "IPF_kN"):
+            mask = np.isfinite(sub[qty].values.astype(float))
+            if mask.sum() < 3:
+                continue
+            th = sub["Angle_deg"].values[mask].astype(float)
+            y = sub[qty].values[mask].astype(float)
+            for fname in THETA_KINEMATIC_CANDIDATES:
+                a, b, r2 = _fit_linear_candidate(th, y, fname)
+                rows.append({"LC": lc, "Quantity": qty, "candidate": fname,
+                             "a": round(a, 5), "b": round(b, 5),
+                             "R2_fit": round(r2, 4), "n_points": int(mask.sum())})
+    df = pd.DataFrame(rows)
+    if len(df):
+        best = df.loc[df.groupby(["LC", "Quantity"])["R2_fit"].idxmax()]
+        for _, r in best.iterrows():
+            logger.info(f"  Kinematics [{r['LC']} {r['Quantity']}]: best f(θ)={r['candidate']} "
+                        f"R²={r['R2_fit']:.3f} (n={r['n_points']})")
+    if output_dir is not None and len(df):
+        path = os.path.join(output_dir, "Table_densification_kinematics.csv")
+        df.to_csv(path, index=False)
+        logger.info(f"  Saved: {os.path.basename(path)}")
+    return df
+
+
+def mechanics_trend_baseline(train_theta: np.ndarray, train_y: np.ndarray,
+                             test_theta: float) -> Tuple[float, str]:
+    """2-parameter mechanics-trend prediction at a held-out angle.
+
+    Selects the candidate θ-coordinate with the best TRAINING-fold R², fits
+    y = a + b·f(θ) on the training angles only, and predicts the held-out
+    angle.  Unlike linear interpolation this uses a global trend shape, so it
+    extrapolates at boundary folds; it is the mechanics-informed floor the
+    surrogate should be compared against alongside the interpolation floor.
+    """
+    best_name, best_r2, best_ab = None, -np.inf, (0.0, 0.0)
+    for fname in THETA_KINEMATIC_CANDIDATES:
+        a, b, r2 = _fit_linear_candidate(train_theta, train_y, fname)
+        if r2 > best_r2:
+            best_name, best_r2, best_ab = fname, r2, (a, b)
+    f_val = float(THETA_KINEMATIC_CANDIDATES[best_name](np.asarray([test_theta]))[0])
+    return best_ab[0] + best_ab[1] * f_val, best_name
+
+
+def fig_mode_signatures(sig_df: pd.DataFrame, output_dir: str,
+                        logger: logging.Logger) -> Optional[str]:
+    """Deformation-regime evidence figure from the crush-mode signatures.
+
+    (a) CFE vs densification onset — regime outliers separate visually;
+    (b) plateau force and IPF vs θ per LC — the raw design trends whose
+        jaggedness sets the held-out-angle floor.
+    """
+    if sig_df is None or not len(sig_df):
+        return None
+    set_publication_style()
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.4))
+    markers = {"LC1": "o", "LC2": "s"}
+    colors = {"LC1": COLORS.get("LC1", "#0072B2"), "LC2": COLORS.get("LC2", "#D55E00")}
+    for lc in sorted(sig_df["LC"].unique()):
+        sub = sig_df[sig_df["LC"] == lc]
+        x = sub["d_dens_mm"].values.astype(float)
+        x_plot = np.where(np.isfinite(x), x, sub["d_max_mm"].values.astype(float))
+        axes[0].scatter(x_plot, sub["CFE"], s=70, marker=markers.get(lc, "o"),
+                        color=colors.get(lc), edgecolor="black", linewidth=0.7, label=lc)
+        for _, r in sub.iterrows():
+            xx = r["d_dens_mm"] if np.isfinite(r["d_dens_mm"]) else r["d_max_mm"]
+            axes[0].annotate(f"{r['Angle_deg']:.0f}°", (xx, r["CFE"]),
+                             textcoords="offset points", xytext=(4, 3), fontsize=8)
+        axes[1].plot(sub["Angle_deg"], sub["F_plateau_kN"], "-", marker=markers.get(lc),
+                     color=colors.get(lc), lw=1.5, label=f"{lc} plateau")
+        axes[1].plot(sub["Angle_deg"], sub["IPF_kN"], "--", marker=markers.get(lc),
+                     color=colors.get(lc), lw=1.2, alpha=0.65,
+                     markerfacecolor="white", label=f"{lc} IPF")
+    axes[0].set_xlabel("Densification onset $d_{dens}$ (mm; $d_{max}$ if none)")
+    axes[0].set_ylabel("Crush force efficiency CFE")
+    axes[0].set_title("(a) Regime signatures per specimen")
+    axes[0].legend(fontsize=9)
+    axes[0].grid(True, alpha=0.3, linestyle="--")
+    axes[1].set_xlabel("Interior angle $\\theta$ (°)")
+    axes[1].set_ylabel("Load (kN)")
+    axes[1].set_title("(b) Design trends: plateau force and IPF")
+    axes[1].legend(fontsize=8, ncol=2)
+    axes[1].grid(True, alpha=0.3, linestyle="--")
+    fig.suptitle("Crush-mode signatures across the measured design space")
+    out = os.path.join(output_dir, "Fig_mode_signatures.png")
+    fig.savefig(out, dpi=600, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    logger.info(f"  Saved: {os.path.basename(out)}")
+    return out
+
+
+def fig_master_curve_collapse(df_all: pd.DataFrame, sig_df: pd.DataFrame,
+                              output_dir: str, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Self-similarity (master-curve) test with mechanics scalings.
+
+    For each LC, curves are overlaid raw-normalized (F/F(d_max) vs d/d_max)
+    and mechanics-normalized (F/F_plateau vs d/d_ref with d_ref = densification
+    onset when detected, else stroke).  Collapse quality = mean pairwise NRMSE
+    on a common normalized grid, before vs after.  A strong collapse means
+    held-out-angle prediction reduces to predicting two scalars per fold; a
+    weak collapse is itself a publishable bound on what ANY smooth surrogate
+    can do — either way the figure pre-empts the reviewer question.
+    """
+    if df_all is None or sig_df is None or not len(sig_df):
+        return None
+    set_publication_style()
+    grid = np.linspace(0.05, 0.95, 150)
+    fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.0))
+    rows = []
+    for col, lc in enumerate(sorted(sig_df["LC"].unique())):
+        sub_sig = sig_df[sig_df["LC"] == lc].set_index("Angle_deg")
+        raw_curves, mech_curves = {}, {}
+        for ang, g in df_all[df_all["LC"] == lc].groupby("Angle"):
+            g = g.sort_values("disp_mm")
+            d = g["disp_mm"].values.astype(float)
+            F = g["load_kN"].values.astype(float)
+            d_max = d.max()
+            raw = np.interp(grid, d / d_max, F)
+            raw_curves[ang] = raw / max(abs(raw[-1]), 1e-9)
+            srow = sub_sig.loc[float(ang)]
+            d_ref = srow["d_dens_mm"] if np.isfinite(srow["d_dens_mm"]) else d_max
+            f_ref = srow["F_plateau_kN"] if (np.isfinite(srow["F_plateau_kN"])
+                                             and srow["F_plateau_kN"] > 1e-9) else max(abs(F).max(), 1e-9)
+            mech = np.interp(grid, d / d_ref, F / f_ref)
+            mech_curves[ang] = mech
+        def _pairwise_nrmse(curves):
+            vals, angs = list(curves.values()), list(curves.keys())
+            out = []
+            for i in range(len(vals)):
+                for j in range(i + 1, len(vals)):
+                    rng = max(np.ptp(vals[i]), 1e-9)
+                    out.append(float(np.sqrt(np.mean((vals[i] - vals[j]) ** 2)) / rng))
+            return float(np.mean(out)) if out else float("nan")
+        nrmse_raw = _pairwise_nrmse(raw_curves)
+        nrmse_mech = _pairwise_nrmse(mech_curves)
+        rows.append({"LC": lc, "pairwise_NRMSE_raw": round(nrmse_raw, 4),
+                     "pairwise_NRMSE_mechanics": round(nrmse_mech, 4),
+                     "collapse_gain": round(nrmse_raw / max(nrmse_mech, 1e-9), 3)})
+        cmap = plt.get_cmap("viridis", max(2, len(raw_curves)))
+        for i, (ang, c) in enumerate(sorted(raw_curves.items())):
+            axes[0, col].plot(grid, c, color=cmap(i), lw=1.3, label=f"{ang:.0f}°")
+        for i, (ang, c) in enumerate(sorted(mech_curves.items())):
+            axes[1, col].plot(grid, c, color=cmap(i), lw=1.3, label=f"{ang:.0f}°")
+        axes[0, col].set_title(f"{lc} raw-normalized (pairwise NRMSE={nrmse_raw:.3f})")
+        axes[1, col].set_title(f"{lc} mechanics-normalized (NRMSE={nrmse_mech:.3f})")
+        for r_ in (0, 1):
+            axes[r_, col].grid(True, alpha=0.3, linestyle="--")
+            axes[r_, col].legend(fontsize=7, ncol=2)
+        axes[0, col].set_xlabel("$d/d_{max}$"); axes[0, col].set_ylabel("$F/F(d_{max})$")
+        axes[1, col].set_xlabel("$d/d_{ref}$"); axes[1, col].set_ylabel("$F/F_{plateau}$")
+    for lab, ax in zip("abcd", axes.flatten()):
+        add_subplot_label(ax, lab)
+    fig.suptitle("Master-curve collapse test (raw vs mechanics scalings)")
+    fig.savefig(os.path.join(output_dir, "Fig_master_curve_collapse.png"),
+                dpi=600, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    df = pd.DataFrame(rows)
+    df.to_csv(os.path.join(output_dir, "Table_master_curve_collapse.csv"), index=False)
+    logger.info("  Saved: Fig_master_curve_collapse.png + Table_master_curve_collapse.csv")
+    return df
+
+
 # =============================================================================
 # EA_common = energy absorbed to D_COMMON (see enrich_df_metrics_ea_common); aligns with inverse BO objective.
 # Angle (deg) aligns the penalty with the candidate θ during BO: P(LC | θ, EA_common, IPF), not only marginal
