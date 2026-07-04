@@ -154,8 +154,10 @@ def autofit_tables():
         cols = grid.findall(w("gridCol"))
         ncol = len(cols)
         total = sum(int(c.get(w("w"), "0")) for c in cols) or 9360
-        # score columns by longest cell text (skip gridSpan cells)
+        # score columns by longest cell text (skip gridSpan cells) and track
+        # the longest unbreakable word per column
         score = [3.0] * ncol
+        longword = [3] * ncol
         for tr in tbl.findall(w("tr")):
             ci = 0
             for tc in tr.findall(w("tc")):
@@ -169,18 +171,28 @@ def autofit_tables():
                     text = "".join(t.text or "" for t in tc.iter(w("t")))
                     longest = max((len(x) for x in text.split()), default=0)
                     score[ci] = max(score[ci], min(len(text), 60), longest)
+                    longword[ci] = max(longword[ci], longest)
                 ci += span
         ssum = sum(score)
-        # 1000 twips ~ 6 characters at 10 pt TNR incl. cell padding — floor
-        # prevents short labels ("LC1", "MAPE") wrapping mid-word.  Any excess
-        # the floor creates is reclaimed proportionally from columns above the
-        # floor so the widths always sum to the table width.
-        floor = min(1000, total // max(ncol, 1))
-        widths = [max(floor, total * s / ssum) for s in score]
+        # Per-column floor: the longest unbreakable word must fit on one line
+        # (~115 twips/char at 10 pt TNR + cell padding), never below 1000
+        # twips so short labels ("LC1", "MAPE") don't wrap.  Excess created by
+        # the floors is reclaimed proportionally from columns above floor.
+        cap = max(1200, (total * 2) // max(ncol, 1))
+        floors = [min(cap, max(1000, lw * 115 + 280)) for lw in longword]
+        widths = [max(f, total * s / ssum) for f, s in zip(floors, score)]
         excess = sum(widths) - total
-        pool = sum(max(0.0, x - floor) for x in widths)
-        if excess > 0 and pool > 0:
-            widths = [floor + max(0.0, x - floor) * (1 - excess / pool) for x in widths]
+        pool = sum(max(0.0, x - f) for x, f in zip(widths, floors))
+        if excess > 0:
+            if pool > excess:
+                widths = [f + max(0.0, x - f) * (1 - excess / pool)
+                          for x, f in zip(widths, floors)]
+            else:
+                # even the floors exceed the table width: scale the floors
+                # themselves (some wrapping is then unavoidable but widths
+                # stay positive and proportional)
+                fsum = sum(floors)
+                widths = [f * total / fsum for f in floors]
         widths = [int(round(x)) for x in widths]
         widths[-1] += total - sum(widths)
         for c, wd in zip(cols, widths):

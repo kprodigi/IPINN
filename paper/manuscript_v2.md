@@ -15,6 +15,14 @@ Crashworthy composite energy absorbers require designs that maximize energy abso
 
 **Keywords:** Physics-informed neural networks; inverse design; Bayesian optimization; composite materials; crashworthiness; uncertainty quantification.
 
+**Highlights**
+
+- Hard-PINN recovers crushing force exactly as the gradient of a learned energy field
+- Hard constraint lifts held-out-angle load R² to 0.82 vs 0.79 (soft) and 0.72 (none)
+- Curve-level split-conformal calibration reports honest held-out coverage
+- Inverse design verified on ground truth: 5/5 loading-case and sub-degree recovery
+- Framework refuses an infeasible target and quantifies inverse ill-posedness
+
 # Introduction
 
 The design of crashworthy structures is a central problem in automotive, aerospace, and civil engineering, where controlled dissipation of kinetic energy during an impact event governs occupant survivability and structural integrity [1, 2]. Woven-roving glass fibre/epoxy composites have emerged as promising candidates for energy-absorbing components such as crash boxes, honeycombs, and structural reinforcements because of their exceptional specific strength, low density, and favourable cost-to-performance ratio [3]. Among the available geometric topologies, hexagonal cellular structures combine superior stiffness-to-weight ratios with the characteristic plateau-stress response that is critical for progressive energy absorption during crushing [4]. Hexagonal composite ring structures are therefore strong candidates for next-generation crashworthy components.
@@ -69,7 +77,7 @@ Because the two loading configurations have different natural stroke lengths (d~
 
 The Inverse Physics-Informed Neural Network (IPINN) framework comprises two coupled modules (Fig. 1). The forward module learns the crushing response from experimental data and returns the load–displacement and energy–displacement curves as functions of (d, θ, LC). The inverse module repeatedly queries the validated forward surrogate to identify design parameters that match prescribed crashworthiness targets and to characterise the EA–IPF trade-off. A unified preprocessing pipeline is applied across all surrogates: a periodic angle embedding (sin θ, cos θ), one-hot encoding of LC, and standardisation of inputs and outputs to zero mean and unit variance using training-set statistics.
 
-To isolate the effect of physics integration, three forward-model variants — DDNS, Soft-PINN, and Hard-PINN — are trained under identical preprocessing, identical data splits, and identical evaluation metrics (Fig. 2). Fidelity is assessed under the held-out-angle protocol of Section 3.6, and epistemic uncertainty is quantified through bootstrap ensembling with Tukey-fence convergence filtering (Section 3.5) and curve-level split-conformal calibration (Section 3.7).
+To isolate the effect of physics integration, three forward-model variants — DDNS, Soft-PINN, and Hard-PINN — are trained under identical preprocessing, identical data splits, and identical evaluation metrics (Fig. 2). Fidelity is assessed under the held-out-angle protocol of Section 3.5, and epistemic uncertainty is quantified through bootstrap ensembling with Tukey-fence convergence filtering (Section 3.4) and curve-level split-conformal calibration (Section 3.6).
 
 ![](build/figs/Fig_framework_schematic.png){width=16cm}
 
@@ -95,7 +103,7 @@ where G is the gradient-scaling constant determined once from training-set stati
 
 All three surrogates are fully connected multilayer perceptrons with Softplus activations and Kaiming-normal initialisation; optional dropout is applied between hidden layers. The critical distinction is how — and to what degree — the work–energy identity is embedded in the model.
 
-*DDNS.* A two-headed MLP predicts standardised load and energy as independent outputs (F̂~n~, Ê~n~) with no physical coupling. Following the hyperparameter optimisation of Section 3.8, the DDNS uses three hidden layers [128, 64, 32] (11,170 parameters), dropout 0.016, Softplus β ≈ 18.9, batch size 64, and Adam at learning rate 4.21 × 10^−5^ with weight decay 3.16 × 10^−5^. Its objective is purely data-driven,
+*DDNS.* A two-headed MLP predicts standardised load and energy as independent outputs (F̂~n~, Ê~n~) with no physical coupling. Following the hyperparameter optimisation of Section 3.7, the DDNS uses three hidden layers [128, 64, 32] (11,170 parameters), dropout 0.016, Softplus β ≈ 18.9, batch size 64, and Adam at learning rate 4.21 × 10^−5^ with weight decay 3.16 × 10^−5^. Its objective is purely data-driven,
 
 *L~DDNS~ = w~F~ · SmoothL1(F̂~n~, F~n~) + w~E~ · MSE(Ê~n~, E~n~),*  (5)
 
@@ -119,7 +127,7 @@ Generalisation is assessed with a held-out-angle protocol: every measurement at 
 
 A random row-wise 80/20 split — the prevalent protocol in the surrogate crashworthiness literature — is deliberately *not* reported as evidence of generalisation. Because each experimental curve contributes hundreds of densely sampled rows, a random row split places nearly identical neighbouring points of the *same* curve on both sides of the partition; the resulting scores measure within-curve interpolation rather than the ability to predict new designs. Under this protocol all three surrogates exceed R² = 0.97 and the comparison carries no discriminating information about design generalisation, which is the property that matters for inverse design.
 
-Performance is reported through the coefficient of determination R², RMSE, and MAE on each output. Two levels of granularity are distinguished throughout: *curve-level* accuracy on the held-out load and energy signals, and *design-level* accuracy of the derived metrics (EA, IPF) that drive inverse design (Section 3.10).
+Performance is reported through the coefficient of determination R², RMSE, and MAE on each output. Two levels of granularity are distinguished throughout: *curve-level* accuracy on the held-out load and energy signals, and *design-level* accuracy of the derived metrics (EA, IPF) that drive inverse design (Section 3.9).
 
 ## Curve-level split-conformal calibration
 
@@ -204,7 +212,7 @@ Table 1. Experimental crashworthiness metrics. LC1 evaluated at 80 mm stroke; LC
 | 70 | LC1 | 0–80 | 33.81 | 0.770 | 0.423 | 0.549 |
 | 70 | LC2 | 0–130 | 98.85 | 1.420 | 0.760 | 0.535 |
 
-Two properties of Table 1 shape everything downstream. First, the design trends are *jagged*: EA and IPF are not monotone in θ (e.g., the LC1 minimum at 55° and the pronounced LC2 spike at 55°), reflecting genuine mode competition in single-specimen data. Second, the two loading configurations produce distinct (EA, IPF) signatures — the discriminative basis for the plausibility classifier of Section 3.9. These measured curves and indicators are the ground truth for every subsequent analysis.
+Two properties of Table 1 shape everything downstream. First, the design trends are *jagged*: EA and IPF are not monotone in θ (e.g., the LC1 minimum at 55° and the pronounced LC2 spike at 55°), reflecting genuine mode competition in single-specimen data. Second, the two loading configurations produce distinct (EA, IPF) signatures — the discriminative basis for the plausibility classifier of Section 3.8. These measured curves and indicators are the ground truth for every subsequent analysis.
 
 # Results and discussion
 
@@ -250,7 +258,7 @@ Table 3. Pairwise comparison of member-level load R² (held-out-angle protocol).
 | DDNS vs Hard-PINN | −0.105 | [−0.125, −0.085] | Yes | −3.24 | −9.86 | < 0.001 |
 | Soft-PINN vs Hard-PINN | −0.033 | [−0.050, −0.016] | Yes | −1.13 | −3.56 | 0.003 |
 
-Context matters for the absolute scores: most published crashworthiness surrogates report only random-split interpolation accuracy, which for this dataset would exceed R² = 0.97 for all three models while measuring only within-curve interpolation (Section 3.6). The held-out-design protocol used here is deliberately harder, and 0.82 at a wholly unseen geometry — with the LC2 curve containing a regime transition — should be read against the model-free floors of Section 5.5 rather than against interpolation ceilings.
+Context matters for the absolute scores: most published crashworthiness surrogates report only random-split interpolation accuracy, which for this dataset would exceed R² = 0.97 for all three models while measuring only within-curve interpolation (Section 3.5). The held-out-design protocol used here is deliberately harder, and 0.82 at a wholly unseen geometry — with the LC2 curve containing a regime transition — should be read against the model-free floors of Section 5.5 rather than against interpolation ceilings.
 
 ## Physics-constraint verification
 
@@ -282,7 +290,7 @@ Table 5. Curve-level split-conformal calibration at the held-out angle (load cha
 
 ![](build/figs/Fig_reliability_diagram.png){width=16cm}
 
-Fig. 8. Reliability diagram at the held-out angle: raw ensemble coverage (solid) versus curve-level conformally corrected coverage (dotted), per surrogate.
+Fig. 8. Reliability diagram at the held-out angle: raw ensemble coverage (solid) versus curve-level conformally corrected coverage (dotted) per surrogate; 2σ conformal factors 4.10 (DDNS), 2.62 (Soft-PINN), and 2.51 (Hard-PINN).
 
 Two consequences are drawn for practice. First, bootstrap ensembles quantify member disagreement, not distribution shift [28]; conformal correction is not optional under geometric generalisation. Second, at the *design* level a separate scalar calibration audit shows that ensemble standard deviations of EA and IPF underestimate realised design errors by a factor of ≈ 4.2–4.5, with the largest normalised errors concentrated at the LC2 regime transition (z > 5 at 70°); design-level uncertainty statements in Sections 5.6–5.8 therefore carry conformally inflated bands.
 
@@ -318,7 +326,7 @@ Fig. 9 maps the surrogate design space: EA@80 mm and IPF versus θ for both load
 
 Fig. 9. Design-space predictions of the deployed Hard-PINN (EA@80 mm and IPF versus θ, per loading configuration, with ±1σ ensemble bands and experimental markers).
 
-The exact variance decomposition (Section 3.11) quantifies what drives this space (Table 7). At the common displacement, EA variance is shared almost equally between angle (39.2%) and loading configuration (37.3%) with a substantial interaction (23.5%) — geometry and loading cannot be optimised independently. IPF is angle-dominated (59.2%, interaction 36.4%): peak force is primarily a geometric property, modulated by loading. Full-stroke energy, by contrast, is loading-dominated (74.4%) — chiefly the stroke-length disparity — which is precisely why the displacement-fair EA@80 mm metric is used for all design comparisons: it removes a nuisance factor that would otherwise dominate 74% of the objective variance.
+The exact variance decomposition (Section 3.10) quantifies what drives this space (Table 7). At the common displacement, EA variance is shared almost equally between angle (39.2%) and loading configuration (37.3%) with a substantial interaction (23.5%) — geometry and loading cannot be optimised independently. IPF is angle-dominated (59.2%, interaction 36.4%): peak force is primarily a geometric property, modulated by loading. Full-stroke energy, by contrast, is loading-dominated (74.4%) — chiefly the stroke-length disparity — which is precisely why the displacement-fair EA@80 mm metric is used for all design comparisons: it removes a nuisance factor that would otherwise dominate 74% of the objective variance.
 
 Table 7. Exact variance decomposition of the learned design metrics over the balanced (θ, LC) grid (501 angles × 2 LCs).
 
@@ -330,7 +338,7 @@ Table 7. Exact variance decomposition of the learned design metrics over the bal
 
 ## Verified inverse design
 
-*Ground-truth recovery.* Table 8 reports the five strategic targets, each generated from a measured configuration so that ground truth is known. The GP-BO loop recovers the correct loading configuration in **five of five** cases and matches the target metrics to 0.3–3.5% (EA) and 0.1–1.0% (IPF). Angle recovery is exact for the two boundary-anchored targets (T2 → 45.0°, T4 → 70.0°; the truth lies on the search bound, so the reported bound-activity flag is expected), 1.5° for T1, and 4.6° for T5. Multi-seed robustness runs (5 outer seeds × 5 restarts; 500 evaluations per target) show tight dispersion for four targets (θ spread ≤ 0.35°).
+*Ground-truth recovery.* Table 8 reports the five strategic targets, each generated from a measured configuration so that ground truth is known. The GP-BO loop recovers the correct loading configuration in **five of five** cases and matches the target metrics to 0.3–3.5% (EA) and 0.1–1.0% (IPF). Angle recovery is exact for the two boundary-anchored targets (T2 → 45.0°, T4 → 70.0°; the truth lies on the search bound, so the reported bound-activity flag is expected), 1.5° for T1, and 4.6° for T5. Multi-seed robustness runs (5 outer seeds × 5 restarts per target) show tight dispersion for four targets (θ spread ≤ 0.35°; Table 10).
 
 Table 8. Ground-truth recovery for the five strategic inverse-design targets.
 
@@ -354,15 +362,25 @@ Fig. 11. Inverse-design parity with ensemble uncertainty: recovered versus targe
 
 *Off-grid round trips and infeasibility (Table 9).* The two off-grid verification targets are recovered with sub-degree accuracy — V1 (truth 52.5°, LC1): Δθ = 0.36°; V2 (truth 62.5°, LC2): Δθ = 0.01° — with combined relative errors of 0.7% and 0.02%. Since neither angle exists in any training row, these round trips certify the invertibility of the learned map away from the data grid. The infeasibility probe V3 (EA 30% above the attainable maximum, IPF 30% below the attainable minimum) terminates with a combined relative error of 81% — two orders of magnitude above the 5% attainability threshold — and is correctly declared *not attainable*: the framework refuses impossible requests rather than silently returning its best compromise. All three verification verdicts are correct.
 
-Table 9. Verification suite: off-grid round trips and infeasibility probe.
+Table 9. Verification suite: off-grid round trips and infeasibility probe. Rel. error is the combined relative target-matching error at the returned solution; all three verdicts are correct.
 
-| ID | Family | Truth | Recovered | Δθ (°) | Combined rel. error | Verdict | Correct |
-|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|
-| V1 | off-grid round trip | 52.5°, LC1 | 52.9°, LC1 | 0.36 | 0.007 | attainable | Yes |
-| V2 | off-grid round trip | 62.5°, LC2 | 62.5°, LC2 | 0.01 | 0.0002 | attainable | Yes |
-| V3 | infeasibility probe | none (infeasible) | — | — | 0.811 | not attainable | Yes |
+| ID | Family | Truth | Recovered | Δθ (°) | Rel. error | Verdict |
+|:---:|:---|:---:|:---:|:---:|:---:|:---:|
+| V1 | off-grid round trip | 52.5°, LC1 | 52.9°, LC1 | 0.36 | 0.007 | attainable |
+| V2 | off-grid round trip | 62.5°, LC2 | 62.5°, LC2 | 0.01 | 0.0002 | attainable |
+| V3 | infeasibility probe | — | — | — | 0.811 | not attainable |
 
-*Efficiency, transparency, and physical plausibility.* Each target consumed at most 20 sequential surrogate evaluations in its best restart (11–20 across targets; ≈ 47 s wall time per target including GP fitting), and every GP-BO solution was anchored against a 402-point dense-grid evaluation: for four of five targets the BO optimum coincides with the grid optimum to ≤ 1.0° (T4's 13° discrepancy is the cross-LC degeneracy discussed above). A physical-plausibility audit of all 1,002 design-sweep evaluations recorded zero negative-force predictions, zero energy non-monotonicities, zero negative EA values, and zero IPF-fallback activations — the deployed surrogate is physically well-behaved over the entire queried design space, not merely at the reported optima. The objective decomposition at each optimum shows the fit terms driven to O(10^−5^)–O(10^−4^) with the residual objective dominated by the (intentionally small) plausibility penalty, confirming that the classifier steered rather than distorted the solutions; consistently, the classifier ablation flips no LC decision and moves no recovered angle by more than 0.4°. Fig. 12 closes the loop in the most interpretable way available: the full predicted load–displacement curve at each recovered design overlaid on the nearest experimental curve of the same loading configuration.
+*Efficiency, transparency, and physical plausibility.* Table 10 anchors every GP-BO solution against an exhaustive dense-grid evaluation of the identical objective and against 25 independent optimizer replicates. The sample-efficient search needed 11–20 sequential evaluations per target (≈ 47 s wall time including GP fitting, versus 402 evaluations for the grid) and lands on the grid optimum to ≤ 1.0° for four of five targets; the T4 discrepancy is the cross-LC degeneracy discussed above, where the two branches differ by ΔJ ≈ 4 × 10^−4^. Replicate dispersion is ≤ 0.35° except for the degenerate T4.
+
+Table 10. Optimizer transparency: GP-BO solutions versus the dense-grid anchor (402 objective evaluations per target) and angle dispersion across 25 independent runs (5 seeds × 5 restarts).
+
+| Target | BO (θ, LC) | BO J | Grid (θ, LC) | Grid J | Seq. evals | θ spread (°) |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| T1 | 63.5, LC1 | 0.00281 | 64.5, LC1 | 0.00258 | 11 | ± 0.35 |
+| T2 | 45.0, LC1 | 0.00153 | 45.0, LC1 | 0.00153 | 11 | ± 0.00 |
+| T3 | 68.1, LC1 | 0.00174 | 68.1, LC1 | 0.00174 | 13 | ± 0.18 |
+| T4 | 70.0, LC1 | 0.00287 | 57.0, LC2 | 0.00244 | 15 | ± 5.88 |
+| T5 | 60.4, LC2 | 0.00139 | 60.4, LC2 | 0.00139 | 20 | ± 0.34 | A physical-plausibility audit of all 1,002 design-sweep evaluations recorded zero negative-force predictions, zero energy non-monotonicities, zero negative EA values, and zero IPF-fallback activations — the deployed surrogate is physically well-behaved over the entire queried design space, not merely at the reported optima. The objective decomposition at each optimum shows the fit terms driven to O(10^−5^)–O(10^−4^) with the residual objective dominated by the (intentionally small) plausibility penalty, confirming that the classifier steered rather than distorted the solutions; consistently, the classifier ablation flips no LC decision and moves no recovered angle by more than 0.4°. Fig. 12 closes the loop in the most interpretable way available: the full predicted load–displacement curve at each recovered design overlaid on the nearest experimental curve of the same loading configuration.
 
 ![](build/figs/Fig_inverse_vs_nearest_experimental_curve.png){width=16cm}
 
@@ -374,11 +392,11 @@ The weighted-sum sweep (501 angles × 2 LCs per weight) and Chebyshev scalarisat
 
 ![](build/figs/Fig_pareto_tradeoff.png){width=16cm}
 
-Fig. 13. Multi-objective EA–IPF trade-off: (a) optimal angle versus trade-off weight α with LC-conditional fronts; (b) delivered EA and IPF versus α; (c) Pareto front with the recommended knee design; (d) scalarised objective versus α.
+Fig. 13. Multi-objective EA–IPF trade-off: (a) optimal angle versus trade-off weight α with LC-conditional fronts; (b) delivered EA and IPF versus α; (c) Pareto front with the recommended knee design (31.7 J, 0.42 kN at θ ≈ 51.9°, LC2); (d) scalarised objective versus α.
 
 ## Limitations
 
-Five limitations bound the claims of this study. (i) The dataset contains one representative curve per configuration; specimen-to-specimen scatter is not identifiable, and all reported uncertainty is epistemic. The jagged design trends in Table 1 (e.g., the LC1, 60° IPF spike) may partly reflect specimen idiosyncrasy, which caps achievable design-level accuracy at unseen angles — the model-free floors of Section 5.5 quantify this ceiling. (ii) The held-out-angle protocol tests generalisation at one interior angle; boundary angles (45°, 70°) are harder, as the mechanics analysis explains for the LC2 regime transition, and leave-one-angle-out scores at the boundaries are substantially weaker — a fundamental data-scarcity wall, not an architectural failure, that additional specimens or high-fidelity simulation would be needed to breach. (iii) The hyperparameter search was scored on the same fold used for the reported comparison (disclosed in Section 3.8); all three approaches shared this protocol, so the ranking is unaffected, and the released code defaults to an inner tuning fold. (iv) The energy channel is derived from the load channel, so physics enforcement here is an inductive bias rather than independent validation; the benefit is nonetheless measurable (Tables 2 and 4). (v) The plausibility classifier is weak at n = 12 (LOO AUC 0.53) and is deployed accordingly — as a small, ablation-verified regulariser, not an oracle.
+Five limitations bound the claims of this study. (i) The dataset contains one representative curve per configuration; specimen-to-specimen scatter is not identifiable, and all reported uncertainty is epistemic. The jagged design trends in Table 1 (e.g., the LC1, 60° IPF spike) may partly reflect specimen idiosyncrasy, which caps achievable design-level accuracy at unseen angles — the model-free floors of Section 5.5 quantify this ceiling. (ii) The held-out-angle protocol tests generalisation at one interior angle; boundary angles (45°, 70°) are harder, as the mechanics analysis explains for the LC2 regime transition, and leave-one-angle-out scores at the boundaries are substantially weaker — a fundamental data-scarcity wall, not an architectural failure, that additional specimens or high-fidelity simulation would be needed to breach. (iii) The hyperparameter search was scored on the same fold used for the reported comparison (disclosed in Section 3.7); all three approaches shared this protocol, so the ranking is unaffected, and the released code defaults to an inner tuning fold. (iv) The energy channel is derived from the load channel, so physics enforcement here is an inductive bias rather than independent validation; the benefit is nonetheless measurable (Tables 2 and 4). (v) The plausibility classifier is weak at n = 12 (LOO AUC 0.53) and is deployed accordingly — as a small, ablation-verified regulariser, not an oracle.
 
 # Conclusions
 
@@ -413,6 +431,10 @@ This work was supported by the South Dakota Board of Regents through Faculty Sta
 **Declaration of generative AI and AI-assisted technologies in the writing process**
 
 During the preparation of this work, the authors used Grammarly solely for grammar and spelling checks. After using the tool, the authors thoroughly reviewed and edited the content as needed and take full responsibility for the final content of the publication.
+
+**Supplementary material**
+
+All result tables and figures beyond those shown here — per-target GP-BO convergence traces and posterior-evolution diagnostics, the multi-seed robustness sweep, the λ-sensitivity and classifier-ablation tables, the leave-one-out classifier diagnostics, the physical-plausibility audit of the full design sweep, the Pareto scalarisation and dominance tables, extended uncertainty-calibration diagnostics, and the mechanics-analysis outputs (crush-mode signatures, densification-kinematics fits, and master-curve collapse) — are archived with the code and data repository (see Data availability) and regenerate deterministically from the released model bundles.
 
 **References**
 
