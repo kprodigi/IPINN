@@ -5052,8 +5052,10 @@ def fig_forward_map_jacobian(jacobian_results, output_dir, logger):
     handles = [Line2D([0], [0], color="0.4", lw=0.8, ls="--", label="zero slope")]
     if has_bif:
         handles.append(Line2D([0], [0], color=bif_color, lw=0.9, ls=":", label="bifurcation"))
-    fig.legend(handles=handles, loc="upper center", ncol=len(handles),
-               bbox_to_anchor=(0.5, 1.02), frameon=True)
+    # loc="lower center" anchored at the figure top makes the legend grow UP
+    # into the tight-bbox margin; "upper center" grows down over the (b) label.
+    fig.legend(handles=handles, loc="lower center", ncol=len(handles),
+               bbox_to_anchor=(0.5, 1.0), frameon=True)
     path = os.path.join(output_dir, "Fig_forward_map_jacobian.png")
     fig.savefig(path, dpi=600, bbox_inches="tight")
     plt.close(fig)
@@ -6660,8 +6662,10 @@ def fig_cross_protocol_comparison(dual_results: Dict, output_dir: str, logger: l
         legend_elements.append(mpatches.Patch(facecolor='white', edgecolor='black', hatch='//', label='Unseen Angle'))
     # No suptitle: the previous one was drawn behind the top-anchored legend and
     # bled through it as a grey ghost.  The figure caption carries the title.
-    fig.legend(handles=legend_elements, loc='upper center', ncol=len(legend_elements),
-               bbox_to_anchor=(0.5, 1.02), frameon=True, columnspacing=0.8, handletextpad=0.35)
+    # Anchor the legend's bottom edge at the figure top so it grows upward
+    # (upper-center at y>1 extends down over the (b) panel label).
+    fig.legend(handles=legend_elements, loc='lower center', ncol=len(legend_elements),
+               bbox_to_anchor=(0.5, 1.0), frameon=True, columnspacing=0.8, handletextpad=0.35)
     fig.savefig(os.path.join(output_dir, "Fig_cross_protocol.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     logger.info("  Saved: Fig_cross_protocol.png")
@@ -6927,13 +6931,21 @@ def fig_bo_convergence(opt_results: Dict, output_dir: str, logger: logging.Logge
                label=fr"$\theta^*$ = {best_theta:.1f}°")
     ax.set_xlabel("Iteration")
     ax.set_ylabel(r"Angle $\theta$ (°)")
-    ax.legend(loc='best')
+    handles_b, _ = ax.get_legend_handles_labels()
+    if lc_history is not None:
+        handles_b = [Line2D([0], [0], marker='o', linestyle='none',
+                            markerfacecolor=lc_colors[0], markeredgecolor='black',
+                            markersize=6, label='LC1 sample'),
+                     Line2D([0], [0], marker='o', linestyle='none',
+                            markerfacecolor=lc_colors[1], markeredgecolor='black',
+                            markersize=6, label='LC2 sample')] + handles_b
+    ax.legend(handles=handles_b, loc='best')
     add_subplot_label(ax, 'b')
 
     # (c) All evaluations and best so far
     ax = axes[1, 0]
     ax.scatter(range(1, len(y_history) + 1), y_history, c=COLORS["ddns"], s=30,
-               alpha=0.7, edgecolors='black', linewidths=0.5)
+               alpha=0.7, edgecolors='black', linewidths=0.5, label='Evaluation')
     ax.plot(range(1, len(best_y_history) + 1), best_y_history,
             color=COLORS["hard"], linewidth=2.0, label='Best so far')
     ax.set_xlabel("Iteration")
@@ -6966,7 +6978,15 @@ def fig_bo_convergence(opt_results: Dict, output_dir: str, logger: logging.Logge
                zorder=10, edgecolors='black', linewidths=0.8, label='Optimum')
     ax.set_xlabel(r"Angle $\theta$ (°)")
     ax.set_ylabel("Objective Value")
-    ax.legend(loc='best')
+    handles_d, _ = ax.get_legend_handles_labels()
+    if lc_history is not None:
+        handles_d = [Line2D([0], [0], marker='*', linestyle='none',
+                            markerfacecolor=lc_colors[0], markeredgecolor='black',
+                            markersize=10, label='LC1 sample'),
+                     Line2D([0], [0], marker='D', linestyle='none',
+                            markerfacecolor=lc_colors[1], markeredgecolor='black',
+                            markersize=6, label='LC2 sample')] + handles_d
+    ax.legend(handles=handles_d, loc='best')
     add_subplot_label(ax, 'd')
 
     t_ea = opt_results.get('target_ea', float('nan'))
@@ -7397,9 +7417,10 @@ def fig_target_feasibility(df_metrics: pd.DataFrame, targets: List[Dict], output
                    label=f"Observed {lc}")
 
     # Targets
-    for t in targets:
+    for k, t in enumerate(targets):
         ax.scatter([t["EA"]], [t["IPF"]], s=180, marker='*',
-                   facecolor='black', edgecolor='black', linewidths=0.6, zorder=10)
+                   facecolor='black', edgecolor='black', linewidths=0.6, zorder=10,
+                   label="Target" if k == 0 else None)
         ax.annotate(t["id"], (t["EA"], t["IPF"]), textcoords="offset points", xytext=(4, 4))
 
     if ea_col == "EA_common":
@@ -8935,12 +8956,21 @@ def fig_reliability_diagram(calibration: Dict, output_dir: str, logger: logging.
         ax.set_xlim(0, 1.02)
         ax.set_ylim(0, 1.02)
         ax.set_aspect('equal')
-        ax.legend(loc='lower right', framealpha=0.95, ncol=1,
-                  borderpad=0.35, labelspacing=0.35, handletextpad=0.45)
+        # An 8-entry in-axes legend covers the coverage curves wherever it is
+        # placed; a single panel gets a below-figure legend instead.  With two
+        # panels the conformal factors differ per protocol, so keep per-axes
+        # legends there.
+        if n_protocols > 1:
+            ax.legend(loc='upper left', framealpha=0.95, ncol=1, fontsize=8,
+                      borderpad=0.35, labelspacing=0.35, handletextpad=0.45)
         ax.grid(True, alpha=0.3)
         add_subplot_label(ax, chr(ord('a') + ax_idx))
         ax_idx += 1
-    
+
+    if n_protocols == 1:
+        handles, labels = axes[0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 0.0),
+                   ncol=2, frameon=True, columnspacing=1.2, handletextpad=0.5)
     fig.suptitle("Uncertainty Calibration: Reliability Diagram")
     fig.savefig(os.path.join(output_dir, "Fig_reliability_diagram.png"), 
                 dpi=600, bbox_inches='tight', facecolor='white')
@@ -9683,7 +9713,10 @@ def replot_figures_from_state(state: Dict, output_dir: str, logger: logging.Logg
         fig_classifier_effect(_clf_ab, output_dir, logger)
     _lam_df = state.get("lambda_sweep_df")
     if _lam_df is not None and len(_lam_df):
-        fig_lambda_sensitivity(_lam_df, output_dir, logger, lambda_opt=state.get("lambda_opt"))
+        _lam_opt = state.get("lambda_opt")
+        if _lam_opt is None:
+            _lam_opt = (state.get("lambda_diag") or {}).get("lambda_opt")
+        fig_lambda_sensitivity(_lam_df, output_dir, logger, lambda_opt=_lam_opt)
 
     if all_inverse_results:
         logger.info("[REPLOT] Inverse-design figures")
@@ -10885,7 +10918,7 @@ def fig_framework_schematic(output_dir: str, logger: logging.Logger) -> str:
     stages = [
         ("Experimental\ncrush data\n(LC1, LC2;\n$\\theta\\in[45,70]^\\circ$)", "#EEEEEE"),
         ("Three surrogates\nDDNS · Soft-PINN ·\nHard-PINN\n($M{=}20$ ensemble)", "#FBE6D9"),
-        ("Dual-protocol\nvalidation\n(random + unseen $\\theta$)\n+ conformal UQ", "#DCE9F5"),
+        ("Held-out-angle\nvalidation\n(unseen $\\theta^*{=}60^\\circ$)\n+ conformal UQ", "#DCE9F5"),
         ("Full-data Hard-PINN\n+ GP-BO inverse\n+ LC plausibility\nclassifier", "#E2EFE8"),
         ("Outcomes:\ntarget matching,\nPareto EA–IPF,\nill-posedness", "#F3E6F0"),
     ]
@@ -10936,8 +10969,10 @@ def fig_classifier_effect(clf_ablation_df, output_dir: str, logger: logging.Logg
     ax.set_xticks(x); ax.set_xticklabels(tids)
     ax.set_xlabel("Inverse-design target")
     ax.set_ylabel(r"$p(\mathrm{LC})$ at recovered optimum")
-    ax.set_ylim(0, 1.05)
-    ax.legend(loc="lower right", framealpha=0.95)
+    ax.set_ylim(0, 1.12)
+    # Bars top out well below 1.0, so the band above them is free; lower-right
+    # sits on the T5 bars.
+    ax.legend(loc="upper center", ncol=2, framealpha=0.95)
     ax.set_title("Plausibility penalty steers GP-BO toward LC-consistent designs")
     return _savefig(fig, output_dir, "Fig_classifier_effect.png", logger)
 
@@ -11842,8 +11877,11 @@ def _render_all_figures(forward_state: Dict, inverse_state: Dict,
         _try("Fig_classifier_effect", fig_classifier_effect,
              clf_ab_diag, output_dir, logger)
     if lambda_diag is not None and len(lambda_diag):
+        _lam_opt = A.get("lambda_opt")
+        if _lam_opt is None:
+            _lam_opt = (A.get("lambda_diag") or {}).get("lambda_opt")
         _try("Fig_lambda_sensitivity", fig_lambda_sensitivity,
-             lambda_diag, output_dir, logger, lambda_opt=A.get("lambda_opt"))
+             lambda_diag, output_dir, logger, lambda_opt=_lam_opt)
 
     # ---- Inverse design (GP-BO target matching) ----
     if all_inv:
