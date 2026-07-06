@@ -3,8 +3,9 @@ forward_unseen_ddns,20,18,11170,165.01,,,
 forward_unseen_soft,20,20,34690,1416.82,,,
 forward_unseen_hard,20,20,9089,14401.67,,,
 inverse_gpbo_config,,,,,20.0,5.0,
-inverse_gpbo_target_T1,,,,64.95,,,11.0
-inverse_gpbo_target_T2,,,,62.27,,,11.0
-inverse_gpbo_target_T3,,,,62.10,,,13.0
-inverse_gpbo_target_T4,,,,62.89,,,15.0
-inverse_gpbo_target_T5,,,,64.75,,,11.0
+inverse_gpbo_target_T1,,,,46.84,,,11.0
+inverse_gpbo_target_T2,,,,46.50,,,11.0
+inverse_gpbo_target_T3,,,,45.72,,,13.0
+inverse_gpbo_target_T4,,,,46.80,,,15.0
+inverse_gpbo_target_T5,,,,48.07,,,20.0
+hardware: CPU (x86_64) | torch 2.5.1+cu121 | git n/a,,,,,,,

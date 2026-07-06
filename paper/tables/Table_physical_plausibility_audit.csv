@@ -1,0 +1,3 @@
+LC,n_sweep_points,mean_neg_force_frac,pts_any_neg_force_frac,mean_nonmono_energy_frac,pts_any_nonmono_energy_frac,mean_neg_ea_frac,pts_any_neg_ea_frac,mean_ipf_fallback_frac,pts_any_ipf_fallback_frac
+LC1,501,0.0000,0,0.0000,0,0.0000,0,0.0000,0
+LC2,501,0.0000,0,0.0000,0,0.0000,0,0.0000,0

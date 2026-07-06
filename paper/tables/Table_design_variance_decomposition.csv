@@ -1,0 +1,4 @@
+Quantity,S_theta,S_LC,S_interaction,total_variance,grid
+EA@80mm,0.3915,0.3734,0.235,54.89,501 angles x 2 LCs
+IPF,0.5919,0.0441,0.364,0.01386,501 angles x 2 LCs
+EA_full,0.1421,0.7437,0.1142,305.7,501 angles x 2 LCs

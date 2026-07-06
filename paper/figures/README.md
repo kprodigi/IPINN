@@ -9,10 +9,12 @@ analysis (parity, residuals, calibration, etc.) and renders cleanly in a
 3×2 grid (or smaller).  No subplot-title overflow, no x-label / row-2
 collisions, no legend obscuring data.
 
-**This snapshot ships 43 figures** (2 schematics + 26 analysis figures +
-15 per-target GP-BO traces).  The pipeline can additionally emit 9
-*optional* figures that depend on analysis data not included in this
-snapshot — they are listed at the end under
+**This snapshot ships 48 figures** (2 schematics + 28 analysis figures +
+15 per-target GP-BO traces + 3 mechanics-analysis figures), regenerated
+2026-07-06 from the final production bundles with all layout fixes
+applied and every figure visually verified.  The pipeline can
+additionally emit 7 *optional* figures that depend on analysis data not
+included in this snapshot — they are listed at the end under
 [Optional figures](#optional-figures-not-included-in-this-snapshot).
 
 ## Recommended placement: main text vs supplementary
@@ -82,6 +84,8 @@ GP-BO traces (`Fig_bo_convergence_T*`, `Fig_gpbo_posterior_evaluation_T*`,
 |---|---|
 | `Fig_lc_classifier_cv_diagnostics.png` | Confusion matrix, ROC, PR, calibration (LOO CV) |
 | `Fig_classifier_decision_boundary.png` | P(LC2) probability landscape in EA-IPF space |
+| `Fig_classifier_effect.png` | p(LC) at the recovered optimum, with vs without the plausibility penalty, per target |
+| `Fig_lambda_sensitivity.png` | Target-matching error and p(LC) vs the classifier penalty weight λ (auto-tuned λ marked) |
 
 ## Inverse design (GP-BO target matching)
 
@@ -115,23 +119,28 @@ GP-BO traces (`Fig_bo_convergence_T*`, `Fig_gpbo_posterior_evaluation_T*`,
 |---|---|
 | `Fig_d_common_sensitivity_EA_vs_disp_endpoint.png` | EA(d) sensitivity vs displacement endpoint (LC1 / LC2) |
 
+## Mechanics analysis (data-only, `scripts/mechanics_analysis.py`)
+
+| File | Caption summary |
+|---|---|
+| `Fig_mode_signatures.png` | Crush-mode signatures per specimen (CFE vs densification onset) + plateau/IPF design trends |
+| `Fig_densification_kinematics.png` | Candidate kinematic H(θ) fits: LC2 plateau force ~ sinθ·cosθ (R² = 0.95) |
+| `Fig_master_curve_collapse.png` | Master-curve collapse test: raw vs mechanics scalings per LC |
+
 ## Optional figures (not included in this snapshot)
 
 The pipeline emits these figures only when the corresponding analysis data
-is produced (baseline sweep, HP sensitivity, penalty-weight / λ sweeps, the
-classifier-effect ablation, random-grid curves, per-member training curves,
-and the posterior-likelihood diagnostic).  They are **gated behind optional
-stages** (`--no_robustness` off, plus the inverse/classifier ablation
-frames) and are **not part of this 43-figure snapshot**.  Their generating
-functions exist in `composite_design.py`:
+is produced (baseline sweep, HP sensitivity, penalty-weight sweep,
+random-grid curves, per-member training curves, and the
+posterior-likelihood diagnostic).  They are **gated behind optional
+stages** and are **not part of this 48-figure snapshot**.  Their
+generating functions exist in `composite_design.py`:
 
 | File | Caption summary |
 |---|---|
 | `Fig_baseline_comparison_unseen.png` | DDNS/Soft/Hard vs ML baselines (requires `baseline_results_u`) |
 | `Fig_hyperparam_sensitivity_unseen.png` | HP sensitivity sweep (requires `sensitivity_df_u`) |
 | `Fig_penalty_weight_sensitivity.png` | Soft-PINN R² vs physics-penalty weight w_φ, with Hard-PINN as a weight-free reference line |
-| `Fig_classifier_effect.png` | p(LC) at the recovered optimum, with vs without the plausibility penalty, per target |
-| `Fig_lambda_sensitivity.png` | Target-matching error and p(LC) vs the classifier penalty weight λ (auto-tuned λ marked) |
 | `Fig_random_grid_curves.png` | Per-(angle, LC) grid of predicted curves (random 80/20 protocol) |
 | `Fig_model_complexity.png` | Parameter count + training time per approach |
 | `Fig_training_curves.png` | Per-approach training loss curves (M-member ensemble) |

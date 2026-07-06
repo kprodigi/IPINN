@@ -6,15 +6,18 @@ verified** by rendering the full suite from the staged intermediate results
 small 2-member test ensemble with *old numbers*, so it validates
 **layout / overlap / text / legends** — not the final values.
 
-> **IMPORTANT — regenerate the shipped PNGs from the FINAL bundle.**
-> The PNGs committed in this directory pre-date these code fixes, and the
-> staged test data must NOT be used to overwrite them (it would regress the
-> numbers). On the machine with the final trained bundle, run:
-> ```bash
-> python composite_design.py --mode replot \
->     --output_dir <bundle_dir> --replot_from <bundle_dir> --force_cpu
-> ```
-> The layout/overlap fixes below then apply on top of the final numbers.
+> **DONE (2026-07-06).** The shipped PNGs in this directory were regenerated
+> from the final production bundles (`results_paper_v2/*.pt`, HPC job
+> 10957077) with every code fix below applied, and all 48 figures were
+> re-verified visually. A second fix round (commit d3e5883) additionally
+> repositioned the top figure-legends of `Fig_forward_map_jacobian` and
+> `Fig_cross_protocol` (they grew downward over the (b) panel label), moved
+> the reliability-diagram legend below the figure, added LC1/LC2 sample
+> legend entries to the `Fig_bo_convergence_T*` panels, moved the
+> `Fig_classifier_effect` legend off the bars, marked the auto-tuned λ in
+> `Fig_lambda_sensitivity`, added the Target legend entry in
+> `Fig_inverse_target_feasibility`, and updated the framework schematic to
+> the held-out-angle wording.
 
 ## Fixed and visually verified (32 figures rendered clean)
 

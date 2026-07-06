@@ -1,0 +1,4 @@
+Protocol,Model,Coverage_1sigma_raw,Coverage_2sigma_raw,Conformal_factor,Coverage_1sigma_corrected,Coverage_2sigma_corrected
+unseen,DDNS,0.172,0.405,4.097,0.725,0.986
+unseen,Soft-PINN,0.276,0.505,2.621,0.539,0.743
+unseen,Hard-PINN,0.225,0.520,2.508,0.617,0.861

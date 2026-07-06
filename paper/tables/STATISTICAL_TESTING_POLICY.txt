@@ -1,0 +1,29 @@
+STATISTICAL TESTING POLICY (MANUSCRIPT / SUPPLEMENT)
+============================================================
+
+Primary protocol-level comparisons
+------------------------------------
+- Pre-specified comparisons between modelling approaches (e.g. Hard-PINN vs
+  Soft-PINN vs DDNS) are reported per train/validation protocol (random split
+  vs unseen angle). Bonferroni-adjusted p-values correct multiplicity **within
+  each protocol** over the pairwise model comparisons reported for that
+  protocol—not pooled across protocols.
+
+- Welch t-tests on validation load R² across ensemble members are a
+  standardized summary; members are not independent replicates (shared split,
+  same architecture). Treat p-values descriptively alongside Cohen's d.
+
+Exploratory / descriptive analyses
+----------------------------------
+- Inverse design, multi-objective sweeps, classifier ablations, and
+  hyperparameter sensitivity analyses are **descriptive** unless explicitly
+  framed as confirmatory with a pre-specified alpha budget.
+
+Recommendations for the paper text
+----------------------------------
+- State which tests are primary confirmatory vs exploratory.
+- Report effect sizes (Cohen's d is already in outputs where applicable) alongside p-values.
+- For multiple inverse targets, distinguish **per-target** error reporting from
+  global claims about optimiser performance.
+
+This file is generated automatically for reproducibility bundles (Zenodo / SI).

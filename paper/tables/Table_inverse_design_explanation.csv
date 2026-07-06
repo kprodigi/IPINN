@@ -1,0 +1,6 @@
+Target,recovered_theta_deg,recovered_LC,J_at_optimum,EA_fit_term,IPF_fit_term,classifier_penalty_term,EA_rel_error_pct,IPF_rel_error_pct,p_LC_at_optimum,lambda_prob_weight,dominant_term
+T1,63.48,LC1,0.002805,0.001253,0.000081,0.001470,3.54,0.90,0.7627,0.005427,classifier_penalty
+T2,45.00,LC1,0.001530,0.000007,0.000002,0.001521,0.26,0.13,0.7556,0.005427,classifier_penalty
+T3,68.12,LC1,0.001739,0.000027,0.000039,0.001673,0.52,0.62,0.7347,0.005427,classifier_penalty
+T4,70.00,LC1,0.002873,0.000065,0.000103,0.002705,0.81,1.01,0.6075,0.005427,classifier_penalty
+T5,60.37,LC2,0.001389,0.000011,0.000047,0.001331,0.33,0.68,0.7825,0.005427,classifier_penalty

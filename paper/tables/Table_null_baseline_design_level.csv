@@ -1,0 +1,5 @@
+LC,Quantity,theta_star_deg,Experimental,Null_interp_pred,Null_error_pct,Note
+LC1,EA@80mm (J),60,30.237,25.017,17.27,linear interpolation of experimental values over θ (no model)
+LC1,IPF (kN),60,0.672,0.510,24.07,linear interpolation of experimental values over θ (no model)
+LC2,EA@80mm (J),60,37.904,35.627,6.01,linear interpolation of experimental values over θ (no model)
+LC2,IPF (kN),60,0.490,0.655,33.75,linear interpolation of experimental values over θ (no model)

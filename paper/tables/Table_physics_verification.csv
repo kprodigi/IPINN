@@ -1,0 +1,4 @@
+Model,Mean_Abs_Residual_kN,Max_Abs_Residual_kN,Std_Residual_kN,Frac_Negative_Force,Min_Force_kN
+DDNS,0.074782,0.167315,0.033745,0.0000,0.2310
+Soft-PINN,0.020439,0.037919,0.004595,0.0000,0.0850
+Hard-PINN,0.000000,0.000000,0.000000,0.0000,0.2382

@@ -1,0 +1,4 @@
+Verification_ID,Family,target_EA_J,target_IPF_kN,true_theta_deg,true_LC,recovered_theta_deg,recovered_LC,delta_theta_deg,LC_match,EA_error_pct,IPF_error_pct,combined_rel_error,Attainable,Expected_attainable,Verdict_correct
+V1,off-grid round-trip,25.512,0.465,52.5,LC1,52.86,LC1,0.36,Yes,0.72,0.03,0.0072,Yes,Yes,Yes
+V2,off-grid round-trip,38.712,0.548,62.5,LC2,62.51,LC2,0.01,Yes,0.02,0.01,0.0002,Yes,Yes,Yes
+V3,infeasibility probe,82.421,0.273,n/a (infeasible),n/a,45.00,LC2,,,69.74,41.40,0.8110,No,No,Yes
