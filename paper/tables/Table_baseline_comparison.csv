@@ -1,0 +1,5 @@
+Model,Load_R2,Energy_R2,Load_RMSE_kN,Load_MAE_kN,Train_time_s,Capacity
+Linear,0.1041,0.9712,0.1459,0.1153,0.0,6
+RandomForest,0.2146,0.9753,0.1366,0.098,0.2,100 trees
+XGBoost,-1.0147,0.9061,0.2188,0.1412,2.5,100 trees
+GaussianProcess,0.3017,0.9091,0.1288,0.1025,849.8,N=2000

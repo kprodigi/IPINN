@@ -19,6 +19,7 @@ CSV tables that back every numerical result in the manuscript.
 |---|---|
 | `Table_inverse_verification.csv` | Off-grid round-trip targets (V1, V2) and the infeasibility probe (V3) with verdicts |
 | `Table_forward_design_errors.csv` | Design-level EA/IPF accuracy of the deployed surrogate over all 12 experimental configurations |
+| `Table_baseline_comparison.csv` | Conventional-ML baselines (ridge, random forest, XGBoost, subsampled Matérn GP) on the held-out-angle split |
 | `Table_null_baseline_design_level.csv` | Model-free interpolation floor at the held-out angle |
 | `Table_uncertainty_calibration.csv` | Curve-level split-conformal calibration: raw/corrected coverage and factors |
 | `Table_ea_ipf_scalar_calibration.csv` | Design-level scalar calibration (z-scores of realised design errors vs ensemble σ) |
