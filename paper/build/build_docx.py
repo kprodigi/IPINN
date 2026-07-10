@@ -21,14 +21,16 @@ import sys
 import zipfile
 import xml.etree.ElementTree as ET
 
-REPO = r"C:\IPINN"
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PAPER = os.path.join(REPO, "paper")
 BUILD = os.path.join(PAPER, "build")
 MD = os.path.join(PAPER, "manuscript_v2.md")
+SUPP_MD = os.path.join(PAPER, "supplementary.md")
 TEMPLATE_SRC = r"C:\Users\101198337\Dropbox\Ph.D\Template\PRODIGI PAPER TEMPLATE.docx"
 TEMPLATE_LOCAL = os.path.join(BUILD, "PRODIGI_TEMPLATE_LOCAL.docx")  # repo-local copy
 REF = os.path.join(BUILD, "prodigi_reference.docx")                  # patched reference
 OUT = os.path.join(REPO, "Manuscript_v2.docx")
+SUPP_OUT = os.path.join(REPO, "Supplementary_Material.docx")
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 ET.register_namespace("w", W)
@@ -143,9 +145,10 @@ def style_overrides():
     print("  Title/Author centred; Compact -> 10 pt, no first-line indent")
 
 
-def autofit_tables():
+def autofit_tables(path=None):
     """Gotcha (d) part 1: content-aware column widths in the built docx."""
-    root = ET.fromstring(read_zip_xml(OUT, "word/document.xml"))
+    path = path or OUT
+    root = ET.fromstring(read_zip_xml(path, "word/document.xml"))
     n = 0
     for tbl in root.iter(w("tbl")):
         grid = tbl.find(w("tblGrid"))
@@ -214,7 +217,7 @@ def autofit_tables():
                 tcw.set(w("w"), str(sum(widths[ci:ci + span]) if ci + span <= ncol else widths[-1]))
                 ci += span
         n += 1
-    replace_zip_member(OUT, "word/document.xml",
+    replace_zip_member(path, "word/document.xml",
                        ET.tostring(root, xml_declaration=True, encoding="UTF-8"))
     print(f"  content-aware widths applied to {n} tables")
 
@@ -224,6 +227,7 @@ EMBED_SOURCES = {
     "Fig_architecture_schematic.png": "results_paper_v2",
     "Fig_dataset_overview.png": "results_paper_v2",
     "Fig_mode_signatures.png": "results_mechanics",
+    "Fig_master_curve_collapse.png": "results_mechanics",
     "Fig_unseen_load_curves.png": "results_paper_v2",
     "Fig_parity_unseen.png": "results_paper_v2",
     "Fig_physics_verification.png": "results_paper_v2",
@@ -274,12 +278,13 @@ def main():
     style_overrides()
 
     print("running pandoc")
-    subprocess.run([pandoc, MD, "--reference-doc", REF, "-o", OUT,
-                    "--wrap=none"],
-                   cwd=PAPER, check=True)
-    print(f"  wrote {OUT}")
-
-    autofit_tables()
+    for src, dst in ((MD, OUT), (SUPP_MD, SUPP_OUT)):
+        if not os.path.exists(src):
+            continue
+        subprocess.run([pandoc, src, "--reference-doc", REF, "-o", dst,
+                        "--wrap=none"], cwd=PAPER, check=True)
+        autofit_tables(dst)
+        print(f"  wrote {dst}")
     print("done")
 
 
